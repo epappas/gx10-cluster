@@ -1,0 +1,60 @@
+---
+- name: Install starship prompt
+  ansible.builtin.shell:
+    cmd: set -o pipefail && curl -fsSL https://starship.rs/install.sh | sh -s -- --yes --bin-dir /usr/local/bin
+    executable: /bin/bash
+    creates: /usr/local/bin/starship
+  become: true
+  when: install_starship | bool
+
+- name: Ensure user bin directory exists
+  ansible.builtin.file:
+    path: "{{ primary_home }}/.local/bin"
+    state: directory
+    owner: "{{ primary_user }}"
+    group: "{{ primary_user }}"
+    mode: "0755"
+  become: true
+
+# The shared environment fragment. Both bash and zsh source this, so PATH and
+# CUDA settings are defined exactly once instead of drifting between shells.
+- name: Install shared shell environment
+  ansible.builtin.template:
+    src: gx10env.sh.j2
+    dest: "{{ primary_home }}/.gx10env.sh"
+    owner: "{{ primary_user }}"
+    group: "{{ primary_user }}"
+    mode: "0644"
+  become: true
+
+- name: Source the shared environment from bash and zsh
+  ansible.builtin.blockinfile:
+    path: "{{ primary_home }}/{{ item }}"
+    block: |
+      [ -f "$HOME/.gx10env.sh" ] && . "$HOME/.gx10env.sh"
+    marker: "# {mark} ANSIBLE MANAGED - gx10 environment"
+    create: true
+    owner: "{{ primary_user }}"
+    group: "{{ primary_user }}"
+    mode: "0644"
+  become: true
+  loop:
+    - .bashrc
+    - .zshrc
+
+- name: Install tmux configuration
+  ansible.builtin.copy:
+    src: tmux.conf
+    dest: "{{ primary_home }}/.tmux.conf"
+    owner: "{{ primary_user }}"
+    group: "{{ primary_user }}"
+    mode: "0644"
+    force: false
+  become: true
+
+- name: Set zsh as the login shell
+  ansible.builtin.user:
+    name: "{{ primary_user }}"
+    shell: "{{ default_shell }}"
+  become: true
+  when: default_shell is defined

@@ -1,0 +1,140 @@
+---
+# ============================================================================
+# GX10 cluster configuration
+#
+# Every knob that differs between "what I want" and "what the playbook does"
+# lives here. Roles read these; they do not hardcode versions.
+# ============================================================================
+
+# The human who owns the box. Everything user-scoped installs under this account.
+primary_user: "{{ lookup('env', 'SUDO_USER') | default(ansible_user_id, true) }}"
+primary_home: "/home/{{ primary_user }}"
+
+# ---------------------------------------------------------------------------
+# Feature toggles - flip to false to skip a whole role.
+# Override per-run with:  -e enable_ml=false
+# ---------------------------------------------------------------------------
+enable_base:       true
+enable_docker:     true
+enable_shell:      true
+enable_python:     true
+enable_rust:       true
+enable_node:       true
+enable_ml:         true
+enable_remote:     true
+enable_cluster:    true
+
+# ---------------------------------------------------------------------------
+# Platform facts. These are asserted at run time, not assumed.
+# GB10 (Grace Blackwell) is compute capability 12.1 -> sm_121.
+# ---------------------------------------------------------------------------
+gpu_arch_list: "12.1"
+cuda_major: "13"
+cuda_home: /usr/local/cuda
+
+# ---------------------------------------------------------------------------
+# Python / ML stack
+# torch cu130 aarch64 wheels are the only ones with sm_121 kernels.
+# ---------------------------------------------------------------------------
+torch_index_url: "https://download.pytorch.org/whl/cu130"
+torch_version: "2.13.0"
+
+# The shared ML virtualenv, created and owned by uv.
+ml_venv: "{{ primary_home }}/venvs/ml"
+ml_python: "3.12"
+
+ml_packages:
+  - "torch=={{ torch_version }}"
+  - torchvision
+  - torchaudio
+  - transformers
+  - accelerate
+  - datasets
+  - peft
+  - trl
+  - safetensors
+  - sentencepiece
+  - huggingface-hub[cli,hf_transfer]
+  - bitsandbytes
+  - einops
+  - numpy
+  - pandas
+  - matplotlib
+  - jupyterlab
+  - ipywidgets
+  - rich
+  - tqdm
+
+# Set false to skip the (slow) source build of llama.cpp.
+build_llama_cpp: true
+install_ollama: true
+
+# ---------------------------------------------------------------------------
+# Node.js - nvm-managed so it stays in userland.
+# ---------------------------------------------------------------------------
+nvm_version: "v0.40.1"
+node_version: "22"
+npm_globals:
+  - pnpm
+  - yarn
+  - typescript
+  - tsx
+
+# ---------------------------------------------------------------------------
+# Rust - rustup-managed, stable channel.
+# ---------------------------------------------------------------------------
+rust_channel: stable
+cargo_packages:
+  - eza
+  - bat
+  - fd-find
+  - zoxide
+  - tokei
+  - hyperfine
+
+# ---------------------------------------------------------------------------
+# Shell
+# ---------------------------------------------------------------------------
+default_shell: /usr/bin/zsh
+install_starship: true
+
+# ---------------------------------------------------------------------------
+# Remote access
+# ---------------------------------------------------------------------------
+ssh_port: 22
+# Key-only auth. Make sure your key is in authorized_keys BEFORE this applies,
+# or you will lock yourself out of the remote box.
+ssh_password_auth: false
+ssh_permit_root_login: "no"
+
+enable_ufw: true
+# Subnets allowed to reach SSH. Tighten to your actual LAN.
+ufw_ssh_sources:
+  - 192.168.0.0/16
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+
+install_tailscale: true
+
+# Public keys authorized on every node. Add your laptop's key here.
+authorized_keys: []
+  # - "ssh-ed25519 AAAA... you@laptop"
+
+# ---------------------------------------------------------------------------
+# Cluster interconnect (2x GX10 over ConnectX-7 QSFP)
+#
+# The CX7 appears on the PCI bus only after a QSFP cable links the two boxes
+# (PCIe hotplug, handled by dgx-spark-mlnx-hotplug). Until then the cluster
+# role configures everything it can and skips the link-dependent steps.
+# ---------------------------------------------------------------------------
+cluster_subnet: "10.10.10.0/24"
+cluster_subnet_prefix: 24
+# ConnectX-7 at 200G wants jumbo frames; 1500-byte frames leave most of the
+# link on the table for the large tensors NCCL moves between the nodes.
+cluster_mtu: 9000
+
+# NCCL tuning for a 2-node direct-attach GB10 pair.
+nccl_env:
+  NCCL_SOCKET_IFNAME: "^lo,docker,veth,wl"
+  NCCL_IB_DISABLE: "0"
+  NCCL_DEBUG: "WARN"

@@ -1,0 +1,15 @@
+# Managed by gx10-cluster ansible (roles/cluster). Local edits are overwritten.
+# Static addressing on the direct-attach link between the two GX10 boxes.
+# No gateway and no DNS: this is a point-to-point cable, not a route to
+# anywhere. Default routing stays on the LAN/WiFi interface.
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    {{ cluster_iface }}:
+      dhcp4: false
+      dhcp6: false
+      addresses:
+        - {{ cluster_ip }}/{{ cluster_subnet_prefix }}
+      mtu: {{ cluster_mtu }}
+      optional: true

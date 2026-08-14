@@ -1,0 +1,167 @@
+---
+# ---------------------------------------------------------------------------
+# CUDA libraries
+# The CUDA compute repo is already configured by DGX OS, so NCCL and cuDNN
+# come from apt and stay in step with the CUDA {{ cuda_major }} toolkit.
+# NCCL is what makes the second GX10 useful - it is the transport for
+# multi-node collectives over the ConnectX-7 link.
+# ---------------------------------------------------------------------------
+- name: Install NCCL and cuDNN
+  ansible.builtin.apt:
+    name:
+      - libnccl2
+      - libnccl-dev
+      - "cudnn9-cuda-{{ cuda_major }}"
+    state: present
+    update_cache: true
+  become: true
+
+- name: Install NVIDIA developer tooling
+  ansible.builtin.apt:
+    name:
+      - "cuda-nsight-systems-{{ cuda_major }}-0"
+      - "cuda-nsight-compute-{{ cuda_major }}-0"
+    state: present
+  become: true
+  failed_when: false   # optional; not present in every DGX OS release
+
+# ---------------------------------------------------------------------------
+# The shared ML virtualenv
+# ---------------------------------------------------------------------------
+- name: Create the venv parent directory
+  ansible.builtin.file:
+    path: "{{ ml_venv | dirname }}"
+    state: directory
+    owner: "{{ primary_user }}"
+    group: "{{ primary_user }}"
+    mode: "0755"
+  become: true
+
+- name: Create the ML virtualenv
+  ansible.builtin.command: "{{ primary_home }}/.local/bin/uv venv --python {{ ml_python }} {{ ml_venv }}"
+  args:
+    creates: "{{ ml_venv }}/bin/python"
+  become: true
+  become_user: "{{ primary_user }}"
+
+# torch must come from the cu130 index. The wheels on PyPI are built for
+# x86 CUDA 12 and either fail to install or silently lack sm_121 kernels,
+# which shows up later as "no kernel image is available for execution".
+- name: Install PyTorch aarch64 sm_121 wheels for CUDA {{ cuda_major }}
+  ansible.builtin.command: >-
+    {{ primary_home }}/.local/bin/uv pip install
+    --python {{ ml_venv }}/bin/python
+    --index-url {{ torch_index_url }}
+    torch=={{ torch_version }} torchvision torchaudio
+  become: true
+  become_user: "{{ primary_user }}"
+  register: torch_install
+  changed_when: "'Installed' in (torch_install.stderr | default(''))"
+
+- name: Install the rest of the ML stack
+  ansible.builtin.command: >-
+    {{ primary_home }}/.local/bin/uv pip install
+    --python {{ ml_venv }}/bin/python
+    {{ ml_packages | reject('search', '^torch') | list | join(' ') }}
+  become: true
+  become_user: "{{ primary_user }}"
+  register: ml_install
+  changed_when: "'Installed' in (ml_install.stderr | default(''))"
+
+- name: Verify PyTorch sees the GB10
+  ansible.builtin.command: >-
+    {{ ml_venv }}/bin/python -c
+    "import torch;
+    assert torch.cuda.is_available(), 'CUDA not available to torch';
+    print(torch.__version__, torch.cuda.get_device_name(0), torch.cuda.get_device_capability(0))"
+  become: true
+  become_user: "{{ primary_user }}"
+  register: torch_check
+  changed_when: false
+
+- name: Report the PyTorch check
+  ansible.builtin.debug:
+    msg: "torch: {{ torch_check.stdout }}"
+
+# ---------------------------------------------------------------------------
+# Ollama - easiest path to running local models
+# ---------------------------------------------------------------------------
+- name: Install ollama
+  ansible.builtin.shell:
+    cmd: set -o pipefail && curl -fsSL https://ollama.com/install.sh | sh
+    executable: /bin/bash
+    creates: /usr/local/bin/ollama
+  become: true
+  when: install_ollama | bool
+
+- name: Ensure the ollama override directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/system/ollama.service.d
+    state: directory
+    mode: "0755"
+  become: true
+  when: install_ollama | bool
+
+- name: Configure ollama to listen on the cluster network
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/ollama.service.d/override.conf
+    mode: "0644"
+    content: |
+      # Managed by gx10-cluster ansible.
+      [Service]
+      # Reachable from the other node and from your laptop, not just localhost.
+      Environment="OLLAMA_HOST=0.0.0.0:11434"
+      # 128 GB of unified memory means large models stay resident; keep them
+      # loaded rather than paying the reload cost on every request.
+      Environment="OLLAMA_KEEP_ALIVE=30m"
+      Environment="OLLAMA_MAX_LOADED_MODELS=2"
+  become: true
+  when: install_ollama | bool
+  notify: Restart ollama
+
+# ---------------------------------------------------------------------------
+# llama.cpp - built from source with CUDA for sm_121
+# ---------------------------------------------------------------------------
+- name: Clone llama.cpp
+  ansible.builtin.git:
+    repo: https://github.com/ggml-org/llama.cpp.git
+    dest: "{{ primary_home }}/src/llama.cpp"
+    version: master
+    depth: 1
+  become: true
+  become_user: "{{ primary_user }}"
+  when: build_llama_cpp | bool
+  register: llama_src
+
+- name: Build llama.cpp with CUDA
+  ansible.builtin.shell:
+    cmd: |
+      set -e
+      cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=121 -DCMAKE_BUILD_TYPE=Release
+      cmake --build build --config Release -j{{ ansible_processor_vcpus | default(20) }}
+    chdir: "{{ primary_home }}/src/llama.cpp"
+    creates: "{{ primary_home }}/src/llama.cpp/build/bin/llama-cli"
+  become: true
+  become_user: "{{ primary_user }}"
+  environment:
+    PATH: "{{ cuda_home }}/bin:{{ ansible_env.PATH }}"
+    CUDA_HOME: "{{ cuda_home }}"
+  when: build_llama_cpp | bool
+  async: 3600
+  poll: 30
+
+- name: Link llama.cpp binaries onto PATH
+  ansible.builtin.file:
+    src: "{{ primary_home }}/src/llama.cpp/build/bin/{{ item }}"
+    dest: "{{ primary_home }}/.local/bin/{{ item }}"
+    state: link
+    force: true
+  become: true
+  become_user: "{{ primary_user }}"
+  loop:
+    - llama-cli
+    - llama-server
+    - llama-bench
+    - llama-quantize
+  when: build_llama_cpp | bool
+  failed_when: false

@@ -1,0 +1,79 @@
+---
+# Docker and the NVIDIA Container Toolkit ship with DGX OS, so this role
+# configures rather than installs. The part that is actually missing on a
+# fresh GX10 is group membership - without it every docker call needs sudo.
+
+- name: Ensure docker is installed
+  ansible.builtin.apt:
+    name:
+      - docker.io
+      - docker-buildx
+      - docker-compose-v2
+    state: present
+  become: true
+  register: docker_pkg
+  failed_when:
+    - docker_pkg.failed
+    - "'is already the newest version' not in (docker_pkg.msg | default(''))"
+
+- name: Ensure NVIDIA Container Toolkit is installed
+  ansible.builtin.apt:
+    name:
+      - nvidia-container-toolkit
+      - nvidia-container-toolkit-base
+    state: present
+  become: true
+
+- name: Add primary user to the docker group
+  ansible.builtin.user:
+    name: "{{ primary_user }}"
+    groups: docker
+    append: true
+  become: true
+  register: docker_group
+
+- name: Note that a re-login is needed for docker group membership
+  ansible.builtin.debug:
+    msg: >-
+      {{ primary_user }} was added to the docker group. Log out and back in
+      (or run `newgrp docker`) before docker works without sudo.
+  when: docker_group.changed
+
+- name: Register the NVIDIA runtime with the docker daemon
+  ansible.builtin.command: nvidia-ctk runtime configure --runtime=docker --set-as-default
+  become: true
+  register: ctk
+  changed_when: "'Config file has been modified' in (ctk.stderr | default(''))"
+  notify: Restart docker
+
+# Defaults tuned for an ML box. nvidia-ctk owns the "runtimes" block of
+# daemon.json, so read what is there and merge rather than overwrite -
+# clobbering it would strip the NVIDIA runtime registration added above.
+- name: Read existing docker daemon.json
+  ansible.builtin.slurp:
+    src: /etc/docker/daemon.json
+  become: true
+  register: daemon_json_raw
+  failed_when: false
+
+- name: Merge GX10 defaults into daemon.json
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    mode: "0644"
+    backup: true
+    content: |
+      {{
+        ((daemon_json_raw.content | default('') | b64decode | from_json)
+           if (daemon_json_raw.content is defined) else {})
+        | combine(docker_gx10_defaults)
+        | to_nice_json(indent=2)
+      }}
+  become: true
+  notify: Restart docker
+
+- name: Enable and start docker
+  ansible.builtin.systemd:
+    name: docker
+    enabled: true
+    state: started
+  become: true

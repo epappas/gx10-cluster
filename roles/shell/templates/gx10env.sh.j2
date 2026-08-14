@@ -1,0 +1,91 @@
+#!/bin/sh
+# ---------------------------------------------------------------------------
+# Managed by gx10-cluster ansible (roles/shell). Local edits are overwritten.
+# Sourced by both ~/.bashrc and ~/.zshrc, so keep this POSIX-compatible and
+# branch on $ZSH_VERSION / $BASH_VERSION for anything shell-specific.
+# ---------------------------------------------------------------------------
+
+# --- PATH ------------------------------------------------------------------
+_gx10_path_prepend() {
+    case ":${PATH}:" in
+        *":$1:"*) ;;
+        *) [ -d "$1" ] && PATH="$1:${PATH}" ;;
+    esac
+}
+
+_gx10_path_prepend "{{ cuda_home }}/bin"
+_gx10_path_prepend "$HOME/.cargo/bin"
+_gx10_path_prepend "$HOME/.local/bin"
+export PATH
+
+# --- CUDA ------------------------------------------------------------------
+export CUDA_HOME="{{ cuda_home }}"
+export LD_LIBRARY_PATH="{{ cuda_home }}/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+# GB10 is Grace Blackwell, compute capability {{ gpu_arch_list }} (sm_121).
+# Setting this stops CUDA extension builds (flash-attn, bitsandbytes, custom
+# kernels) from compiling for every architecture PyTorch knows about.
+export TORCH_CUDA_ARCH_LIST="{{ gpu_arch_list }}"
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+
+# --- NCCL ------------------------------------------------------------------
+{% for k, v in nccl_env.items() %}
+export {{ k }}="{{ v }}"
+{% endfor %}
+
+# --- Hugging Face ----------------------------------------------------------
+# Weights land on the NVMe under $HOME, not in a tmpfs. hf_transfer gives
+# much faster parallel downloads for the multi-hundred-GB checkpoints this
+# box can actually hold in its 128 GB of unified memory.
+export HF_HOME="$HOME/.cache/huggingface"
+export HF_HUB_ENABLE_HF_TRANSFER=1
+
+# --- Build -----------------------------------------------------------------
+export MAKEFLAGS="-j{{ ansible_processor_vcpus | default(20) }}"
+export CMAKE_GENERATOR=Ninja
+[ -d /usr/lib/ccache ] && _gx10_path_prepend /usr/lib/ccache && export PATH
+
+# --- Node (nvm) ------------------------------------------------------------
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+
+# --- The shared ML virtualenv ----------------------------------------------
+# Not activated automatically - `ml` puts you in it on demand.
+alias ml='. {{ ml_venv }}/bin/activate'
+
+# --- Aliases ---------------------------------------------------------------
+alias gpu='nvidia-smi'
+alias gpuw='watch -n1 nvidia-smi'
+alias ports='ss -tulpn'
+command -v eza >/dev/null 2>&1 && alias ls='eza --group-directories-first' && alias ll='eza -lah --git --group-directories-first'
+command -v bat >/dev/null 2>&1 && alias cat='bat --paging=never'
+command -v fdfind >/dev/null 2>&1 && alias fd='fdfind'
+
+# Cluster shorthand: run a command on the other GX10.
+alias other='ssh {{ "gx10-b" if (cluster_rank | default(0) | int) == 0 else "gx10-a" }}'
+
+# --- Prompt and shell integrations -----------------------------------------
+if command -v starship >/dev/null 2>&1; then
+    if [ -n "$ZSH_VERSION" ]; then
+        eval "$(starship init zsh)"
+    elif [ -n "$BASH_VERSION" ]; then
+        eval "$(starship init bash)"
+    fi
+fi
+
+if command -v zoxide >/dev/null 2>&1; then
+    if [ -n "$ZSH_VERSION" ]; then
+        eval "$(zoxide init zsh)"
+    elif [ -n "$BASH_VERSION" ]; then
+        eval "$(zoxide init bash)"
+    fi
+fi
+
+# fzf keybindings ship in the Ubuntu package at a fixed location.
+if [ -n "$ZSH_VERSION" ]; then
+    [ -f /usr/share/doc/fzf/examples/key-bindings.zsh ] && . /usr/share/doc/fzf/examples/key-bindings.zsh
+    [ -f /usr/share/zsh/vendor-completions/_fzf ] && true
+elif [ -n "$BASH_VERSION" ]; then
+    [ -f /usr/share/doc/fzf/examples/key-bindings.bash ] && . /usr/share/doc/fzf/examples/key-bindings.bash
+    [ -f /usr/share/bash-completion/completions/fzf ] && . /usr/share/bash-completion/completions/fzf
+fi

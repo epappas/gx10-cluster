@@ -1,0 +1,54 @@
+---
+# Read-only health check. Run after site.yml, and any time the box behaves
+# oddly. Changes nothing.
+#
+#   ansible-playbook verify.yml
+
+- name: Verify GX10 node
+  hosts: gx10
+  gather_facts: true
+
+  tasks:
+    - name: Collect checks
+      ansible.builtin.shell:
+        cmd: "{{ item.cmd }}"
+        executable: /bin/bash
+      loop:
+        - { name: "GPU",            cmd: "nvidia-smi --query-gpu=name,driver_version,temperature.gpu --format=csv,noheader" }
+        - { name: "CUDA toolkit",   cmd: "nvcc --version | tail -1" }
+        - { name: "docker (no sudo)", cmd: "docker info --format '{{ '{{' }}.ServerVersion{{ '}}' }} runtime={{ '{{' }}.DefaultRuntime{{ '}}' }}'" }
+        - { name: "docker + GPU",   cmd: "docker run --rm --gpus all ubuntu:24.04 nvidia-smi -L 2>&1 | tail -1" }
+        - { name: "NCCL",           cmd: "dpkg -l libnccl2 | awk '/^ii/{print $3}'" }
+        - name: "torch"
+          cmd: >-
+            {{ ml_venv }}/bin/python -c "import torch;
+            print(torch.__version__, torch.cuda.is_available(),
+            torch.cuda.get_device_name(0),
+            'sm_'+''.join(map(str, torch.cuda.get_device_capability(0))))"
+        - name: "torch matmul"
+          cmd: >-
+            {{ ml_venv }}/bin/python -c "import torch;
+            x=torch.randn(4096, 4096, device='cuda');
+            print('ok', (x@x).sum().item() != 0)"
+        - { name: "torch NCCL",     cmd: "{{ ml_venv }}/bin/python -c \"import torch;print('nccl', torch.distributed.is_nccl_available())\"" }
+        - { name: "rust",           cmd: "$HOME/.cargo/bin/rustc --version" }
+        - { name: "node",           cmd: "source $HOME/.nvm/nvm.sh && node --version" }
+        - { name: "uv",             cmd: "$HOME/.local/bin/uv --version" }
+        - { name: "ollama",         cmd: "systemctl is-active ollama && ollama --version 2>&1 | tail -1" }
+        - { name: "llama.cpp",      cmd: "$HOME/.local/bin/llama-cli --version 2>&1 | head -1" }
+        - { name: "sshd",           cmd: "systemctl is-active ssh" }
+        - { name: "ufw",            cmd: "sudo ufw status | head -1" }
+        - { name: "RDMA devices",   cmd: "ibv_devices 2>/dev/null | tail -n +3 | wc -l" }
+        - { name: "interconnect",   cmd: "ip -br addr show | grep -E '10\\.10\\.10\\.' || echo 'not configured (cable not connected?)'" }
+      register: checks
+      changed_when: false
+      failed_when: false
+      become: true
+      become_user: "{{ primary_user }}"
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: "{{ '%-16s' | format(item.item.name) }} {{ (item.stdout | default(item.stderr) | default('FAILED')) | trim | truncate(110) }}"
+      loop: "{{ checks.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"

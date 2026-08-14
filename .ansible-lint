@@ -1,0 +1,19 @@
+---
+# Rules skipped deliberately, with reasons.
+skip_list:
+  # Feature-toggle and package blocks in group_vars are column-aligned for
+  # readability; that is the point of them, not an accident.
+  - yaml[colons]
+  - yaml[commas]
+
+  # Roles here are private to this repo and never reused elsewhere, so
+  # prefixing every register with the role name is noise. Variables that
+  # cross role boundaries (cluster_*, ml_*) already carry a prefix.
+  - var-naming[no-role-prefix]
+
+  # A debug task that fires on change is a deliberate operator notice
+  # (e.g. "you must re-login for docker group membership"), not a handler.
+  - no-handler
+
+exclude_paths:
+  - .git/

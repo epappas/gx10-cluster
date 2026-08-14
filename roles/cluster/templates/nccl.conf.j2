@@ -1,0 +1,12 @@
+# Managed by gx10-cluster ansible (roles/cluster). Local edits are overwritten.
+# NCCL reads this file at init; values here apply to every process on the box
+# without needing the environment set in each shell or container.
+
+{% for k, v in nccl_env.items() %}
+{{ k }}={{ v }}
+{% endfor %}
+{% if cluster_link_present | default(false) %}
+# Bind collectives to the ConnectX-7 link rather than letting NCCL pick
+# whatever interface sorts first - which on this box would be WiFi.
+NCCL_SOCKET_IFNAME={{ cluster_iface }}
+{% endif %}

@@ -1,0 +1,28 @@
+# Managed by gx10-cluster ansible (roles/remote). Local edits are overwritten.
+# Ubuntu 24.04 reads this from /etc/ssh/sshd_config.d/ and last-match wins,
+# so these settings override the distribution defaults above them.
+
+Port {{ ssh_port }}
+PermitRootLogin {{ ssh_permit_root_login }}
+PubkeyAuthentication yes
+
+{% if (not ssh_password_auth) and (safe_to_disable_passwords | bool) %}
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+{% else %}
+# Password auth left enabled: no authorized_keys present for {{ primary_user }}.
+PasswordAuthentication yes
+{% endif %}
+
+X11Forwarding yes
+AllowAgentForwarding yes
+AllowTcpForwarding yes
+
+# Long-running training jobs sit idle at the prompt for hours; keep the
+# session from being reaped mid-run.
+ClientAliveInterval 60
+ClientAliveCountMax 30
+TCPKeepAlive yes
+
+MaxAuthTries 4
+LoginGraceTime 30

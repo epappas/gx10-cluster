@@ -1,0 +1,22 @@
+---
+# Merged into /etc/docker/daemon.json without disturbing the NVIDIA
+# "runtimes" / "default-runtime" keys that nvidia-ctk manages.
+#
+# default-shm-size 8G: PyTorch DataLoader workers communicate through /dev/shm
+# and the 64 MB docker default kills multi-worker loading immediately.
+# memlock unlimited: required for RDMA page pinning from inside containers.
+docker_gx10_defaults:
+  log-driver: json-file
+  log-opts:
+    max-size: "100m"
+    max-file: "3"
+  default-shm-size: "8G"
+  default-ulimits:
+    memlock:
+      Name: memlock
+      Soft: -1
+      Hard: -1
+    stack:
+      Name: stack
+      Soft: 67108864
+      Hard: 67108864

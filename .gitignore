@@ -1,0 +1,4 @@
+*.retry
+.vault_pass
+host_vars/*.vault.yml
+__pycache__/

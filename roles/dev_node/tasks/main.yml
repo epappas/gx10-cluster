@@ -1,0 +1,41 @@
+---
+# Node goes through nvm rather than apt or NodeSource: it keeps node in
+# userland (no sudo for global installs) and makes switching versions per
+# project trivial. NodeSource arm64 builds also lag behind on this platform.
+
+- name: Install nvm
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail &&
+      curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/{{ nvm_version }}/install.sh
+      | bash
+    executable: /bin/bash
+    creates: "{{ primary_home }}/.nvm/nvm.sh"
+  become: true
+  become_user: "{{ primary_user }}"
+
+- name: Install Node.js {{ node_version }}
+  ansible.builtin.shell:
+    cmd: |
+      set -e
+      . "$HOME/.nvm/nvm.sh"
+      nvm install {{ node_version }}
+      nvm alias default {{ node_version }}
+    executable: /bin/bash
+  become: true
+  become_user: "{{ primary_user }}"
+  register: node_install
+  changed_when: "'already installed' not in (node_install.stdout | default(''))"
+
+- name: Install global npm packages
+  ansible.builtin.shell:
+    cmd: |
+      set -e
+      . "$HOME/.nvm/nvm.sh"
+      nvm use default >/dev/null
+      npm install -g {{ npm_globals | join(' ') }}
+    executable: /bin/bash
+  become: true
+  become_user: "{{ primary_user }}"
+  register: npm_global
+  changed_when: "'added' in (npm_global.stdout | default('')) or 'changed' in (npm_global.stdout | default(''))"

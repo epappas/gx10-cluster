@@ -1,0 +1,145 @@
+---
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+
+- name: Upgrade installed packages
+  ansible.builtin.apt:
+    upgrade: safe
+  become: true
+  register: apt_upgrade
+
+- name: Install build toolchain
+  ansible.builtin.apt:
+    name:
+      - build-essential
+      - cmake
+      - ninja-build
+      - pkg-config
+      - autoconf
+      - automake
+      - libtool
+      - gdb
+      - ccache
+      - libssl-dev
+      - libffi-dev
+      - zlib1g-dev
+      - libbz2-dev
+      - liblzma-dev
+      - libsqlite3-dev
+      - libreadline-dev
+      - libcurl4-openssl-dev
+      - libomp-dev
+    state: present
+  become: true
+
+- name: Install CLI utilities
+  ansible.builtin.apt:
+    name:
+      - git
+      - git-lfs
+      - curl
+      - wget
+      - rsync
+      - unzip
+      - zip
+      - jq
+      - tree
+      - tmux
+      - htop
+      - ncdu
+      - iotop
+      - sysstat
+      - lsof
+      - strace
+      - ripgrep
+      - fzf
+      - neovim
+      - zsh
+      - net-tools
+      - iproute2
+      - ethtool
+      - iperf3
+      - nvme-cli
+      - pciutils
+      - usbutils
+      - smartmontools
+      - software-properties-common
+      - ca-certificates
+      - gnupg
+      - python3-pip
+      - python3-venv
+    state: present
+  become: true
+
+- name: Initialise git-lfs for the primary user
+  ansible.builtin.command: git lfs install
+  become: true
+  become_user: "{{ primary_user }}"
+  register: lfs_init
+  changed_when: "'already initialized' not in lfs_init.stdout"
+
+# --- Unattended security updates ------------------------------------------
+- name: Install unattended-upgrades
+  ansible.builtin.apt:
+    name:
+      - unattended-upgrades
+      - apt-listchanges
+    state: present
+  become: true
+
+- name: Enable unattended security upgrades
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    mode: "0644"
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+      APT::Periodic::AutocleanInterval "7";
+  become: true
+
+# --- Kernel tuning for large-model workloads ------------------------------
+# Big unified-memory jobs open a lot of files and map a lot of regions;
+# the stock limits are sized for a laptop, not a 128 GB coherent node.
+- name: Tune sysctl for large-memory ML workloads
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/90-gx10.conf
+    reload: true
+    state: present
+  loop:
+    - { key: vm.max_map_count,              value: "1048576" }
+    - { key: fs.file-max,                   value: "2097152" }
+    - { key: fs.inotify.max_user_watches,   value: "524288" }
+    - { key: net.core.rmem_max,             value: "268435456" }
+    - { key: net.core.wmem_max,             value: "268435456" }
+    - { key: net.ipv4.tcp_rmem,             value: "4096 87380 268435456" }
+    - { key: net.ipv4.tcp_wmem,             value: "4096 65536 268435456" }
+  become: true
+
+- name: Raise file descriptor and memlock limits
+  ansible.builtin.copy:
+    dest: /etc/security/limits.d/90-gx10.conf
+    mode: "0644"
+    content: |
+      # Managed by gx10-cluster ansible. Do not edit by hand.
+      # memlock unlimited is required for RDMA (ConnectX-7) page pinning.
+      *    soft    nofile      1048576
+      *    hard    nofile      1048576
+      *    soft    memlock     unlimited
+      *    hard    memlock     unlimited
+      *    soft    stack       unlimited
+  become: true
+
+- name: Report whether a reboot is pending
+  ansible.builtin.stat:
+    path: /var/run/reboot-required
+  register: reboot_required
+
+- name: Warn on pending reboot
+  ansible.builtin.debug:
+    msg: "A reboot is pending on {{ ansible_hostname }} (kernel or driver update)."
+  when: reboot_required.stat.exists

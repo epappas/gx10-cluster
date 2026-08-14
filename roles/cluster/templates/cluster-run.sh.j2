@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Managed by gx10-cluster ansible (roles/cluster). Local edits are overwritten.
+#
+# Launch a torchrun job across both GX10 nodes from whichever node you are on.
+#
+#   cluster-run allreduce_test.py
+#   cluster-run train.py --epochs 3
+#
+# It SSHes to the peer, starts the matching rank there, then runs rank-local
+# in the foreground so Ctrl-C tears down both sides.
+set -euo pipefail
+
+SCRIPT="${1:?usage: cluster-run <script.py> [args...]}"
+shift || true
+
+MASTER_ADDR="{{ cluster_master_ip }}"
+MASTER_PORT="{{ cluster_master_port }}"
+NNODES={{ groups['gx10'] | length }}
+NPROC_PER_NODE=1          # one GB10 per box
+MY_RANK={{ cluster_rank }}
+VENV="{{ ml_venv }}"
+
+{% set peers = groups['gx10'] | difference([inventory_hostname]) %}
+{% if peers | length > 0 %}
+PEER="{{ peers[0] }}"
+PEER_RANK={{ hostvars[peers[0]].cluster_rank }}
+{% else %}
+PEER=""
+{% endif %}
+
+if [[ ! -f "$SCRIPT" ]]; then
+    echo "!! no such script: $SCRIPT" >&2
+    exit 1
+fi
+ABS_SCRIPT="$(readlink -f "$SCRIPT")"
+
+launch() {
+    local rank="$1"
+    echo "$VENV/bin/torchrun \
+        --nnodes $NNODES --nproc_per_node $NPROC_PER_NODE \
+        --node_rank $rank --master_addr $MASTER_ADDR --master_port $MASTER_PORT \
+        $ABS_SCRIPT $*"
+}
+
+if [[ -n "$PEER" ]]; then
+    echo "==> starting rank $PEER_RANK on $PEER"
+    ssh "$PEER" "cd $(pwd) && $(launch "$PEER_RANK" "$@")" &
+    PEER_PID=$!
+    trap 'kill $PEER_PID 2>/dev/null || true; ssh "$PEER" "pkill -f torchrun" 2>/dev/null || true' EXIT
+    sleep 2
+fi
+
+echo "==> starting rank $MY_RANK locally"
+eval "$(launch "$MY_RANK" "$@")"
+
+[[ -n "$PEER" ]] && wait $PEER_PID || true

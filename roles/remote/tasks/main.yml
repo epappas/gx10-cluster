@@ -1,0 +1,146 @@
+---
+- name: Install openssh-server
+  ansible.builtin.apt:
+    name: openssh-server
+    state: present
+  become: true
+
+- name: Ensure .ssh directory exists
+  ansible.builtin.file:
+    path: "{{ primary_home }}/.ssh"
+    state: directory
+    owner: "{{ primary_user }}"
+    group: "{{ primary_user }}"
+    mode: "0700"
+  become: true
+
+- name: Install authorized keys
+  ansible.posix.authorized_key:
+    user: "{{ primary_user }}"
+    key: "{{ item }}"
+    state: present
+  become: true
+  loop: "{{ authorized_keys }}"
+  when: authorized_keys | length > 0
+
+# Password auth is only turned off once a key is actually present. Disabling
+# it on a box with an empty authorized_keys locks you out permanently, and on
+# the second node that means a trip to the machine with a keyboard.
+- name: Check for existing authorized keys
+  ansible.builtin.stat:
+    path: "{{ primary_home }}/.ssh/authorized_keys"
+  register: authkeys_file
+  become: true
+
+- name: Decide whether it is safe to disable password auth
+  ansible.builtin.set_fact:
+    safe_to_disable_passwords: >-
+      {{ (authorized_keys | length > 0)
+         or (authkeys_file.stat.exists and authkeys_file.stat.size | default(0) > 0) }}
+
+- name: Warn when password auth must stay enabled
+  ansible.builtin.debug:
+    msg: >-
+      No authorized_keys found for {{ primary_user }}. Leaving password
+      authentication ENABLED to avoid a lockout. Add your public key to
+      group_vars/all.yml (authorized_keys) and re-run with --tags remote.
+  when:
+    - not ssh_password_auth
+    - not (safe_to_disable_passwords | bool)
+
+- name: Harden sshd
+  ansible.builtin.template:
+    src: 99-gx10.conf.j2
+    dest: /etc/ssh/sshd_config.d/99-gx10.conf
+    mode: "0644"
+    validate: "/usr/sbin/sshd -t -f %s"
+  become: true
+  notify: Restart ssh
+
+- name: Enable and start sshd
+  ansible.builtin.systemd:
+    name: ssh
+    enabled: true
+    state: started
+  become: true
+
+# --- Firewall --------------------------------------------------------------
+- name: Install ufw
+  ansible.builtin.apt:
+    name: ufw
+    state: present
+  become: true
+  when: enable_ufw | bool
+
+- name: Allow SSH from trusted subnets
+  community.general.ufw:
+    rule: allow
+    port: "{{ ssh_port }}"
+    proto: tcp
+    src: "{{ item }}"
+    comment: "ssh from {{ item }}"
+  become: true
+  loop: "{{ ufw_ssh_sources }}"
+  when: enable_ufw | bool
+
+# The direct-attach link between the two GX10s is a private cable, not a
+# network anyone else is on. Trust it wholesale so NCCL, torchrun and the
+# RDMA stack are not fighting the firewall.
+- name: Allow all traffic on the cluster interconnect subnet
+  community.general.ufw:
+    rule: allow
+    src: "{{ cluster_subnet }}"
+    comment: "gx10 cluster interconnect"
+  become: true
+  when:
+    - enable_ufw | bool
+    - cluster_subnet is defined
+
+- name: Enable ufw with default deny incoming
+  community.general.ufw:
+    state: enabled
+    policy: deny
+    direction: incoming
+  become: true
+  when: enable_ufw | bool
+
+- name: Allow outbound traffic
+  community.general.ufw:
+    policy: allow
+    direction: outgoing
+  become: true
+  when: enable_ufw | bool
+
+# --- Tailscale -------------------------------------------------------------
+# For reaching the box from outside the LAN without exposing sshd to the
+# internet. Installed but not authenticated - run `sudo tailscale up` once.
+- name: Install tailscale
+  ansible.builtin.shell:
+    cmd: set -o pipefail && curl -fsSL https://tailscale.com/install.sh | sh
+    executable: /bin/bash
+    creates: /usr/bin/tailscale
+  become: true
+  when: install_tailscale | bool
+
+- name: Enable tailscaled
+  ansible.builtin.systemd:
+    name: tailscaled
+    enabled: true
+    state: started
+  become: true
+  when: install_tailscale | bool
+
+- name: Report tailscale status
+  ansible.builtin.command: tailscale status --json
+  become: true
+  register: ts_status
+  changed_when: false
+  failed_when: false
+  when: install_tailscale | bool
+
+- name: Note if tailscale still needs authentication
+  ansible.builtin.debug:
+    msg: "tailscale is installed but not logged in. Run: sudo tailscale up"
+  when:
+    - install_tailscale | bool
+    - ts_status.rc | default(1) != 0 or 'NeedsLogin' in (ts_status.stdout | default(''))
