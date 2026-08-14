@@ -1,0 +1,48 @@
+---
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# CI runs only the checks that do not need the hardware. The GB10, the CUDA
+# driver and the ConnectX-7 cannot be faked in a container, so anything that
+# touches them is a `make` target you run on the box - see docs/contributing.md.
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ansible and linters
+        run: |
+          pipx install --include-deps ansible-core
+          pipx inject ansible-core ansible
+          pipx install ansible-lint
+          pipx install yamllint
+
+      - name: yamllint
+        run: yamllint .
+
+      - name: ansible-lint
+        run: ansible-lint --nocolor
+
+      - name: Syntax check
+        run: |
+          ansible-playbook site.yml --syntax-check
+          ansible-playbook verify.yml --syntax-check
+
+      # --syntax-check does not load stdout callbacks, so it passes on a
+      # config that aborts every real run. This repo shipped exactly that bug
+      # once; the smoke target exists so it cannot happen again silently.
+      - name: Smoke test the ansible config
+        run: make smoke
+
+      - name: shellcheck
+        run: shellcheck bootstrap.sh

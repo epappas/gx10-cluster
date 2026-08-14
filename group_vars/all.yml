@@ -125,8 +125,8 @@ ssh_permit_root_login: "no"
 
 # Password auth is disabled ONLY when a declared key is proven to work.
 # See roles/remote - the guard is a real login probe, not a file check.
+# Example entry: "ssh-ed25519 AAAA... you@laptop"
 authorized_keys: []
-  # - "ssh-ed25519 AAAA... you@laptop"
 
 enable_ufw: true
 ufw_ssh_sources:

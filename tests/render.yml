@@ -1,0 +1,75 @@
+---
+# Render every template against real facts.
+#
+# This exists because neither ansible-lint nor --syntax-check evaluates a
+# template. An undefined variable, a typo'd filter or a bad slice only shows
+# up when Jinja actually runs - which, without this, means the first time you
+# provision a machine.
+#
+# Facts normally set at runtime by the roles are supplied here for both
+# branches, so conditional blocks get exercised too.
+#
+#   make render
+
+- name: Render all templates
+  hosts: gx10
+  gather_facts: true
+
+  vars:
+    out: /tmp/gx10-render
+    # Template lookups resolve relative to THIS playbook's directory, so
+    # paths must be anchored at the repo root explicitly.
+    repo_root: "{{ playbook_dir | dirname }}"
+
+    # roles/cluster sets these after hardware detection
+    cluster_link_present: true
+    cluster_ifaces: [enp1s0f1np1, enP2p1s0f1np1]
+
+    # roles/remote sets this after the public-key login probe
+    safe_to_disable_passwords: false
+
+  tasks:
+    - name: Ensure the output directory exists
+      ansible.builtin.file:
+        path: "{{ out }}"
+        state: directory
+        mode: "0700"
+
+    - name: Render every template in the repo
+      ansible.builtin.template:
+        src: "{{ item }}"
+        dest: "{{ out }}/{{ item | basename | regex_replace('\\.j2$', '') }}"
+        mode: "0644"
+      loop:
+        - "{{ repo_root }}/roles/shell/templates/gx10env.sh.j2"
+        - "{{ repo_root }}/roles/cluster/templates/nccl.conf.j2"
+        - "{{ repo_root }}/roles/remote/templates/99-gx10.conf.j2"
+
+    # The shell fragment is sourced by every login. A syntax error in it
+    # breaks the shell for the user, which lint cannot catch.
+    - name: Check the rendered shell fragment parses
+      ansible.builtin.command: "sh -n {{ out }}/gx10env.sh"
+      changed_when: false
+
+    # Renders the OTHER branch of the password-auth conditional, so both
+    # paths through the sshd template are exercised.
+    - name: Render the sshd fragment with passwords disabled
+      ansible.builtin.template:
+        src: "{{ repo_root }}/roles/remote/templates/99-gx10.conf.j2"
+        dest: "{{ out }}/99-gx10-nopass.conf"
+        mode: "0644"
+      vars:
+        safe_to_disable_passwords: true
+
+    - name: Assert the disabled-password branch actually disables passwords
+      ansible.builtin.lineinfile:
+        path: "{{ out }}/99-gx10-nopass.conf"
+        line: "PasswordAuthentication no"
+        state: present
+      check_mode: true
+      register: nopass
+      failed_when: nopass.changed
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: "rendered {{ 4 }} templates to {{ out }}"

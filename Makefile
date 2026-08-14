@@ -1,0 +1,91 @@
+# One entry point for everything. `make` on its own lists the targets.
+#
+# The split that matters: `check` targets run anywhere and are what CI runs.
+# `apply`, `verify` and `idempotence` need the real hardware and sudo, so they
+# are never in CI - the GB10, the CUDA driver and the ConnectX-7 cannot be
+# faked in a container.
+
+SHELL := /bin/bash
+export PATH := $(HOME)/.local/bin:$(PATH)
+
+LIMIT ?=
+TAGS  ?=
+ANSIBLE_ARGS := $(if $(LIMIT),--limit $(LIMIT),) $(if $(TAGS),--tags $(TAGS),)
+
+.DEFAULT_GOAL := help
+
+.PHONY: help
+help:  ## Show this help
+	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
+		| awk 'BEGIN{FS=":.*?## "}{printf "  \033[1m%-14s\033[0m %s\n", $$1, $$2}'
+
+# --- Checks that run anywhere (and in CI) ----------------------------------
+
+.PHONY: check
+check: lint syntax smoke render  ## Run every offline check (what CI runs)
+
+.PHONY: lint
+lint:  ## ansible-lint at the production profile
+	ansible-lint --nocolor
+
+.PHONY: syntax
+syntax:  ## Parse the playbooks
+	ansible-playbook site.yml --syntax-check
+	ansible-playbook verify.yml --syntax-check
+
+# --syntax-check does NOT load stdout callbacks, so it passes on a config that
+# aborts every real run - exactly the bug that shipped once. Execute a trivial
+# play so the whole config path is exercised for real.
+.PHONY: smoke
+smoke:  ## Prove ansible.cfg actually loads and a play can run
+	@printf '%s\n' \
+		'- hosts: localhost' \
+		'  connection: local' \
+		'  gather_facts: false' \
+		'  tasks: [{ ansible.builtin.debug: { msg: ok } }]' > .smoke.yml
+	@ansible-playbook .smoke.yml > /dev/null && echo "smoke: ansible.cfg loads, play runs" \
+		|| { echo "smoke: FAILED - ansible.cfg is broken"; ansible-playbook .smoke.yml; rm -f .smoke.yml; exit 1; }
+	@rm -f .smoke.yml
+
+# Templates are the other thing lint cannot see: an undefined variable or a
+# bad filter only surfaces when it renders against real facts.
+.PHONY: render
+render:  ## Render every template against real facts
+	@ansible-playbook tests/render.yml -e out=$$(mktemp -d) > /dev/null \
+		&& echo "render: all templates render" \
+		|| { echo "render: FAILED"; ansible-playbook tests/render.yml -e out=$$(mktemp -d); exit 1; }
+
+.PHONY: shellcheck
+shellcheck:  ## Lint the shell scripts (skipped if shellcheck is absent)
+	@command -v shellcheck > /dev/null \
+		&& shellcheck bootstrap.sh && echo "shellcheck: clean" \
+		|| echo "shellcheck: not installed locally - CI runs it"
+
+# --- Targets that need the real hardware -----------------------------------
+
+.PHONY: diff
+diff:  ## Dry run showing what would change (-K prompts for sudo)
+	ansible-playbook site.yml -K --check --diff $(ANSIBLE_ARGS)
+
+.PHONY: apply
+apply:  ## Provision (-K prompts for sudo). Run under tmux.
+	ansible-playbook site.yml -K $(ANSIBLE_ARGS)
+
+.PHONY: verify
+verify:  ## Assert the node is in the expected state; fails loudly if not
+	ansible-playbook verify.yml $(ANSIBLE_ARGS)
+
+# The canonical Ansible test: a correct playbook changes nothing on a second
+# run. Anything reported changed here is a bug in a changed_when, a missing
+# `creates:`, or a task that rewrites a file every time.
+.PHONY: idempotence
+idempotence:  ## Apply twice; the second run must report zero changes
+	@echo "==> first run"
+	@ansible-playbook site.yml -K $(ANSIBLE_ARGS) > /dev/null
+	@echo "==> second run (must be changed=0)"
+	@ansible-playbook site.yml -K $(ANSIBLE_ARGS) | tee .idem.log | tail -20
+	@if grep -qE 'changed=[1-9]' .idem.log; then \
+		echo; echo "IDEMPOTENCE FAILED - these tasks reported changed on a no-op run:"; \
+		grep -B2 'changed:' .idem.log | grep 'TASK' || true; \
+		rm -f .idem.log; exit 1; \
+	else echo "idempotence: clean"; rm -f .idem.log; fi

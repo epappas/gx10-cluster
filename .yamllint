@@ -1,0 +1,27 @@
+---
+extends: default
+
+rules:
+  # Ansible playbooks are naturally wide; ansible-lint already caps at 160.
+  line-length:
+    max: 160
+    level: warning
+  # Column-aligned blocks in group_vars are deliberate and readable.
+  colons:
+    max-spaces-after: -1
+  commas:
+    max-spaces-after: -1
+  comments:
+    min-spaces-from-content: 1
+  # site.yml lists roles as inline maps, which reads better as a table than
+  # as nine four-line blocks.
+  braces:
+    max-spaces-inside: 1
+  brackets:
+    max-spaces-inside: 1
+  truthy:
+    allowed-values: ["true", "false"]
+    check-keys: false
+
+ignore: |
+  .github/

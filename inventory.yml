@@ -1,13 +1,20 @@
 ---
 # GX10 cluster inventory.
 #
-# To add the second node: uncomment gx10-b, set ansible_host to its LAN
-# address, then run the FULL play (not --limit) so both nodes exchange
-# interconnect SSH keys in the same run:
+# To add the second node, add this block under `hosts:` and run the FULL play
+# (not --limit) so both nodes exchange interconnect SSH keys in the same run:
 #
-#   ansible-playbook site.yml -K
+#     gx10-b:
+#       ansible_host: <node-2-lan-address>
+#       ansible_user: <your-user>
+#       cluster_index: 11
+#       cluster_rank: 1
 #
-# `serial: 1` in site.yml means they are still provisioned one at a time.
+# cluster_index is the host octet on BOTH interconnect subnets, matching
+# NVIDIA's connect-two-sparks playbook: .10 and .11.
+#
+# `serial: 1` in site.yml still provisions them one at a time.
+# See docs/runbooks/provision-node.md
 
 all:
   children:
@@ -15,16 +22,8 @@ all:
       hosts:
         gx10-a:
           ansible_connection: local
-          # Host octet on both interconnect subnets, matching NVIDIA's
-          # connect-two-sparks playbook: 192.168.100.10 + 192.168.101.10
           cluster_index: 10
           cluster_rank: 0
-
-        # gx10-b:
-        #   ansible_host: <node-2-lan-address>
-        #   ansible_user: <your-user>
-        #   cluster_index: 11
-        #   cluster_rank: 1
 
       vars:
         # Rendezvous host for torchrun. Node 0's address on the first subnet.
