@@ -11,9 +11,12 @@ does not check that the prose is *good*, only that nothing is missing.
 from __future__ import annotations
 
 import pathlib
+import re
 import sys
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
+LINK_RE = re.compile(r"\]\(([^)]+)\)")
+NAME_RE = re.compile(r'<a name="([^"]+)"')
 
 
 def missing(index: pathlib.Path, needles: list[str], label: str) -> list[str]:
@@ -25,6 +28,39 @@ def missing(index: pathlib.Path, needles: list[str], label: str) -> list[str]:
         for n in sorted(needles)
         if n not in text
     ]
+
+
+def slugify(heading: str) -> str:
+    """GitHub's anchor rule: lowercase, drop punctuation, spaces to hyphens."""
+    text = heading.lstrip("#").strip().lower()
+    kept = [c for c in text if c.isalnum() or c in " -_"]
+    return "".join(kept).replace(" ", "-")
+
+
+def check_links(md: pathlib.Path) -> list[str]:
+    """Relative links must resolve, and anchors must name a real heading.
+
+    A dead anchor is silent - the page loads and quietly ignores the fragment -
+    so nothing but a check like this catches it.
+    """
+    problems: list[str] = []
+    here = md.parent
+    for match in LINK_RE.finditer(md.read_text()):
+        target = match.group(1).strip()
+        if target.startswith(("http://", "https://", "mailto:")):
+            continue
+        path_part, _, anchor = target.partition("#")
+        dest = (here / path_part).resolve() if path_part else md
+        if not dest.exists():
+            problems.append(f"{md.relative_to(REPO)} links to missing {target}")
+            continue
+        if anchor and dest.suffix == ".md":
+            anchors = {slugify(ln) for ln in dest.read_text().splitlines() if ln.startswith("#")}
+            # Explicit <a name="..."> targets count too.
+            anchors |= set(NAME_RE.findall(dest.read_text()))
+            if anchor not in anchors:
+                problems.append(f"{md.relative_to(REPO)} links to {target} - no such anchor")
+    return problems
 
 
 def main() -> int:
@@ -49,18 +85,29 @@ def main() -> int:
     varfiles = [p.name for p in (REPO / "vars").glob("*.yml")]
     problems += missing(REPO / "vars" / "README.md", varfiles, "vars file")
 
+    # Every markdown file's relative links and anchors resolve
+    links = 0
+    for md in sorted(REPO.rglob("*.md")):
+        if ".git" in md.parts:
+            continue
+        links += sum(
+            1 for m in LINK_RE.finditer(md.read_text())
+            if not m.group(1).startswith(("http", "mailto"))
+        )
+        problems += check_links(md)
+
     for p in problems:
         print(f"docs: {p}", file=sys.stderr)
     if problems:
         print(
-            "docs: indexes are stale - add the missing entries, do not delete the check",
+            "docs: fix the entries or links above - do not delete the check",
             file=sys.stderr,
         )
         return 1
 
     print(
-        f"docs: indexes cover {len(roles)} roles, {len(runbooks)} runbooks, "
-        f"{len(refs)} reference docs, {len(varfiles)} vars files"
+        f"docs: {len(roles)} roles, {len(runbooks)} runbooks, {len(refs)} reference docs, "
+        f"{len(varfiles)} vars files indexed; {links} links and anchors resolve"
     )
     return 0
 

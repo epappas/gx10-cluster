@@ -10,6 +10,9 @@ table. If you worked something out at 2am, it belongs here.
 | Set up a brand-new GX10 | [provision-node](provision-node.md) |
 | Cable two boxes and verify the interconnect | [connect-cluster](connect-cluster.md) |
 | Run or serve a model | [serve-models](serve-models.md) |
+| Download or clean up model weights | [manage-models](manage-models.md) |
+| Run a job across both nodes | [run-distributed](run-distributed.md) |
+| See what the machine is doing | [monitoring](monitoring.md) |
 | Update packages without breaking CUDA | [upgrade-drivers](upgrade-drivers.md) |
 | Get back in after an SSH lockout | [recover-ssh-lockout](recover-ssh-lockout.md) |
 | Diagnose anything else | [troubleshoot](troubleshoot.md) |
@@ -29,6 +32,10 @@ fixes it. Otherwise:
 | Interconnect at ~13 Gbps instead of 200 | [connect-cluster](connect-cluster.md#the-13-gbps-trap) |
 | Interconnect at half speed | [connect-cluster](connect-cluster.md#reading-the-result) |
 | Model OOMs or the box crawls | [serve-models](serve-models.md#when-it-fails) |
+| `No space left on device` pulling weights | [manage-models](manage-models.md#failure-modes) |
+| 401/403 downloading a model | [manage-models](manage-models.md#gated-models) |
+| A distributed job hangs before step 1 | [run-distributed](run-distributed.md#failure-modes) |
+| Grafana panels blank, or GPU memory missing | [monitoring](monitoring.md) |
 | A task reports `changed` every run | [troubleshoot](troubleshoot.md#ansible) |
 
 ## Writing one

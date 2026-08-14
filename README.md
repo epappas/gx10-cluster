@@ -27,6 +27,9 @@ Task-oriented. Start here.
 | Get back in after an SSH lockout | [recover-ssh-lockout](docs/runbooks/recover-ssh-lockout.md) |
 | Update packages without breaking CUDA | [upgrade-drivers](docs/runbooks/upgrade-drivers.md) |
 | Run or serve a model | [serve-models](docs/runbooks/serve-models.md) |
+| Download or clean up model weights | [manage-models](docs/runbooks/manage-models.md) |
+| Run a job across both nodes | [run-distributed](docs/runbooks/run-distributed.md) |
+| See what the machine is doing | [monitoring](docs/runbooks/monitoring.md) |
 | Fix something that's broken | [troubleshoot](docs/runbooks/troubleshoot.md) |
 | Change this repo safely | [contributing](docs/contributing.md) |
 

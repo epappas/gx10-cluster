@@ -15,21 +15,10 @@ of the ML venv: a bad version is a tag change, not a rebuild.
 
 ## What fits
 
-Measured against ~114 GB usable of the 121 GB unified pool.
-
-| Model | Size | One node? |
-|---|---|---|
-| `Qwen/Qwen3-8B` | 15.3 GB | yes |
-| `nvidia/Qwen3.6-27B-NVFP4` | 20.4 GB | yes |
-| `nvidia/Qwen3.6-35B-A3B-NVFP4` | 21.9 GB | yes |
-| `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` | 74.8 GB | yes, ~39 GB spare |
-| `nvidia/Llama-3_3-Nemotron-Super-49B-v1` (bf16) | 92.9 GB | yes, tight |
-| `NVIDIA-Nemotron-3-Super-120B-A12B-FP8` | 119.6 GB | **no** — weights alone exceed available |
-| `NVIDIA-Nemotron-3-Super-120B-A12B-BF16` | 230.3 GB | **no** — needs both nodes |
-
-**Prefer NVFP4.** It is the native format for GB10's Blackwell FP4 tensor
-cores — the same reason llama.cpp compiles for `121a`. Smaller *and* faster
-here, not a quality/size tradeoff in the usual sense.
+Sizes and the disk budget live in [manage-models](manage-models.md#what-fits).
+The short version: prefer **NVFP4** — it is the native format for GB10's
+Blackwell FP4 tensor cores, so it is smaller *and* faster here. The 120B fits
+one node at NVFP4 (74.8 GB) but not at FP8 or BF16.
 
 ## Three ways to run a model
 
@@ -75,51 +64,17 @@ journalctl -u "vllm@$(systemd-escape 'nvidia/Qwen3.6-27B-NVFP4')" -f
 `systemd-escape` is not optional — model ids contain both `/` and `-`, and only
 systemd's own escaping round-trips them correctly.
 
-## Downloading weights
+## Both nodes
 
-```bash
-make models                      # the sets in group_vars/all.yml
-ml && hf download <model-id>     # one off
-```
-
-Downloads are resumable, so an interrupted pull costs only time. The role
-refuses to start if it would leave less than `model_min_free_gb` free.
-
-To add a set, edit `model_sets` in `group_vars/all.yml`:
-
-```yaml
-model_sets: [smoke, nvfp4, large]   # large = the 49B bf16
-```
-
-## Both nodes: the 120B at full precision
-
-This is the reason to cable the second box. 230.3 GB of BF16 weights do not fit
-one node, but they fit across two (~242 GB combined) with tensor parallelism.
-
-Prerequisites: [interconnect up](connect-cluster.md), and Ray, which vLLM uses
-for multi-node TP:
-
-```bash
-make orchestrator TAGS=ray
-~/venvs/ml/bin/ray status          # both nodes present?
-```
-
-Then on the head:
-
-```bash
-vllm-serve nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --tensor-parallel-size 2
-```
-
-Be honest about the margin: 230 GB of 242 GB leaves ~12 GB for KV cache and
-activations, so context length will be tight. **FP8 across two nodes (119.6 GB)
-is the comfortable version of this** and probably what you actually want.
+A model too big for one box is served with Ray plus
+`--tensor-parallel-size 2`; see [run-distributed](run-distributed.md#ray).
 
 ## When it fails
 
 | Symptom | Cause |
 |---|---|
 | `no kernel image is available` | Something used a pip vLLM/torch instead of the container or cu130 index |
-| OOM at load, or the box crawls | Model exceeds the pool — check the table above; lower `vllm_gpu_memory_utilization` |
+| OOM at load, or the box crawls | Model exceeds the pool — see [what fits](manage-models.md#what-fits); lower `vllm_gpu_memory_utilization` |
 | `CUDA error: out of memory` mid-run | KV cache growth; lower `--max-model-len` |
 | Port 8000 refused | Bound to localhost by design — `ssh -L 8000:localhost:8000 <node>` |
 
