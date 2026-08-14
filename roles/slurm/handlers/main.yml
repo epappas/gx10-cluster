@@ -1,0 +1,14 @@
+---
+- name: Restart munge
+  ansible.builtin.systemd:
+    name: munge
+    state: restarted
+  become: true
+
+- name: Restart slurm
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: restarted
+  become: true
+  loop: "{{ (['slurmctld'] if cluster_rank | int == 0 else []) + ['slurmd'] }}"
+  failed_when: false

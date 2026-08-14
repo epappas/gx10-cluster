@@ -1,0 +1,67 @@
+---
+# Pre-load open-weight models into the shared HF cache.
+#
+# Downloads are large and slow, so every task here is guarded: the disk check
+# runs first, and `hf download` is itself resumable and idempotent - it
+# verifies what is already local and fetches only what is missing.
+
+- name: Resolve the models to download
+  ansible.builtin.set_fact:
+    wanted_models: >-
+      {{ model_sets | map('extract', model_catalog) | select('defined') | flatten | unique }}
+
+- name: Report the download plan
+  ansible.builtin.debug:
+    msg: "sets={{ model_sets | join(', ') }} -> {{ wanted_models | length }} model(s): {{ wanted_models | join(', ') }}"
+
+- name: Check free disk
+  ansible.builtin.shell:
+    cmd: "set -o pipefail; df -PBG --output=avail {{ primary_home }} | tail -1 | tr -dc '0-9'"
+    executable: /bin/bash
+  register: free_gb
+  changed_when: false
+
+# Weights are tens to hundreds of GB. Filling the root filesystem on a box
+# whose swap lives there too is a bad afternoon.
+- name: Refuse to fill the disk
+  ansible.builtin.assert:
+    that: free_gb.stdout | int > model_min_free_gb | int
+    fail_msg: >-
+      Only {{ free_gb.stdout }} GB free, below the {{ model_min_free_gb }} GB
+      floor. Free space or lower model_min_free_gb deliberately.
+
+- name: Ensure the HF cache directory exists
+  ansible.builtin.file:
+    path: "{{ primary_home }}/.cache/huggingface"
+    state: directory
+    owner: "{{ primary_user }}"
+    group: "{{ primary_user }}"
+    mode: "0755"
+  become: true
+
+# `hf` is the CLI shipped by huggingface-hub 1.x, already in the ML venv.
+# async because a 75 GB pull is far longer than any sane SSH timeout; the
+# download is resumable, so an interrupted run costs nothing but time.
+- name: Download models
+  ansible.builtin.command:
+    cmd: "{{ ml_venv }}/bin/hf download {{ item }}"
+  become_user: "{{ primary_user }}"
+  become: true
+  environment:
+    HF_HOME: "{{ primary_home }}/.cache/huggingface"
+  loop: "{{ wanted_models }}"
+  register: hf_dl
+  changed_when: "'already' not in (hf_dl.stdout | default('') | lower)"
+  async: 14400
+  poll: 60
+
+- name: Report cache size
+  ansible.builtin.shell:
+    cmd: "set -o pipefail; du -sh {{ primary_home }}/.cache/huggingface 2>/dev/null | cut -f1"
+    executable: /bin/bash
+  register: cache_size
+  changed_when: false
+
+- name: Show the cache
+  ansible.builtin.debug:
+    msg: "HF cache: {{ cache_size.stdout }} at {{ primary_home }}/.cache/huggingface"

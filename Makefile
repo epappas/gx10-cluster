@@ -98,6 +98,15 @@ apply:  ## Provision (-K prompts for sudo). Run under tmux.
 verify:  ## Assert the node is in the expected state; fails loudly if not
 	ansible-playbook verify.yml $(ANSIBLE_ARGS)
 
+.PHONY: models
+models:  ## Download the model sets (long; resumable)
+	ansible-playbook site.yml -K --tags models $(ANSIBLE_ARGS)
+
+.PHONY: orchestrator
+orchestrator:  ## Install ray or slurm: make orchestrator TAGS=ray
+	@[ -n "$(TAGS)" ] || { echo "pick one: make orchestrator TAGS=ray|slurm"; exit 1; }
+	ansible-playbook orchestrator.yml -K --tags $(TAGS) $(if $(LIMIT),--limit $(LIMIT),) $(EXTRA)
+
 # The canonical Ansible test: a correct playbook changes nothing on a second
 # run. NOTE it catches only one direction - a task that reports changed when it
 # should not. A changed_when that NEVER fires makes this target pass.

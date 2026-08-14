@@ -85,3 +85,33 @@ verify_checks:
     cmd: "[ \"$(ip -br addr show | grep -cE '{{ cluster_subnets | join('|') | replace('.', '\\.') }}')\" -ge 2 ]"
     required: false
     hint: "Fewer than two partitions addressed - you are capped at half the 200 Gb/s. See docs/runbooks/connect-cluster.md"
+
+  # --- serving and monitoring ----------------------------------------------
+  - name: "vLLM image"
+    cmd: "sudo -n docker image inspect {{ vllm_image }} > /dev/null 2>&1"
+    required: false
+    hint: "vLLM image not pulled (or sudo needs a password here). Re-run: make apply TAGS=inference"
+
+  - name: "vllm-serve"
+    cmd: "test -x $HOME/.local/bin/vllm-serve"
+    hint: "vllm-serve launcher missing. Re-run: make apply TAGS=inference"
+
+  - name: "prometheus"
+    cmd: "systemctl is-active --quiet prometheus"
+    required: false
+    hint: "Prometheus not running. Re-run: make apply TAGS=monitoring"
+
+  - name: "grafana"
+    cmd: "systemctl is-active --quiet grafana-server"
+    required: false
+    hint: "Grafana not running. Re-run: make apply TAGS=monitoring"
+
+  - name: "GPU metrics"
+    cmd: "test -s /var/lib/prometheus/node-exporter/gx10_gpu.prom"
+    required: false
+    hint: "GPU textfile metrics absent. Check: systemctl status gx10-gpu-metrics.timer"
+
+  - name: "models cached"
+    cmd: "test -d $HOME/.cache/huggingface/hub && [ \"$(ls -1 $HOME/.cache/huggingface/hub 2>/dev/null | wc -l)\" -gt 0 ]"
+    required: false
+    hint: "No models cached yet. Run: make models"

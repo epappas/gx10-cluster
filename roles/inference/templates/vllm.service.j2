@@ -1,0 +1,41 @@
+# Managed by gx10-cluster ansible (roles/inference). Local edits are overwritten.
+#
+# Templated unit. Escape the model id with systemd's own escaping, and %I gives
+# it back verbatim:
+#
+#   sudo systemctl start "vllm@$(systemd-escape 'nvidia/Qwen3.6-27B-NVFP4')"
+#
+# NOT a hand-rolled slash-to-hyphen substitution: model ids contain hyphens
+# too, so 'deepseek-ai/DeepSeek-V4-Flash' cannot be recovered by replacing the
+# first hyphen. systemd-escape/%I round-trips correctly.
+#
+# Deliberately not enabled by default - which model to serve is a per-session
+# decision, and pinning tens of GB at boot is nobody's sensible default.
+
+[Unit]
+Description=vLLM OpenAI-compatible server (%I)
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=exec
+Restart=on-failure
+RestartSec=10
+# Loading tens of GB out of the unified pool is not fast; do not let systemd
+# give up on a model that is still loading.
+TimeoutStartSec=1800
+
+ExecStartPre=-/usr/bin/docker rm -f vllm-%i
+ExecStart=/usr/bin/docker run --rm --name vllm-%i \
+    --gpus all \
+    --ipc=host \
+    -p {{ vllm_bind }}:{{ vllm_port }}:8000 \
+    -v {{ primary_home }}/.cache/huggingface:/root/.cache/huggingface \
+    -e HF_HOME=/root/.cache/huggingface \
+    {{ vllm_image }} \
+    --model %I \
+    --gpu-memory-utilization {{ vllm_gpu_memory_utilization }}
+ExecStop=/usr/bin/docker stop vllm-%i
+
+[Install]
+WantedBy=multi-user.target

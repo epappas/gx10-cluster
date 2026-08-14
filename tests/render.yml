@@ -22,9 +22,11 @@
     out: /tmp/gx10-render
     repo_root: "{{ playbook_dir | dirname }}"
 
-    # Facts the roles set at runtime, supplied so conditional branches render.
+    # Facts the roles set at runtime, plus inventory group vars that are not in
+    # scope on localhost, supplied so every conditional branch renders.
     cluster_index: 10
     cluster_rank: 0
+    cluster_master_ip: "192.168.100.10"
     cluster_link_present: true
     cluster_ifaces: [enp1s0f1np1, enP2p1s0f1np1]
 
@@ -69,13 +71,9 @@
     # Both branches of the password-auth conditional must be exercised - the
     # false branch is the one that runs on a fresh node.
     - name: Assert the default branch keeps password auth on
-      ansible.builtin.lineinfile:
-        path: "{{ out }}/10-gx10.conf"
-        line: "PasswordAuthentication yes"
-        state: present
-      check_mode: true
-      register: haspass
-      failed_when: haspass.changed
+      ansible.builtin.assert:
+        that: "'PasswordAuthentication yes' in lookup('file', out ~ '/10-gx10.conf')"
+        fail_msg: "the default sshd branch does not leave password auth enabled"
 
     - name: Render the sshd fragment with passwords disabled
       ansible.builtin.template:
@@ -86,13 +84,26 @@
         safe_to_disable_passwords: true
 
     - name: Assert the hardened branch disables password auth
-      ansible.builtin.lineinfile:
-        path: "{{ out }}/10-gx10-nopass.conf"
-        line: "PasswordAuthentication no"
-        state: present
-      check_mode: true
-      register: nopass
-      failed_when: nopass.changed
+      ansible.builtin.assert:
+        that: "'PasswordAuthentication no' in lookup('file', out ~ '/10-gx10-nopass.conf')"
+        fail_msg: "ssh_disable_passwords=true did not disable password auth"
+
+    # The loop above renders ray.service as the HEAD (rank 0). The worker
+    # branch is the one that references cluster_master_ip, so it needs its own
+    # pass or a typo there only surfaces on node 2.
+    - name: Render the ray unit as a worker
+      ansible.builtin.template:
+        src: "{{ repo_root }}/roles/ray/templates/ray.service.j2"
+        dest: "{{ out }}/ray-worker.service"
+        mode: "0644"
+      vars:
+        cluster_rank: 1
+        cluster_index: 11
+
+    - name: Assert the worker branch joins the head
+      ansible.builtin.assert:
+        that: "'--address=192.168.100.10:6379' in lookup('file', out ~ '/ray-worker.service')"
+        fail_msg: "the ray worker branch does not point at the head node"
 
     # verify_checks.yml is data, not code, so nothing else validates it. A
     # missing `hint` breaks the failure path precisely when a check fails.

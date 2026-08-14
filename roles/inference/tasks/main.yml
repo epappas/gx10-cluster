@@ -1,0 +1,55 @@
+---
+# vLLM, delivered as a container.
+#
+# Not pip: vLLM has no official sm_121 support. Its wheels carry kernels up to
+# sm_120 and link libcudart.so.12, while this box has CUDA 13, so it fails at
+# startup. sm_120 and sm_121 are binary compatible, which is why the CUDA-13
+# image works where the wheel does not.
+#
+# The container also keeps a fast-moving, unsupported-on-this-arch dependency
+# out of the ML venv - a bad version becomes a tag change, not a rebuild.
+
+# Plain docker CLI rather than community.docker: that collection would be a
+# fourth dependency AND needs the docker Python SDK on the host, for one task.
+- name: Check whether the vLLM image is present
+  ansible.builtin.command: "docker image inspect {{ vllm_image }}"
+  become: true
+  register: vllm_image_present
+  changed_when: false
+  failed_when: false
+
+- name: Pull the vLLM image
+  ansible.builtin.command: "docker pull {{ vllm_image }}"
+  become: true
+  when: vllm_image_present.rc != 0
+  changed_when: true
+  # Multi-GB pull; do not let slow look like hung.
+  async: 3600
+  poll: 30
+
+- name: Install the vllm-serve launcher
+  ansible.builtin.template:
+    src: vllm-serve.sh.j2
+    dest: "{{ primary_home }}/.local/bin/vllm-serve"
+    owner: "{{ primary_user }}"
+    group: "{{ primary_user }}"
+    mode: "0755"
+  become: true
+
+- name: Install the vLLM systemd unit
+  ansible.builtin.template:
+    src: vllm.service.j2
+    dest: /etc/systemd/system/vllm@.service
+    mode: "0644"
+  become: true
+  notify: Reload systemd
+
+# Deliberately NOT enabled. Which model to serve is a decision per session, and
+# a 75 GB model pinned in memory at boot is not a default anyone wants.
+#   systemctl start vllm@nvidia-Qwen3.6-27B-NVFP4
+- name: Explain how to serve
+  ansible.builtin.debug:
+    msg: >-
+      vLLM ready. Ad hoc: `vllm-serve <hf-model-id>`.
+      As a service: `sudo systemctl start vllm@<model>` where <model> is the HF
+      id with / replaced by -. See docs/runbooks/serve-models.md

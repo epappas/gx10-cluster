@@ -1,0 +1,32 @@
+# Managed by gx10-cluster ansible (roles/slurm). Local edits are overwritten.
+ClusterName=gx10
+SlurmctldHost={{ groups['gx10'][0] }}
+
+# One GPU per node and no preemption to arbitrate, so consumable resources
+# with cores is the right level - not the full cgroup/GRES apparatus.
+SelectType=select/cons_tres
+SelectTypeParameters=CR_Core_Memory
+ProctrackType=proctrack/linuxproc
+TaskPlugin=task/none
+
+SlurmUser=slurm
+SlurmctldPort=6817
+SlurmdPort=6818
+AuthType=auth/munge
+StateSaveLocation=/var/lib/slurm/slurmctld
+SlurmdSpoolDir=/var/lib/slurm/slurmd
+SlurmctldLogFile=/var/log/slurm/slurmctld.log
+SlurmdLogFile=/var/log/slurm/slurmd.log
+
+# Jobs here are long training runs, not batch scripts that finish in seconds.
+SlurmctldTimeout=120
+SlurmdTimeout=300
+InactiveLimit=0
+MinJobAge=300
+KillWait=30
+Waittime=0
+
+{% for h in groups['gx10'] %}
+NodeName={{ h }} NodeAddr={{ cluster_subnets[0] }}.{{ hostvars[h].cluster_index }} CPUs={{ ansible_facts['processor_vcpus'] | default(20) }} RealMemory={{ (ansible_facts['memtotal_mb'] | default(121000) * 0.9) | int }} State=UNKNOWN
+{% endfor %}
+PartitionName=gx10 Nodes=ALL Default=YES MaxTime=INFINITE State=UP

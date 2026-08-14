@@ -106,6 +106,73 @@ install_ollama: true
 ollama_host: "127.0.0.1:11434"
 
 # ---------------------------------------------------------------------------
+# Inference serving
+#
+# vLLM does NOT officially support sm_121. Its pip wheels carry kernels up to
+# sm_120 and link libcudart.so.12, while this box has CUDA 13 - so it crashes
+# at startup. sm_120 and sm_121 are binary compatible, which is why the CUDA-13
+# container works where the wheel does not. Running it as a container also
+# keeps a fast-moving, unsupported-on-this-arch dependency out of the host
+# venv, and makes a bad version a tag change rather than a rebuild.
+# ---------------------------------------------------------------------------
+vllm_image: "vllm/vllm-openai:cu130-nightly"
+vllm_port: 8000
+# Localhost by design, same reasoning as ollama: an unauthenticated inference
+# API, and ufw does not filter docker-published ports.
+vllm_bind: "127.0.0.1"
+# Fraction of the unified pool vLLM may claim. Lower than a discrete-GPU
+# default on purpose: nvidia-smi reports no framebuffer here, so vLLM's
+# profiler sizes itself against memory the OS and page cache also live in.
+vllm_gpu_memory_utilization: "0.85"
+
+# ---------------------------------------------------------------------------
+# Pre-loaded weights
+#
+# Sizes measured from the HF API, against ~114 GB usable of the 121 GB pool:
+#   Nemotron-3-Super-120B  BF16 230.3 GB  - needs BOTH nodes (TP=2)
+#                          FP8  119.6 GB  - weights alone exceed one node
+#                          NVFP4 74.8 GB  - fits, ~39 GB headroom
+#   Llama-3_3-Nemotron-Super-49B bf16 92.9 GB - the unquantized one that fits
+#
+# NVFP4 is the native format for GB10's Blackwell FP4 tensor cores - the same
+# reason llama.cpp compiles for 121a. It is both smaller and faster here.
+# ---------------------------------------------------------------------------
+model_sets: [smoke, nvfp4]
+
+model_catalog:
+  smoke:
+    - Qwen/Qwen3-8B                                    # 15.3 GB
+  nvfp4:
+    - nvidia/Qwen3.6-27B-NVFP4                         # 20.4 GB
+    - nvidia/Qwen3.6-35B-A3B-NVFP4                     # 21.9 GB
+    - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4   # 74.8 GB
+  # Unquantized, single-node. Add 'large' to model_sets to pull it.
+  large:
+    - nvidia/Llama-3_3-Nemotron-Super-49B-v1           # 92.9 GB
+  # Only usable across BOTH nodes with tensor parallelism. Do not add this to
+  # model_sets before the interconnect is up.
+  cluster:
+    - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16    # 230.3 GB
+
+# Refuse to start a download that would leave the box with less than this.
+model_min_free_gb: 100
+
+# ---------------------------------------------------------------------------
+# Orchestrators - installed only by orchestrator.yml, never by site.yml
+# ---------------------------------------------------------------------------
+ray_version: "2.57.0"
+ray_port: 6379
+
+# ---------------------------------------------------------------------------
+# Monitoring
+# ---------------------------------------------------------------------------
+grafana_port: 3000
+prometheus_port: 9090
+prometheus_retention: "30d"
+# Same localhost-by-default posture as the inference APIs.
+monitoring_bind: "127.0.0.1"
+
+# ---------------------------------------------------------------------------
 # Toolchains
 # ---------------------------------------------------------------------------
 nvm_version: "v0.40.1"

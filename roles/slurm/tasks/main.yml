@@ -1,0 +1,79 @@
+---
+# Slurm for a two-node cluster.
+#
+# Not installed by site.yml, and honestly heavy at this scale: a controller, a
+# daemon and munge key distribution to queue jobs across two machines. It earns
+# its place when you want real queueing, fair-share or job accounting - not
+# merely to run something on both boxes, which torchrun already does.
+#
+#   ansible-playbook orchestrator.yml --tags slurm -K
+
+- name: Install slurm and munge
+  ansible.builtin.apt:
+    name:
+      - slurm-wlm
+      - munge
+    state: present
+  become: true
+
+# Every node must share one munge key or authentication fails with errors that
+# do not mention munge. Generated on rank 0 and copied, rather than generated
+# per node.
+- name: Generate the munge key on the controller
+  ansible.builtin.command:
+    cmd: /usr/sbin/mungekey --create --keyfile /etc/munge/munge.key
+    creates: /etc/munge/munge.key
+  become: true
+  when: cluster_rank | int == 0
+
+- name: Fetch the munge key from the controller
+  ansible.builtin.slurp:
+    src: /etc/munge/munge.key
+  become: true
+  register: munge_key
+  when: cluster_rank | int == 0
+
+- name: Distribute the munge key
+  ansible.builtin.copy:
+    content: "{{ hostvars[groups['gx10'][0]].munge_key.content | b64decode }}"
+    dest: /etc/munge/munge.key
+    owner: munge
+    group: munge
+    mode: "0400"
+  become: true
+  when: hostvars[groups['gx10'][0]].munge_key is defined
+  notify: Restart munge
+
+- name: Configure slurm
+  ansible.builtin.template:
+    src: slurm.conf.j2
+    dest: /etc/slurm/slurm.conf
+    mode: "0644"
+  become: true
+  notify: Restart slurm
+
+- name: Enable munge
+  ansible.builtin.systemd:
+    name: munge
+    enabled: true
+    state: started
+  become: true
+
+- name: Enable the slurm controller
+  ansible.builtin.systemd:
+    name: slurmctld
+    enabled: true
+    state: started
+  become: true
+  when: cluster_rank | int == 0
+
+- name: Enable the slurm daemon
+  ansible.builtin.systemd:
+    name: slurmd
+    enabled: true
+    state: started
+  become: true
+
+- name: Explain the cluster
+  ansible.builtin.debug:
+    msg: "Slurm ready. Check with `sinfo` and `srun -N2 hostname`."

@@ -1,0 +1,44 @@
+---
+# Ray, into the shared ML venv.
+#
+# Not installed by site.yml. torchrun already covers 2-node distributed
+# training, so Ray earns its place only when you want a cluster that outlives a
+# single job - or multi-node vLLM, which uses Ray for tensor parallelism.
+#
+#   ansible-playbook orchestrator.yml --tags ray -K
+
+- name: Install ray
+  ansible.builtin.command: >-
+    {{ uv_bin }} pip install --python {{ ml_venv }}/bin/python
+    --index-url https://pypi.org/simple
+    --extra-index-url {{ torch_index_url }}
+    'ray[default]=={{ ray_version }}'
+  become_user: "{{ primary_user }}"
+  become: true
+  register: ray_install
+  changed_when: "'Installed' in (ray_install.stderr | default(''))"
+
+- name: Install the ray systemd unit
+  ansible.builtin.template:
+    src: ray.service.j2
+    dest: /etc/systemd/system/ray.service
+    mode: "0644"
+  become: true
+  notify: Restart ray
+
+# Rank 0 is the head; everyone else joins it. Addresses come from the
+# interconnect subnet so Ray's object transfers use the 200G link, not WiFi.
+- name: Enable ray
+  ansible.builtin.systemd:
+    name: ray
+    enabled: true
+    state: started
+    daemon_reload: true
+  become: true
+
+- name: Explain the cluster
+  ansible.builtin.debug:
+    msg: >-
+      Ray {{ 'head' if cluster_rank | int == 0 else 'worker' }} on
+      {{ cluster_subnets[0] }}.{{ cluster_index }}. Check with
+      `{{ ml_venv }}/bin/ray status`. Dashboard on the head at :8265.

@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Managed by gx10-cluster ansible (roles/inference). Local edits are overwritten.
+#
+# Serve a model with vLLM in the foreground. Ctrl-C stops it.
+#
+#   vllm-serve nvidia/Qwen3.6-27B-NVFP4
+#   vllm-serve nvidia/Qwen3.6-27B-NVFP4 --max-model-len 8192
+#
+# Multi-node (once the interconnect is up) needs --tensor-parallel-size 2 and
+# a Ray head; see docs/runbooks/serve-models.md.
+set -euo pipefail
+
+MODEL="${1:?usage: vllm-serve <hf-model-id> [extra vllm args...]}"
+shift || true
+
+HF_CACHE="${HF_HOME:-$HOME/.cache/huggingface}"
+
+# --ipc=host: vLLM's workers talk over shared memory, and the default 64 MB
+# kills them. --gpus all: the NVIDIA runtime is the docker default here, but
+# being explicit survives someone changing that.
+exec docker run --rm -it \
+    --gpus all \
+    --ipc=host \
+    -p "{{ vllm_bind }}:{{ vllm_port }}:8000" \
+    -v "$HF_CACHE:/root/.cache/huggingface" \
+    -e HF_HOME=/root/.cache/huggingface \
+    "{{ vllm_image }}" \
+    --model "$MODEL" \
+    --gpu-memory-utilization {{ vllm_gpu_memory_utilization }} \
+    "$@"

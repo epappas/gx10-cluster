@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Managed by gx10-cluster ansible (roles/monitoring). Local edits overwritten.
+#
+# Export the GPU metrics that actually exist on GB10, in Prometheus text
+# format, for node_exporter's textfile collector.
+#
+# NOT exported: GPU memory. On this hardware nvidia-smi reports memory.total
+# and memory.used as [N/A] because CPU and GPU share one coherent pool - so
+# node_exporter's host memory metrics ARE the GPU memory metrics. Emitting a
+# zero here would be worse than emitting nothing.
+set -euo pipefail
+
+OUT=/var/lib/prometheus/node-exporter/gx10_gpu.prom
+TMP="$(mktemp "${OUT}.XXXXXX")"
+trap 'rm -f "$TMP"' EXIT
+
+read -r util temp power_draw power_limit clock_sm < <(
+    nvidia-smi --query-gpu=utilization.gpu,temperature.gpu,power.draw,power.limit,clocks.sm \
+               --format=csv,noheader,nounits | tr -d ' ' | tr ',' ' '
+)
+
+emit() {  # name, help, type, value
+    # Skip anything nvidia-smi reported as N/A rather than writing a fake 0.
+    [[ "$4" =~ ^[0-9.]+$ ]] || return 0
+    printf '# HELP %s %s\n# TYPE %s %s\n%s %s\n' "$1" "$2" "$1" "$3" "$1" "$4"
+}
+
+{
+    emit gx10_gpu_utilization_percent "GPU utilisation" gauge "$util"
+    emit gx10_gpu_temperature_celsius "GPU temperature" gauge "$temp"
+    emit gx10_gpu_power_watts "GPU power draw" gauge "$power_draw"
+    emit gx10_gpu_power_limit_watts "GPU power limit" gauge "$power_limit"
+    emit gx10_gpu_clock_sm_mhz "SM clock" gauge "$clock_sm"
+} > "$TMP"
+
+# Atomic rename: node_exporter must never read a half-written file.
+chmod 644 "$TMP"
+mv "$TMP" "$OUT"
+trap - EXIT

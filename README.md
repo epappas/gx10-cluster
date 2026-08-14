@@ -26,6 +26,7 @@ Task-oriented. Start here.
 | Cable two boxes together and verify 200 Gb/s | [connect-cluster](docs/runbooks/connect-cluster.md) |
 | Get back in after an SSH lockout | [recover-ssh-lockout](docs/runbooks/recover-ssh-lockout.md) |
 | Update packages without breaking CUDA | [upgrade-drivers](docs/runbooks/upgrade-drivers.md) |
+| Run or serve a model | [serve-models](docs/runbooks/serve-models.md) |
 | Fix something that's broken | [troubleshoot](docs/runbooks/troubleshoot.md) |
 | Change this repo safely | [contributing](docs/contributing.md) |
 
@@ -47,7 +48,10 @@ inventory.yml       nodes, interconnect index and rank
 group_vars/all.yml  every tunable
 vars/               playbook-scoped data (verify checks)
 tests/render.yml    renders all templates against real facts
-roles/              base docker shell dev_python dev_rust dev_node ml remote cluster
+orchestrator.yml    ray / slurm - opt-in, never run by site.yml
+roles/              base docker shell dev_python dev_rust dev_node ml
+                    inference monitoring remote cluster models
+                    ray slurm (orchestrator.yml only)
 docs/               runbooks and reference
 ```
 

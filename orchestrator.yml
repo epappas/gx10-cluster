@@ -1,0 +1,25 @@
+---
+# Cluster orchestrators - deliberately NOT part of site.yml.
+#
+# torchrun already runs a 2-node job across both boxes, so neither of these is
+# needed to use the cluster. They are here, ready, for when the need appears:
+#
+#   Ray   - a cluster that outlives a single job, and the substrate multi-node
+#           vLLM uses for tensor parallelism.
+#   Slurm - real queueing, fair-share and accounting. Heavy for two nodes.
+#
+#   ansible-playbook orchestrator.yml --tags ray -K
+#   ansible-playbook orchestrator.yml --tags slurm -K
+#
+# Nothing runs without a tag, so an accidental invocation is a no-op.
+
+- name: Install cluster orchestrators
+  hosts: gx10
+  serial: 1
+  any_errors_fatal: true
+
+  # The `never` tag means a bare `ansible-playbook orchestrator.yml` does
+  # nothing at all. You have to ask for one by name.
+  roles:
+    - { role: ray,   tags: [ray, never] }
+    - { role: slurm, tags: [slurm, never] }

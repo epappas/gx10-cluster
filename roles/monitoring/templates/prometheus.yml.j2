@@ -1,0 +1,25 @@
+# Managed by gx10-cluster ansible (roles/monitoring). Local edits overwritten.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:{{ prometheus_port }}"]
+
+  # Host metrics, which on a unified-memory box are also the GPU memory
+  # metrics, plus the GB10 GPU gauges from the textfile collector.
+  - job_name: node
+    static_configs:
+{% for h in groups['gx10'] %}
+      - targets: ["{{ 'localhost' if h == inventory_hostname else h }}:9100"]
+        labels: { instance: "{{ h }}" }
+{% endfor %}
+
+{% if enable_dcgm | default(true) %}
+  # DCGM support on GB10 is partial; the job is harmless when it is down.
+  - job_name: dcgm
+    static_configs:
+      - targets: ["localhost:9400"]
+{% endif %}

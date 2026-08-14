@@ -1,0 +1,30 @@
+# Managed by gx10-cluster ansible (roles/ray). Local edits are overwritten.
+#
+# Rank 0 runs the head, everyone else joins it. Bound to the interconnect
+# address so Ray's object transfers use the 200G link rather than WiFi.
+
+[Unit]
+Description=Ray {{ 'head' if cluster_rank | int == 0 else 'worker' }} node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ primary_user }}
+Environment=HF_HOME={{ primary_home }}/.cache/huggingface
+{% if cluster_rank | int == 0 %}
+ExecStart={{ ml_venv }}/bin/ray start --head --block \
+    --node-ip-address={{ cluster_subnets[0] }}.{{ cluster_index }} \
+    --port={{ ray_port }} \
+    --dashboard-host={{ monitoring_bind }}
+{% else %}
+ExecStart={{ ml_venv }}/bin/ray start --block \
+    --node-ip-address={{ cluster_subnets[0] }}.{{ cluster_index }} \
+    --address={{ cluster_master_ip }}:{{ ray_port }}
+{% endif %}
+ExecStop={{ ml_venv }}/bin/ray stop
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target
