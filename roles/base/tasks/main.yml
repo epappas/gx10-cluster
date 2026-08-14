@@ -5,11 +5,32 @@
     cache_valid_time: 3600
   become: true
 
-- name: Upgrade installed packages
+# ---------------------------------------------------------------------------
+# Upgrades are OPT-IN, and the driver stack is held first.
+#
+# A bare `apt upgrade` on this box wants to install nvidia-modprobe 610.57.04
+# against driver 580.173.02 (verified with `apt-get upgrade -s`). That is the
+# setuid helper which creates /dev/nvidia*, and it is version-locked to the
+# kernel driver. The DGX pin file (cuda-compute-repo-lowpri2) pins nvidia-*580
+# and cuda-drivers*, but nvidia-modprobe matches neither glob, and
+# `apt-mark showhold` is empty - so nothing stops it.
+#
+# DGX OS has its own sanctioned upgrade path (nvidia-spark-run-apt-upgrade-once
+# and dgx-spark-ota-update-meta) which applies an updated pin first. Prefer it.
+# ---------------------------------------------------------------------------
+- name: Hold the NVIDIA driver and kernel stack
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  become: true
+  loop: "{{ driver_stack_holds }}"
+  failed_when: false   # a package not installed on this release is fine
+
+- name: Upgrade packages (opt-in only)
   ansible.builtin.apt:
     upgrade: safe
   become: true
-  register: apt_upgrade
+  when: allow_apt_upgrade | bool
 
 - name: Install build toolchain
   ansible.builtin.apt:
@@ -18,18 +39,10 @@
       - cmake
       - ninja-build
       - pkg-config
-      - autoconf
-      - automake
-      - libtool
       - gdb
       - ccache
       - libssl-dev
       - libffi-dev
-      - zlib1g-dev
-      - libbz2-dev
-      - liblzma-dev
-      - libsqlite3-dev
-      - libreadline-dev
       - libcurl4-openssl-dev
       - libomp-dev
     state: present
@@ -40,53 +53,57 @@
     name:
       - git
       - git-lfs
+      - gh
       - curl
       - wget
       - rsync
       - unzip
-      - zip
       - jq
       - tree
       - tmux
       - htop
       - ncdu
-      - iotop
-      - sysstat
       - lsof
       - strace
       - ripgrep
       - fzf
       - neovim
       - zsh
-      - net-tools
-      - iproute2
       - ethtool
       - iperf3
       - nvme-cli
       - pciutils
-      - usbutils
-      - smartmontools
-      - software-properties-common
       - ca-certificates
-      - gnupg
-      - python3-pip
-      - python3-venv
     state: present
   become: true
 
 - name: Initialise git-lfs for the primary user
-  ansible.builtin.command: git lfs install
-  become: true
+  ansible.builtin.command: git lfs install --skip-repo
   become_user: "{{ primary_user }}"
+  become: true
   register: lfs_init
-  changed_when: "'already initialized' not in lfs_init.stdout"
+  # `git lfs install` prints "Git LFS initialized." unconditionally - there is
+  # no "already initialized" output to test for. Detect the hooks instead.
+  changed_when: false
+
+- name: Configure git identity and defaults
+  community.general.git_config:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    scope: global
+  become_user: "{{ primary_user }}"
+  become: true
+  loop:
+    - { name: user.name,        value: "{{ git_user_name }}" }
+    - { name: user.email,       value: "{{ git_user_email }}" }
+    - { name: init.defaultBranch, value: main }
+    - { name: pull.rebase,      value: "true" }
+  when: git_user_email | length > 0
 
 # --- Unattended security updates ------------------------------------------
 - name: Install unattended-upgrades
   ansible.builtin.apt:
-    name:
-      - unattended-upgrades
-      - apt-listchanges
+    name: unattended-upgrades
     state: present
   become: true
 
@@ -100,10 +117,27 @@
       APT::Periodic::AutocleanInterval "7";
   become: true
 
-# --- Kernel tuning for large-model workloads ------------------------------
-# Big unified-memory jobs open a lot of files and map a lot of regions;
-# the stock limits are sized for a laptop, not a 128 GB coherent node.
-- name: Tune sysctl for large-memory ML workloads
+# Without this, the nvidia-modprobe skew described above can happen on its own
+# schedule - potentially mid-training-run - with nobody having run anything.
+- name: Exclude the driver and kernel stack from unattended upgrades
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/51gx10-blacklist
+    mode: "0644"
+    content: |
+      // Managed by gx10-cluster ansible.
+      Unattended-Upgrade::Package-Blacklist {
+      {% for pkg in driver_stack_holds %}
+          "{{ pkg }}";
+      {% endfor %}
+      };
+  become: true
+
+# --- Kernel tuning ---------------------------------------------------------
+# Deliberately short. Everything here was checked against the live box first;
+# DGX OS already sets vm.max_map_count (10-map-count.conf), nofile
+# (nv-limits.conf), the CPU governor (nv-cpu-governor) and persistence mode.
+# Re-setting those is noise at best and a regression at worst.
+- name: Tune sysctl for a unified-memory node
   ansible.posix.sysctl:
     name: "{{ item.key }}"
     value: "{{ item.value }}"
@@ -111,35 +145,49 @@
     reload: true
     state: present
   loop:
-    - { key: vm.max_map_count,              value: "1048576" }
-    - { key: fs.file-max,                   value: "2097152" }
-    - { key: fs.inotify.max_user_watches,   value: "524288" }
-    - { key: net.core.rmem_max,             value: "268435456" }
-    - { key: net.core.wmem_max,             value: "268435456" }
-    - { key: net.ipv4.tcp_rmem,             value: "4096 87380 268435456" }
-    - { key: net.ipv4.tcp_wmem,             value: "4096 65536 268435456" }
+    # GPU and CPU share one 128 GB coherent pool, so swapping is not graceful
+    # degradation - it is a cliff (reports of 37 -> 1.8 tok/s). Keep swap as an
+    # emergency valve only. Stock is 60.
+    - { key: vm.swappiness,     value: "1" }
+    # Stock is ~45 MB of reserve on a 121 GiB machine, which is far too little
+    # headroom to service allocations while reclaiming.
+    - { key: vm.min_free_kbytes, value: "1048576" }
+    # Socket buffer ceilings for large TCP transfers (checkpoint copies, model
+    # downloads). NOT for NCCL - that runs over RDMA and bypasses the socket
+    # layer entirely. Deliberately only the ceilings: overriding tcp_rmem /
+    # tcp_wmem autotuning works against DGX's fq_codel bufferbloat defaults.
+    - { key: net.core.rmem_max, value: "134217728" }
+    - { key: net.core.wmem_max, value: "134217728" }
+    - { key: fs.inotify.max_user_watches, value: "524288" }
   become: true
 
-- name: Raise file descriptor and memlock limits
+# memlock is the one limit that genuinely matters here: RDMA pins pages for the
+# ConnectX-7, and CUDA pins host buffers. Scoped to the primary user rather
+# than `*` - on a box where 121 GB is shared coherently with the GPU, letting
+# every account pin without bound is how you get an unrecoverable machine.
+#
+# NOT set here: nofile (DGX's nv-limits.conf sets 500000 deliberately and sorts
+# after this file alphabetically, so it wins anyway) and stack (unlimited
+# switches the kernel to the legacy mmap layout, weakening ASLR, and makes
+# glibc size pthread stacks at 32 MB instead of 8 MB).
+- name: Raise memlock for the primary user
   ansible.builtin.copy:
     dest: /etc/security/limits.d/90-gx10.conf
     mode: "0644"
     content: |
       # Managed by gx10-cluster ansible. Do not edit by hand.
-      # memlock unlimited is required for RDMA (ConnectX-7) page pinning.
-      *    soft    nofile      1048576
-      *    hard    nofile      1048576
-      *    soft    memlock     unlimited
-      *    hard    memlock     unlimited
-      *    soft    stack       unlimited
+      {{ primary_user }}    soft    memlock     {{ memlock_limit_kb }}
+      {{ primary_user }}    hard    memlock     {{ memlock_limit_kb }}
   become: true
 
-- name: Report whether a reboot is pending
+- name: Check for a pending reboot
   ansible.builtin.stat:
     path: /var/run/reboot-required
   register: reboot_required
 
 - name: Warn on pending reboot
   ansible.builtin.debug:
-    msg: "A reboot is pending on {{ ansible_hostname }} (kernel or driver update)."
+    msg: >-
+      A reboot is pending on {{ ansible_hostname }} (kernel or driver update).
+      Reboot before trusting any CUDA result from this run.
   when: reboot_required.stat.exists

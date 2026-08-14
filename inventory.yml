@@ -1,13 +1,13 @@
 ---
 # GX10 cluster inventory.
 #
-# Node 1 (gx10-a) is this machine, provisioned over the local connection.
-# Node 2 (gx10-b) is provisioned over SSH once it is on the network.
+# To add the second node: uncomment gx10-b, set ansible_host to its LAN
+# address, then run the FULL play (not --limit) so both nodes exchange
+# interconnect SSH keys in the same run:
 #
-# To provision node 2:
-#   1. Uncomment the gx10-b block below and set ansible_host to its LAN/WiFi IP.
-#   2. ssh-copy-id <user>@<ip>   (or let roles/remote push your key)
-#   3. ansible-playbook site.yml --limit gx10-b -K
+#   ansible-playbook site.yml -K
+#
+# `serial: 1` in site.yml means they are still provisioned one at a time.
 
 all:
   children:
@@ -15,18 +15,17 @@ all:
       hosts:
         gx10-a:
           ansible_connection: local
-          ansible_host: 127.0.0.1
-          # Address this node takes on the 200G ConnectX-7 link between the boxes.
-          cluster_ip: 10.10.10.1
+          # Host octet on both interconnect subnets, matching NVIDIA's
+          # connect-two-sparks playbook: 192.168.100.10 + 192.168.101.10
+          cluster_index: 10
           cluster_rank: 0
 
         # gx10-b:
-        #   ansible_host: 192.168.1.NNN     # <-- LAN address of the second box
+        #   ansible_host: <node-2-lan-address>    # LAN address of the second box
         #   ansible_user: epappas
-        #   cluster_ip: 10.10.10.2
+        #   cluster_index: 11
         #   cluster_rank: 1
 
       vars:
-        # Node 0 is the rendezvous point for torchrun / NCCL.
-        cluster_master_ip: 10.10.10.1
-        cluster_master_port: 29500
+        # Rendezvous host for torchrun. Node 0's address on the first subnet.
+        cluster_master_ip: "{{ cluster_subnets[0] }}.10"

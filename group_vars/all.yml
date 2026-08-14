@@ -2,51 +2,71 @@
 # ============================================================================
 # GX10 cluster configuration
 #
-# Every knob that differs between "what I want" and "what the playbook does"
-# lives here. Roles read these; they do not hardcode versions.
+# Roles read these; they should not hardcode versions or addresses.
+# Skip work with tags (`--tags ml`, `--skip-tags ml`) rather than toggles.
 # ============================================================================
 
-# The human who owns the box. Everything user-scoped installs under this account.
-primary_user: "{{ lookup('env', 'SUDO_USER') | default(ansible_user_id, true) }}"
-primary_home: "/home/{{ primary_user }}"
+# ansible_user_id is a fact from the target. Do NOT use lookup('env', ...)
+# here - lookups evaluate on the CONTROL node, so driving node B from node A
+# would silently install everything under node A's username.
+primary_user: "{{ ansible_user_id }}"
+primary_home: "{{ ansible_env.HOME }}"
+
+git_user_name: "Evangelos Pappas"
+git_user_email: "you@example.com"
 
 # ---------------------------------------------------------------------------
-# Feature toggles - flip to false to skip a whole role.
-# Override per-run with:  -e enable_ml=false
-# ---------------------------------------------------------------------------
-enable_base:       true
-enable_docker:     true
-enable_shell:      true
-enable_python:     true
-enable_rust:       true
-enable_node:       true
-enable_ml:         true
-enable_remote:     true
-enable_cluster:    true
-
-# ---------------------------------------------------------------------------
-# Platform facts. These are asserted at run time, not assumed.
-# GB10 (Grace Blackwell) is compute capability 12.1 -> sm_121.
+# Platform. Asserted in site.yml against nvidia-smi, not assumed.
+# GB10 is Grace Blackwell, compute capability 12.1 -> sm_121.
 # ---------------------------------------------------------------------------
 gpu_arch_list: "12.1"
 cuda_major: "13"
 cuda_home: /usr/local/cuda
 
+# The performance cores. Verified via /proc/cpuinfo CPU part:
+#   0xd85 = Cortex-X925 @ 3.90 GHz -> 5-9, 15-19
+#   0xd87 = Cortex-A725 @ 2.81 GHz -> 0-4, 10-14
+# They INTERLEAVE. `taskset -c 0-9` is half efficiency cores, which is not
+# what anyone typing it intends.
+perf_cores: "5-9,15-19"
+perf_core_count: 10
+
 # ---------------------------------------------------------------------------
-# Python / ML stack
-# torch cu130 aarch64 wheels are the only ones with sm_121 kernels.
+# apt safety
+#
+# A blanket upgrade wants to pull nvidia-modprobe 610 onto a 580 driver
+# (verified). These are held, and unattended-upgrades is told to skip them.
 # ---------------------------------------------------------------------------
+allow_apt_upgrade: false
+driver_stack_holds:
+  - nvidia-modprobe
+  - nvidia-kernel-common-580
+  - nvidia-driver-580-open
+  - nvidia-dkms-580
+  - linux-nvidia-hwe-24.04
+  - linux-image-nvidia-hwe-24.04
+  - docker-ce
+  - containerd.io
+
+# ~64 GB. Enough for ConnectX-7 queue pairs and CUDA pinned buffers, while
+# still leaving the coherent pool recoverable if a process runs away.
+memlock_limit_kb: 67108864
+
+# ---------------------------------------------------------------------------
+# Python / ML
+# ---------------------------------------------------------------------------
+# Only the cu130 index carries aarch64 wheels with sm_121 kernels.
 torch_index_url: "https://download.pytorch.org/whl/cu130"
 torch_version: "2.13.0"
 
-# The shared ML virtualenv, created and owned by uv.
 ml_venv: "{{ primary_home }}/venvs/ml"
 ml_python: "3.12"
 
+# torchaudio is deliberately ABSENT. The cu130 index stops at torchaudio
+# 2.11.0, whose wheel declares no torch pin at all, so it resolves happily
+# next to torch 2.13.0 and then fails at import with an ABI error. Add it back
+# only pinned against a matching torch.
 ml_packages:
-  - "torch=={{ torch_version }}"
-  - torchvision
-  - torchaudio
   - transformers
   - accelerate
   - datasets
@@ -54,87 +74,100 @@ ml_packages:
   - trl
   - safetensors
   - sentencepiece
-  - huggingface-hub[cli,hf_transfer]
+  # No [cli,hf_transfer] extras - neither exists in huggingface-hub 1.x, and
+  # hf_transfer is superseded by hf-xet, already a hard dependency.
+  - huggingface-hub
   - bitsandbytes
   - einops
   - numpy
   - pandas
   - matplotlib
   - jupyterlab
-  - ipywidgets
   - rich
-  - tqdm
 
-# Set false to skip the (slow) source build of llama.cpp.
+uv_bin: "{{ primary_home }}/.local/bin/uv"
+
+# Pinned, not `master`. The point of this repo is that both boxes come up
+# identical; cloning whatever HEAD happens to be that day defeats it.
 build_llama_cpp: true
+llama_cpp_version: b6100
+
 install_ollama: true
+# Bound to localhost by design. Ollama has no authentication, and ufw does not
+# filter docker-published ports, so 0.0.0.0 is a wide-open model API on every
+# interface. Reach it over SSH (-L 11434:localhost:11434) or the tailscale
+# address; set 0.0.0.0:11434 here only if you accept that.
+ollama_host: "127.0.0.1:11434"
 
 # ---------------------------------------------------------------------------
-# Node.js - nvm-managed so it stays in userland.
+# Toolchains
 # ---------------------------------------------------------------------------
 nvm_version: "v0.40.1"
 node_version: "22"
-npm_globals:
-  - pnpm
-  - yarn
-  - typescript
-  - tsx
+npm_globals: [pnpm, typescript, tsx]
 
-# ---------------------------------------------------------------------------
-# Rust - rustup-managed, stable channel.
-# ---------------------------------------------------------------------------
 rust_channel: stable
-cargo_packages:
-  - eza
-  - bat
-  - fd-find
-  - zoxide
-  - tokei
-  - hyperfine
-
-# ---------------------------------------------------------------------------
-# Shell
-# ---------------------------------------------------------------------------
 default_shell: /usr/bin/zsh
 install_starship: true
 
 # ---------------------------------------------------------------------------
 # Remote access
 # ---------------------------------------------------------------------------
+# Ubuntu 24.04 socket-activates sshd: ListenStream=0.0.0.0:22 is baked into
+# ssh.socket and `Port` in sshd_config is ignored. Changing this without also
+# writing an ssh.socket drop-in produces a config that claims to have moved
+# SSH while the socket still answers on 22. Asserted in the remote role.
 ssh_port: 22
-# Key-only auth. Make sure your key is in authorized_keys BEFORE this applies,
-# or you will lock yourself out of the remote box.
-ssh_password_auth: false
 ssh_permit_root_login: "no"
 
+# Password auth is disabled ONLY when a declared key is proven to work.
+# See roles/remote - the guard is a real login probe, not a file check.
+authorized_keys: []
+  # - "ssh-ed25519 AAAA... you@laptop"
+
 enable_ufw: true
-# Subnets allowed to reach SSH. Tighten to your actual LAN.
 ufw_ssh_sources:
   - 192.168.0.0/16
   - 10.0.0.0/8
   - 172.16.0.0/12
+  - 100.64.0.0/10   # Tailscale CGNAT range - the remote-access path
 
 install_tailscale: true
-
-# Public keys authorized on every node. Add your laptop's key here.
-authorized_keys: []
-  # - "ssh-ed25519 AAAA... you@laptop"
 
 # ---------------------------------------------------------------------------
 # Cluster interconnect (2x GX10 over ConnectX-7 QSFP)
 #
-# The CX7 appears on the PCI bus only after a QSFP cable links the two boxes
-# (PCIe hotplug, handled by dgx-spark-mlnx-hotplug). Until then the cluster
-# role configures everything it can and skips the link-dependent steps.
+# Each QSFP port presents TWO logical interfaces (two PCIe x4 partitions),
+# ~100 Gb/s each. Both must be configured, on DIFFERENT subnets, to reach
+# 200 Gb/s. Addresses follow NVIDIA's connect-two-sparks playbook.
 # ---------------------------------------------------------------------------
-cluster_subnet: "10.10.10.0/24"
+cluster_subnets:
+  - "192.168.100"
+  - "192.168.101"
 cluster_subnet_prefix: 24
-# ConnectX-7 at 200G wants jumbo frames; 1500-byte frames leave most of the
-# link on the table for the large tensors NCCL moves between the nodes.
-cluster_mtu: 9000
+cluster_master_port: 29500
 
-# NCCL tuning for a 2-node direct-attach GB10 pair.
+# MTU is deliberately NOT set. NVIDIA's own two-node playbook leaves it at the
+# default; the "mtu 1500" in their docs is `ip addr` output, not a directive.
+# A mismatch between ends silently drops packets, so this stays unset until
+# measured. Set cluster_mtu to enable it.
+cluster_mtu: ""
+
+# The management interface, used for NCCL/MPI bootstrap and for reaching the
+# box. This is the onboard 10GbE port, and it is what NVIDIA's nccl playbook
+# names. It must be an interface BOTH nodes can reach each other on - if you
+# run the pair over WiFi only, set this to wlP9s9.
+mgmt_iface: enP7s7
+
+# NCCL. NCCL_SOCKET_IFNAME selects the BOOTSTRAP/out-of-band channel, not the
+# data path - the data path is RoCE via ibverbs and is chosen separately.
+# NVIDIA's playbook points it at the MANAGEMENT interface, which is why this
+# is not the ConnectX-7. Getting this backwards is a common and expensive
+# mistake; it looks like tuning and costs you the interconnect.
+#
+# Deliberately NOT set: NCCL_IB_HCA, NCCL_IB_GID_INDEX, NCCL_IB_TC,
+# NCCL_IB_DISABLE, NCCL_NET_GDR_LEVEL, NCCL_P2P_LEVEL. NVIDIA's two-node
+# playbook sets none of them, and speculative RoCE knobs on hardware you
+# cannot easily re-image are not tuning, they are guessing.
 nccl_env:
-  NCCL_SOCKET_IFNAME: "^lo,docker,veth,wl"
-  NCCL_IB_DISABLE: "0"
   NCCL_DEBUG: "WARN"

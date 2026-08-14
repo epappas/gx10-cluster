@@ -1,6 +1,8 @@
 ---
+# Restart ssh.service, not ssh.socket: under socket activation the service is
+# what holds the sshd config. Existing connections survive a restart.
 - name: Restart ssh
   ansible.builtin.systemd:
-    name: ssh
+    name: ssh.service
     state: restarted
   become: true

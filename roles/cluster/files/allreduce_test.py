@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """Two-node NCCL all-reduce over the GX10 ConnectX-7 link.
 
-Launch from node 0 (rank 0) and node 1 simultaneously:
+Run the SAME command on both boxes, changing only --node_rank. Addresses come
+from /etc/hosts, which the cluster role populates:
 
+    # on gx10-a
     torchrun --nnodes 2 --nproc_per_node 1 --node_rank 0 \
-             --master_addr 10.10.10.1 --master_port 29500 allreduce_test.py
+             --master_addr gx10-a --master_port 29500 allreduce_test.py
 
+    # on gx10-b
     torchrun --nnodes 2 --nproc_per_node 1 --node_rank 1 \
-             --master_addr 10.10.10.1 --master_port 29500 allreduce_test.py
+             --master_addr gx10-a --master_port 29500 allreduce_test.py
 
-A correct run prints a bus bandwidth in the tens of GB/s. Single-digit GB/s
-means the collective fell back to TCP over the LAN instead of using RDMA on
-the direct link - check NCCL_SOCKET_IFNAME and that ibv_devices lists a device.
+Published two-node GB10 figures are around 10 GB/s bus bandwidth. Well under
+that suggests the collective fell back to TCP over the LAN instead of RoCE
+over the direct link -- run again with NCCL_DEBUG=INFO, which prints the
+transport and interface it selected.
 """
 
 import os
@@ -31,9 +35,11 @@ def main() -> None:
 
     if rank == 0:
         print(f"world_size={world}  device={torch.cuda.get_device_name(local_rank)}")
+        if world == 1:
+            print("NOTE: single process -- this measures nothing. Launch on both nodes.")
 
-    # Correctness first, on a small tensor: summing ones across the world
-    # must give exactly world_size on every rank.
+    # Correctness first, on a small tensor: summing ones across the world must
+    # give exactly world_size on every rank.
     probe = torch.ones(8, device="cuda")
     dist.all_reduce(probe)
     assert torch.allclose(probe, torch.full_like(probe, float(world))), (
@@ -44,10 +50,9 @@ def main() -> None:
 
     # 1 GiB of fp32 - large enough that the measurement reflects link
     # bandwidth rather than launch latency.
-    numel = 256 * 1024 * 1024
-    x = torch.ones(numel, dtype=torch.float32, device="cuda")
+    x = torch.ones(256 * 1024 * 1024, dtype=torch.float32, device="cuda")
 
-    for _ in range(3):  # warm up: first collective pays connection setup
+    for _ in range(3):  # warm up: the first collective pays connection setup
         dist.all_reduce(x)
     torch.cuda.synchronize()
 
@@ -60,11 +65,11 @@ def main() -> None:
 
     if rank == 0:
         nbytes = x.numel() * x.element_size()
-        # Ring all-reduce moves 2*(N-1)/N of the buffer per rank.
         algbw = nbytes * iters / elapsed / 1e9
-        busbw = algbw * 2 * (world - 1) / world
-        print(f"size={nbytes / 1e9:.2f} GB  iters={iters}")
-        print(f"algbw={algbw:.1f} GB/s  busbw={busbw:.1f} GB/s")
+        print(f"size={nbytes / 1e9:.2f} GB  iters={iters}  algbw={algbw:.1f} GB/s")
+        if world > 1:
+            # Ring all-reduce moves 2*(N-1)/N of the buffer per rank.
+            print(f"busbw={algbw * 2 * (world - 1) / world:.1f} GB/s")
 
     dist.destroy_process_group()
 

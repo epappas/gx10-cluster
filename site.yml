@@ -1,7 +1,12 @@
 ---
 - name: Provision GX10 node
   hosts: gx10
-  gather_facts: true
+
+  # One node at a time, and stop the moment one fails. The whole point of
+  # owning a second GX10 is having a known-good machine to recover from;
+  # applying an untested change to both at once throws that away.
+  serial: 1
+  any_errors_fatal: true
 
   pre_tasks:
     - name: Assert this is an aarch64 GX10-class machine
@@ -12,25 +17,29 @@
         fail_msg: >-
           This playbook targets aarch64 Ubuntu (DGX OS on GX10).
           Found {{ ansible_architecture }} / {{ ansible_distribution }}.
-        success_msg: "{{ ansible_hostname }}: aarch64 Ubuntu {{ ansible_distribution_version }}"
 
-    - name: Report GPU
-      ansible.builtin.command: nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
+    - name: Read GPU identity
+      ansible.builtin.command: nvidia-smi --query-gpu=name,driver_version,compute_cap --format=csv,noheader
       register: gpu_info
       changed_when: false
-      failed_when: false
 
-    - name: Show GPU
-      ansible.builtin.debug:
-        msg: "GPU: {{ gpu_info.stdout | default('nvidia-smi unavailable') }}"
+    - name: Assert the GPU is the expected compute capability
+      ansible.builtin.assert:
+        that: (gpu_info.stdout.split(', ') | last | trim) == gpu_arch_list
+        fail_msg: >-
+          Expected compute capability {{ gpu_arch_list }} (GB10 / sm_121) but
+          found {{ gpu_info.stdout }}. The PyTorch index and llama.cpp CUDA
+          architecture in this repo are chosen for sm_121 and would produce a
+          silently broken install on a different GPU.
+        success_msg: "{{ gpu_info.stdout }}"
 
   roles:
-    - { role: base,       tags: [base],    when: enable_base    | bool }
-    - { role: docker,     tags: [docker],  when: enable_docker  | bool }
-    - { role: shell,      tags: [shell],   when: enable_shell   | bool }
-    - { role: dev_python, tags: [python],  when: enable_python  | bool }
-    - { role: dev_rust,   tags: [rust],    when: enable_rust    | bool }
-    - { role: dev_node,   tags: [node],    when: enable_node    | bool }
-    - { role: ml,         tags: [ml],      when: enable_ml      | bool }
-    - { role: remote,     tags: [remote],  when: enable_remote  | bool }
-    - { role: cluster,    tags: [cluster], when: enable_cluster | bool }
+    - { role: base,       tags: [base] }
+    - { role: docker,     tags: [docker] }
+    - { role: shell,      tags: [shell] }
+    - { role: dev_python, tags: [python, dev] }
+    - { role: dev_rust,   tags: [rust, dev] }
+    - { role: dev_node,   tags: [node, dev] }
+    - { role: ml,         tags: [ml] }
+    - { role: remote,     tags: [remote] }
+    - { role: cluster,    tags: [cluster] }

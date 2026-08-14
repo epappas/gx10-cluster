@@ -1,12 +1,19 @@
 # Managed by gx10-cluster ansible (roles/cluster). Local edits are overwritten.
-# NCCL reads this file at init; values here apply to every process on the box
-# without needing the environment set in each shell or container.
+#
+# NCCL reads this at init, so it applies to containers, systemd units and
+# torchrun-spawned workers - none of which source an interactive shell. This
+# is the ONLY place NCCL is configured; the shell environment deliberately
+# exports no NCCL_* vars, because the environment takes precedence over this
+# file and would override it for interactive runs only, giving the two ranks
+# different settings.
 
 {% for k, v in nccl_env.items() %}
 {{ k }}={{ v }}
 {% endfor %}
-{% if cluster_link_present | default(false) %}
-# Bind collectives to the ConnectX-7 link rather than letting NCCL pick
-# whatever interface sorts first - which on this box would be WiFi.
-NCCL_SOCKET_IFNAME={{ cluster_iface }}
-{% endif %}
+
+# NCCL_SOCKET_IFNAME selects the BOOTSTRAP / out-of-band channel, not the data
+# path. The data path over the ConnectX-7 is RoCE via ibverbs and is selected
+# independently. NVIDIA's connect-two-sparks and nccl playbooks both point
+# this at the MANAGEMENT interface - pointing it at the interconnect is a
+# common mistake that looks like tuning.
+NCCL_SOCKET_IFNAME={{ mgmt_iface }}

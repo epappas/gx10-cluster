@@ -1,11 +1,15 @@
 #!/bin/sh
 # ---------------------------------------------------------------------------
 # Managed by gx10-cluster ansible (roles/shell). Local edits are overwritten.
-# Sourced by both ~/.bashrc and ~/.zshrc, so keep this POSIX-compatible and
-# branch on $ZSH_VERSION / $BASH_VERSION for anything shell-specific.
+# Sourced by ~/.bashrc and ~/.zshrc, so keep this POSIX-compatible and branch
+# on $ZSH_VERSION / $BASH_VERSION for anything shell-specific.
+#
+# Deliberately sets NO NCCL_* variables. NCCL gives the environment precedence
+# over /etc/nccl.conf, so exporting them here would override the system config
+# for interactive runs only - giving a locally-launched rank and an
+# SSH-launched rank different settings. /etc/nccl.conf owns NCCL.
 # ---------------------------------------------------------------------------
 
-# --- PATH ------------------------------------------------------------------
 _gx10_path_prepend() {
     case ":${PATH}:" in
         *":$1:"*) ;;
@@ -22,70 +26,74 @@ export PATH
 export CUDA_HOME="{{ cuda_home }}"
 export LD_LIBRARY_PATH="{{ cuda_home }}/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
-# GB10 is Grace Blackwell, compute capability {{ gpu_arch_list }} (sm_121).
-# Setting this stops CUDA extension builds (flash-attn, bitsandbytes, custom
-# kernels) from compiling for every architecture PyTorch knows about.
+# GB10 is compute capability {{ gpu_arch_list }} (sm_121). Setting this stops
+# CUDA extension builds (flash-attn, custom kernels) from compiling for every
+# architecture PyTorch knows about.
 export TORCH_CUDA_ARCH_LIST="{{ gpu_arch_list }}"
-export CUDA_DEVICE_ORDER=PCI_BUS_ID
 
-# --- NCCL ------------------------------------------------------------------
-{% for k, v in nccl_env.items() %}
-export {{ k }}="{{ v }}"
-{% endfor %}
+# Lazy module loading cuts process startup time and resident footprint - it
+# matters more here than on a discrete GPU, because that footprint comes out
+# of the same pool the model weights live in.
+export CUDA_MODULE_LOADING=LAZY
+
+# 128 GB is shared coherently between CPU and GPU, so caching-allocator
+# fragmentation strands memory the HOST also needs. Expandable segments let
+# the allocator grow and shrink instead.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # --- Hugging Face ----------------------------------------------------------
-# Weights land on the NVMe under $HOME, not in a tmpfs. hf_transfer gives
-# much faster parallel downloads for the multi-hundred-GB checkpoints this
-# box can actually hold in its 128 GB of unified memory.
+# No HF_HUB_ENABLE_HF_TRANSFER: hf_transfer is gone in huggingface-hub 1.x,
+# and setting the variable now only earns a FutureWarning on every import.
+# Fast transfers come from hf-xet, which is a hard dependency already.
 export HF_HOME="$HOME/.cache/huggingface"
-export HF_HUB_ENABLE_HF_TRANSFER=1
+
+# --- CPU -------------------------------------------------------------------
+# The performance cores are {{ perf_cores }}, NOT 0-{{ perf_core_count - 1 }}.
+# P-cores (Cortex-X925, 3.90 GHz) and E-cores (Cortex-A725, 2.81 GHz)
+# interleave, so the obvious `taskset -c 0-9` straddles both.
+alias pcore='taskset -c {{ perf_cores }}'
+
+# Barrier-synchronous work (llama.cpp layers, dataloader collate, OpenMP
+# regions) runs at the pace of its slowest thread, so spreading across the
+# E-cores makes every barrier wait on them. Match the P-core count.
+export OMP_NUM_THREADS={{ perf_core_count }}
 
 # --- Build -----------------------------------------------------------------
-export MAKEFLAGS="-j{{ ansible_processor_vcpus | default(20) }}"
+# Not MAKEFLAGS: CMAKE_GENERATOR=Ninja means Ninja runs the build, and Ninja
+# does not read MAKEFLAGS. These are the knobs that are actually honoured -
+# by `cmake --build` and by pip-built CUDA extensions respectively.
 export CMAKE_GENERATOR=Ninja
+export CMAKE_BUILD_PARALLEL_LEVEL={{ ansible_processor_vcpus | default(20) }}
+export MAX_JOBS={{ ansible_processor_vcpus | default(20) }}
 [ -d /usr/lib/ccache ] && _gx10_path_prepend /usr/lib/ccache && export PATH
 
 # --- Node (nvm) ------------------------------------------------------------
 export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
 
-# --- The shared ML virtualenv ----------------------------------------------
-# Not activated automatically - `ml` puts you in it on demand.
-alias ml='. {{ ml_venv }}/bin/activate'
-
 # --- Aliases ---------------------------------------------------------------
+alias ml='. {{ ml_venv }}/bin/activate'
 alias gpu='nvidia-smi'
 alias gpuw='watch -n1 nvidia-smi'
-alias ports='ss -tulpn'
-command -v eza >/dev/null 2>&1 && alias ls='eza --group-directories-first' && alias ll='eza -lah --git --group-directories-first'
-command -v bat >/dev/null 2>&1 && alias cat='bat --paging=never'
-command -v fdfind >/dev/null 2>&1 && alias fd='fdfind'
 
-# Cluster shorthand: run a command on the other GX10.
-alias other='ssh {{ "gx10-b" if (cluster_rank | default(0) | int) == 0 else "gx10-a" }}'
+# Ubuntu ships these binaries under different names to avoid collisions.
+command -v batcat  >/dev/null 2>&1 && alias bat='batcat' && alias cat='batcat --paging=never'
+command -v fdfind  >/dev/null 2>&1 && alias fd='fdfind'
+command -v eza     >/dev/null 2>&1 && alias ls='eza --group-directories-first' && alias ll='eza -lah --git --group-directories-first'
 
 # --- Prompt and shell integrations -----------------------------------------
-if command -v starship >/dev/null 2>&1; then
-    if [ -n "$ZSH_VERSION" ]; then
-        eval "$(starship init zsh)"
-    elif [ -n "$BASH_VERSION" ]; then
-        eval "$(starship init bash)"
-    fi
-fi
-
-if command -v zoxide >/dev/null 2>&1; then
-    if [ -n "$ZSH_VERSION" ]; then
-        eval "$(zoxide init zsh)"
-    elif [ -n "$BASH_VERSION" ]; then
-        eval "$(zoxide init bash)"
-    fi
-fi
-
-# fzf keybindings ship in the Ubuntu package at a fixed location.
 if [ -n "$ZSH_VERSION" ]; then
-    [ -f /usr/share/doc/fzf/examples/key-bindings.zsh ] && . /usr/share/doc/fzf/examples/key-bindings.zsh
-    [ -f /usr/share/zsh/vendor-completions/_fzf ] && true
+    _gx10_shell=zsh
 elif [ -n "$BASH_VERSION" ]; then
-    [ -f /usr/share/doc/fzf/examples/key-bindings.bash ] && . /usr/share/doc/fzf/examples/key-bindings.bash
-    [ -f /usr/share/bash-completion/completions/fzf ] && . /usr/share/bash-completion/completions/fzf
+    _gx10_shell=bash
+else
+    _gx10_shell=""
 fi
+
+if [ -n "$_gx10_shell" ]; then
+    command -v starship >/dev/null 2>&1 && eval "$(starship init $_gx10_shell)"
+    command -v zoxide   >/dev/null 2>&1 && eval "$(zoxide init $_gx10_shell)"
+    [ -f "/usr/share/doc/fzf/examples/key-bindings.$_gx10_shell" ] \
+        && . "/usr/share/doc/fzf/examples/key-bindings.$_gx10_shell"
+fi
+unset _gx10_shell

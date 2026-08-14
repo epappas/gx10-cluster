@@ -5,7 +5,20 @@
     state: present
   become: true
 
-- name: Ensure .ssh directory exists
+# Ubuntu 24.04 socket-activates sshd. ListenStream=0.0.0.0:22 is baked into
+# ssh.socket, and `Port` in sshd_config is ignored - so a non-22 value here
+# produces a config that looks applied while sshd still answers on 22. If you
+# then narrow ufw to the new port you are locked out of a live listener.
+- name: Assert ssh_port is compatible with socket activation
+  ansible.builtin.assert:
+    that: ssh_port | int == 22
+    fail_msg: >-
+      ssh_port is {{ ssh_port }}, but this host socket-activates sshd and
+      ssh.socket hardcodes port 22. Changing the port requires an ssh.socket
+      drop-in (ListenStream=), not sshd_config. Refusing to write a config
+      that would silently not apply.
+
+- name: Secure the .ssh directory
   ansible.builtin.file:
     path: "{{ primary_home }}/.ssh"
     state: directory
@@ -14,6 +27,20 @@
     mode: "0700"
   become: true
 
+# This is not cosmetic. OpenSSH's StrictModes (on by default) refuses any
+# authorized_keys with group or other write bits - it silently ignores every
+# key in the file. This box shipped with mode 0664, which is why its journal
+# shows only "Accepted password" and never "Accepted publickey".
+- name: Enforce authorized_keys permissions
+  ansible.builtin.file:
+    path: "{{ primary_home }}/.ssh/authorized_keys"
+    state: file
+    owner: "{{ primary_user }}"
+    group: "{{ primary_user }}"
+    mode: "0600"
+  become: true
+  failed_when: false   # absent is fine; the next task creates it
+
 - name: Install authorized keys
   ansible.posix.authorized_key:
     user: "{{ primary_user }}"
@@ -21,32 +48,42 @@
     state: present
   become: true
   loop: "{{ authorized_keys }}"
-  when: authorized_keys | length > 0
 
-# Password auth is only turned off once a key is actually present. Disabling
-# it on a box with an empty authorized_keys locks you out permanently, and on
-# the second node that means a trip to the machine with a keyboard.
-- name: Check for existing authorized keys
-  ansible.builtin.stat:
-    path: "{{ primary_home }}/.ssh/authorized_keys"
-  register: authkeys_file
+# ---------------------------------------------------------------------------
+# Whether to disable password auth is settled by PROVING a key login works,
+# not by looking at a file. A non-empty authorized_keys says nothing about
+# whether any key in it is usable (wrong mode, wrong key, or - after one run -
+# only this node's own inter-node key, which you do not hold).
+# ---------------------------------------------------------------------------
+- name: Probe whether public-key login actually works
+  ansible.builtin.command: >-
+    ssh -o BatchMode=yes
+        -o PreferredAuthentications=publickey
+        -o StrictHostKeyChecking=no
+        -o ConnectTimeout=5
+        {{ primary_user }}@localhost true
+  become_user: "{{ primary_user }}"
   become: true
+  register: pubkey_probe
+  changed_when: false
+  failed_when: false
 
 - name: Decide whether it is safe to disable password auth
   ansible.builtin.set_fact:
+    # Both must hold: a key was DECLARED in this repo (so you hold the private
+    # half), and a key login demonstrably succeeds right now.
     safe_to_disable_passwords: >-
-      {{ (authorized_keys | length > 0)
-         or (authkeys_file.stat.exists and authkeys_file.stat.size | default(0) > 0) }}
+      {{ (authorized_keys | length > 0) and (pubkey_probe.rc == 0) }}
 
-- name: Warn when password auth must stay enabled
+- name: Explain why password auth is staying on
   ansible.builtin.debug:
     msg: >-
-      No authorized_keys found for {{ primary_user }}. Leaving password
-      authentication ENABLED to avoid a lockout. Add your public key to
-      group_vars/all.yml (authorized_keys) and re-run with --tags remote.
-  when:
-    - not ssh_password_auth
-    - not (safe_to_disable_passwords | bool)
+      Leaving password authentication ENABLED.
+      Declared keys: {{ authorized_keys | length }}.
+      Public-key login probe: {{ 'ok' if pubkey_probe.rc == 0 else 'FAILED (rc=' ~ pubkey_probe.rc ~ ')' }}.
+      Add your key to authorized_keys in group_vars/all.yml and re-run
+      with --tags remote.
+  when: not (safe_to_disable_passwords | bool)
 
 - name: Harden sshd
   ansible.builtin.template:
@@ -57,9 +94,21 @@
   become: true
   notify: Restart ssh
 
-- name: Enable and start sshd
+# Apply the sshd change NOW rather than at end of play. If a later role fails,
+# an unflushed handler leaves PasswordAuthentication no sitting on disk,
+# unapplied, to detonate at the next reboot with nothing connecting it to this
+# run. An immediate failure is strictly better than a delayed one.
+- name: Apply sshd configuration immediately
+  ansible.builtin.meta: flush_handlers
+
+- name: Verify the merged sshd config is valid
+  ansible.builtin.command: /usr/sbin/sshd -t
+  become: true
+  changed_when: false
+
+- name: Enable ssh socket activation
   ansible.builtin.systemd:
-    name: ssh
+    name: ssh.socket
     enabled: true
     state: started
   become: true
@@ -72,7 +121,8 @@
   become: true
   when: enable_ufw | bool
 
-- name: Allow SSH from trusted subnets
+# Allow rules first, THEN enable. The reverse order locks out the operator.
+- name: Allow SSH from trusted sources
   community.general.ufw:
     rule: allow
     port: "{{ ssh_port }}"
@@ -83,18 +133,27 @@
   loop: "{{ ufw_ssh_sources }}"
   when: enable_ufw | bool
 
-# The direct-attach link between the two GX10s is a private cable, not a
-# network anyone else is on. Trust it wholesale so NCCL, torchrun and the
-# RDMA stack are not fighting the firewall.
-- name: Allow all traffic on the cluster interconnect subnet
+# Tailscale is the out-of-LAN access path, so allow it by interface rather
+# than relying on its CGNAT range surviving a rule reshuffle.
+- name: Allow all traffic on the tailscale interface
   community.general.ufw:
     rule: allow
-    src: "{{ cluster_subnet }}"
-    comment: "gx10 cluster interconnect"
+    interface: tailscale0
+    direction: in
+    comment: "tailscale"
   become: true
   when:
     - enable_ufw | bool
-    - cluster_subnet is defined
+    - install_tailscale | bool
+
+- name: Allow traffic on the cluster interconnect subnets
+  community.general.ufw:
+    rule: allow
+    src: "{{ item }}.0/{{ cluster_subnet_prefix }}"
+    comment: "gx10 interconnect"
+  become: true
+  loop: "{{ cluster_subnets }}"
+  when: enable_ufw | bool
 
 - name: Enable ufw with default deny incoming
   community.general.ufw:
@@ -104,21 +163,33 @@
   become: true
   when: enable_ufw | bool
 
-- name: Allow outbound traffic
-  community.general.ufw:
-    policy: allow
-    direction: outgoing
-  become: true
-  when: enable_ufw | bool
-
 # --- Tailscale -------------------------------------------------------------
-# For reaching the box from outside the LAN without exposing sshd to the
-# internet. Installed but not authenticated - run `sudo tailscale up` once.
+# Installed from the apt repo rather than `curl | sh` as root - the script
+# only adds this repo and key, and doing it directly gives a signed,
+# apt-managed, pinnable package instead of piping a live URL into root's shell.
+- name: Add the tailscale apt key
+  ansible.builtin.get_url:
+    url: "https://pkgs.tailscale.com/stable/ubuntu/{{ ansible_distribution_release }}.noarmor.gpg"
+    dest: /usr/share/keyrings/tailscale-archive-keyring.gpg
+    mode: "0644"
+  become: true
+  when: install_tailscale | bool
+
+- name: Add the tailscale apt repository
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg]
+      https://pkgs.tailscale.com/stable/ubuntu {{ ansible_distribution_release }} main
+    filename: tailscale
+    state: present
+  become: true
+  when: install_tailscale | bool
+
 - name: Install tailscale
-  ansible.builtin.shell:
-    cmd: set -o pipefail && curl -fsSL https://tailscale.com/install.sh | sh
-    executable: /bin/bash
-    creates: /usr/bin/tailscale
+  ansible.builtin.apt:
+    name: tailscale
+    state: present
+    update_cache: true
   become: true
   when: install_tailscale | bool
 
@@ -129,18 +200,3 @@
     state: started
   become: true
   when: install_tailscale | bool
-
-- name: Report tailscale status
-  ansible.builtin.command: tailscale status --json
-  become: true
-  register: ts_status
-  changed_when: false
-  failed_when: false
-  when: install_tailscale | bool
-
-- name: Note if tailscale still needs authentication
-  ansible.builtin.debug:
-    msg: "tailscale is installed but not logged in. Run: sudo tailscale up"
-  when:
-    - install_tailscale | bool
-    - ts_status.rc | default(1) != 0 or 'NeedsLogin' in (ts_status.stdout | default(''))

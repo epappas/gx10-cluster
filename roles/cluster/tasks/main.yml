@@ -2,15 +2,22 @@
 # ===========================================================================
 # Two-node GX10 interconnect over the ConnectX-7 QSFP ports.
 #
-# Important platform behaviour: on GX10 the ConnectX-7 is NOT on the PCI bus
-# until a cable links the two boxes. dgx-spark-mlnx-hotplug brings it up via
-# PCIe hotplug when a link is detected. So on an uncabled machine there is no
-# mlx5 device, no ibv device, and nothing to address.
+# Two platform facts drive everything here:
 #
-# This role therefore splits into two halves:
-#   1. Things that are always safe    - packages, hosts, keys, NCCL config
-#   2. Things that need the hardware  - IP addressing, MTU, link verification
-# The second half skips cleanly when the cable is not in.
+# 1. The CX-7 is NOT on the PCI bus until a cable links the two boxes -
+#    dgx-spark-mlnx-hotplug brings it up on link detect. On an uncabled
+#    machine there is no mlx5 device and nothing to address.
+#
+# 2. Each QSFP port presents TWO logical interfaces (two PCIe x4 partitions,
+#    ~100 Gb/s each), which must be on DIFFERENT subnets. Configuring only
+#    one caps the link at half its bandwidth, silently. Addresses follow
+#    NVIDIA's connect-two-sparks playbook.
+#
+# Addressing uses nmcli, NOT netplan. This host is NetworkManager-rendered,
+# and `netplan apply` unconditionally runs `nmcli device disconnect` on every
+# NM-managed device and then stops NetworkManager (see netplan's own
+# apply.py). On a box whose only link is WiFi - and on node 2, provisioned
+# over SSH - that severs the connection the play is running over.
 # ===========================================================================
 
 - name: Install RDMA and InfiniBand tooling
@@ -18,50 +25,25 @@
     name:
       - rdma-core
       - ibverbs-utils
-      - ibverbs-providers
       - infiniband-diags
       - perftest
-      - libibverbs-dev
-      - librdmacm-dev
     state: present
   become: true
 
-- name: Ensure RDMA kernel modules load at boot
-  ansible.builtin.copy:
-    dest: /etc/modules-load.d/gx10-rdma.conf
-    mode: "0644"
-    content: |
-      # Managed by gx10-cluster ansible.
-      ib_core
-      ib_uverbs
-      rdma_ucm
-      mlx5_core
-      mlx5_ib
-  become: true
-
-- name: Enable the rdma service
-  ansible.builtin.systemd:
-    name: rdma-load-modules@rdma.service
-    enabled: true
-  become: true
-  failed_when: false
-
 # --- Name resolution between the nodes -------------------------------------
-# Static entries on the interconnect subnet so torchrun/NCCL/mpirun address
-# each other over the 200G link and never over WiFi.
 - name: Add cluster hosts to /etc/hosts
   ansible.builtin.blockinfile:
     path: /etc/hosts
     marker: "# {mark} ANSIBLE MANAGED - gx10 cluster"
     block: |
       {% for h in groups['gx10'] %}
-      {{ hostvars[h].cluster_ip }}  {{ h }} {{ h }}.cluster
+      {{ cluster_subnets[0] }}.{{ hostvars[h].cluster_index }}  {{ h }} {{ h }}.cluster
       {% endfor %}
   become: true
 
 # --- Passwordless SSH between the nodes ------------------------------------
-# torchrun and mpirun launch remote workers over SSH; they need key auth
-# between the nodes themselves, not just from your laptop.
+# torchrun and mpirun launch remote workers over SSH, so the nodes need key
+# auth to each other, not just from your laptop.
 - name: Generate an inter-node SSH key
   community.crypto.openssh_keypair:
     path: "{{ primary_home }}/.ssh/id_gx10_cluster"
@@ -70,6 +52,9 @@
     owner: "{{ primary_user }}"
     group: "{{ primary_user }}"
     mode: "0600"
+    # Without this, changing `type:` later silently invalidates every key
+    # already authorized across the cluster.
+    regenerate: never
   become: true
   register: cluster_key
 
@@ -83,6 +68,21 @@
   loop: "{{ groups['gx10'] }}"
   when: hostvars[item].cluster_key is defined
 
+# hostvars[...].cluster_key only exists for hosts that ran the keygen task in
+# THIS play, so a --limit run authorizes trust in one direction only. Say so
+# rather than leaving it silent.
+- name: Warn if inter-node trust is only half-established
+  ansible.builtin.debug:
+    msg: >-
+      Only {{ keyed_nodes | length }} of {{ groups['gx10'] | length }} nodes
+      ran the key exchange in this play ({{ keyed_nodes | join(', ') }}).
+      Inter-node SSH will be one-way until you run the FULL play (no --limit)
+      with every node reachable.
+  vars:
+    keyed_nodes: >-
+      {{ groups['gx10'] | select('in', ansible_play_hosts_all) | list }}
+  when: keyed_nodes | length < groups['gx10'] | length
+
 - name: Configure SSH to use the cluster key between nodes
   ansible.builtin.blockinfile:
     path: "{{ primary_home }}/.ssh/config"
@@ -93,19 +93,98 @@
     mode: "0600"
     block: |
       {% for h in groups['gx10'] %}
-      Host {{ h }} {{ h }}.cluster {{ hostvars[h].cluster_ip }}
+      Host {{ h }} {{ h }}.cluster
+          HostName {{ cluster_subnets[0] }}.{{ hostvars[h].cluster_index }}
           User {{ primary_user }}
           IdentityFile ~/.ssh/id_gx10_cluster
           StrictHostKeyChecking accept-new
       {% endfor %}
   become: true
 
-# --- NCCL configuration ----------------------------------------------------
+# ===========================================================================
+# Hardware-dependent half - skips cleanly when the cable is not connected.
+# ===========================================================================
+- name: Detect ConnectX (mlx5) interfaces that have carrier
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      for d in /sys/class/net/*/device/driver; do
+        [ -e "$d" ] || continue
+        [ "$(basename "$(readlink -f "$d")")" = "mlx5_core" ] || continue
+        iface=$(basename "$(dirname "$(dirname "$d")")")
+        # Only the pair belonging to the cabled port carries a link; the
+        # other pair exists but is down. Taking the first N regardless
+        # would configure dead interfaces.
+        [ "$(cat /sys/class/net/$iface/carrier 2>/dev/null)" = "1" ] && echo "$iface"
+      done | sort
+    executable: /bin/bash
+  register: mlx_ifaces
+  changed_when: false
+
+- name: Record interconnect state
+  ansible.builtin.set_fact:
+    cluster_ifaces: "{{ mlx_ifaces.stdout_lines | default([]) }}"
+    cluster_link_present: "{{ (mlx_ifaces.stdout_lines | default([])) | length > 0 }}"
+
+- name: Explain a missing interconnect
+  ansible.builtin.debug:
+    msg: >-
+      No ConnectX-7 interface with carrier on {{ ansible_hostname }}. On GX10
+      the NIC appears via PCIe hotplug only once a QSFP cable links the two
+      boxes. Cable them and re-run: ansible-playbook site.yml --tags cluster
+  when: not cluster_link_present
+
+- name: Warn if only one interconnect partition is up
+  ansible.builtin.debug:
+    msg: >-
+      Only {{ cluster_ifaces | length }} ConnectX interface(s) have carrier:
+      {{ cluster_ifaces | join(', ') }}. Each QSFP port presents two ~100 Gb/s
+      partitions and both are needed for the full 200 Gb/s. Check the cable.
+  when:
+    - cluster_link_present | bool
+    - cluster_ifaces | length < 2
+
+# Each detected partition gets an address on its own subnet - partition 0 on
+# cluster_subnets[0], partition 1 on cluster_subnets[1]. Both on one subnet is
+# explicitly unsupported by NVIDIA.
+- name: Configure the interconnect partitions
+  community.general.nmcli:
+    conn_name: "gx10-cluster-{{ idx }}"
+    ifname: "{{ iface }}"
+    type: ethernet
+    ip4: "{{ cluster_subnets[idx] }}.{{ cluster_index }}/{{ cluster_subnet_prefix }}"
+    # No gateway, no DNS, never the default route: this is a point-to-point
+    # cable, not a path to anywhere. Routing stays on WiFi/LAN.
+    never_default4: true
+    mtu: "{{ cluster_mtu | default(omit, true) }}"
+    autoconnect: true
+    state: present
+  become: true
+  loop: "{{ cluster_ifaces[: cluster_subnets | length] }}"
+  loop_control:
+    index_var: idx
+    loop_var: iface
+  when: cluster_link_present | bool
+
+# --- NCCL ------------------------------------------------------------------
+# Written AFTER detection - the previous version templated this before
+# cluster_link_present existed, so its interface-binding branch was dead code
+# that could never render.
 - name: Write system-wide NCCL configuration
   ansible.builtin.template:
     src: nccl.conf.j2
     dest: /etc/nccl.conf
     mode: "0644"
+  become: true
+
+# copy does not create intermediate directories.
+- name: Ensure the cluster directory exists
+  ansible.builtin.file:
+    path: "{{ primary_home }}/cluster"
+    state: directory
+    owner: "{{ primary_user }}"
+    group: "{{ primary_user }}"
+    mode: "0755"
   become: true
 
 - name: Install the two-node all-reduce benchmark
@@ -117,74 +196,9 @@
     mode: "0755"
   become: true
 
-- name: Install the cluster launch helper
-  ansible.builtin.template:
-    src: cluster-run.sh.j2
-    dest: "{{ primary_home }}/.local/bin/cluster-run"
-    owner: "{{ primary_user }}"
-    group: "{{ primary_user }}"
-    mode: "0755"
-  become: true
-
-# ===========================================================================
-# Hardware-dependent half
-# ===========================================================================
-- name: Detect ConnectX (mlx5) network interfaces
-  ansible.builtin.shell:
-    cmd: |
-      set -o pipefail
-      for d in /sys/class/net/*/device/driver; do
-        [ -e "$d" ] || continue
-        drv=$(basename "$(readlink -f "$d")")
-        if [ "$drv" = "mlx5_core" ]; then
-          basename "$(dirname "$(dirname "$d")")"
-        fi
-      done
-    executable: /bin/bash
-  register: mlx_ifaces
-  changed_when: false
-  failed_when: false
-
-- name: Record whether the interconnect is present
-  ansible.builtin.set_fact:
-    cluster_iface: "{{ (mlx_ifaces.stdout_lines | default([])) | first | default('') }}"
-    cluster_link_present: "{{ (mlx_ifaces.stdout_lines | default([])) | length > 0 }}"
-
-- name: Explain a missing interconnect
+- name: Report interconnect status
   ansible.builtin.debug:
     msg: >-
-      No ConnectX-7 interface found on {{ ansible_hostname }}. On GX10 the
-      NIC appears via PCIe hotplug only once a QSFP cable links the two
-      boxes. Cable them together and re-run: ansible-playbook site.yml
-      --tags cluster
-  when: not cluster_link_present
-
-- name: Configure the interconnect interface
+      Interconnect: {{ cluster_ifaces | join(', ') }} on
+      {% for s in cluster_subnets[: cluster_ifaces | length] %}{{ s }}.{{ cluster_index }} {% endfor %}
   when: cluster_link_present | bool
-  block:
-    - name: Write netplan config for the interconnect
-      ansible.builtin.template:
-        src: 90-gx10-cluster.yaml.j2
-        dest: /etc/netplan/90-gx10-cluster.yaml
-        mode: "0600"
-      become: true
-      register: netplan_cfg
-
-    - name: Apply netplan
-      ansible.builtin.command: netplan apply
-      become: true
-      when: netplan_cfg.changed
-      changed_when: true   # only runs when the config above actually changed
-
-    - name: Show RDMA devices
-      ansible.builtin.command: ibv_devinfo
-      register: ibv_out
-      changed_when: false
-      failed_when: false
-
-    - name: Report RDMA status
-      ansible.builtin.debug:
-        msg: >-
-          Interconnect {{ cluster_iface }} configured as
-          {{ cluster_ip }}/{{ cluster_subnet_prefix }} (MTU {{ cluster_mtu }}).
-          RDMA: {{ 'available' if ibv_out.rc == 0 else 'ibv_devinfo returned nothing' }}

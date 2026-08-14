@@ -1,28 +1,30 @@
 ---
-# Docker and the NVIDIA Container Toolkit ship with DGX OS, so this role
-# configures rather than installs. The part that is actually missing on a
-# fresh GX10 is group membership - without it every docker call needs sudo.
+# Docker and the NVIDIA Container Toolkit ship with DGX OS. This role
+# CONFIGURES; it must never install a Docker packaging.
+#
+# DGX OS carries Docker's own packages (docker-ce, docker-ce-cli,
+# containerd.io) from repo.download.nvidia.com/baseos at pin priority 600,
+# plus the nv-docker-gpus / nv-docker-options integration packages. Asking apt
+# for Ubuntu's docker.io / docker-buildx / docker-compose-v2 is unsatisfiable:
+#
+#   containerd.io : Conflicts: containerd
+#   E: Error, pkgProblemResolver::Resolve generated breaks
+#
+# which fails the task and aborts the play before any later role runs.
 
-- name: Ensure docker is installed
-  ansible.builtin.apt:
-    name:
-      - docker.io
-      - docker-buildx
-      - docker-compose-v2
-    state: present
-  become: true
-  register: docker_pkg
-  failed_when:
-    - docker_pkg.failed
-    - "'is already the newest version' not in (docker_pkg.msg | default(''))"
+- name: Verify docker is present
+  ansible.builtin.command: docker --version
+  register: docker_version
+  changed_when: false
 
-- name: Ensure NVIDIA Container Toolkit is installed
-  ansible.builtin.apt:
-    name:
-      - nvidia-container-toolkit
-      - nvidia-container-toolkit-base
-    state: present
-  become: true
+- name: Verify the NVIDIA Container Toolkit is present
+  ansible.builtin.command: nvidia-ctk --version
+  register: ctk_version
+  changed_when: false
+
+- name: Report docker versions
+  ansible.builtin.debug:
+    msg: "{{ docker_version.stdout }} | {{ ctk_version.stdout_lines | first }}"
 
 - name: Add primary user to the docker group
   ansible.builtin.user:
@@ -43,18 +45,27 @@
   ansible.builtin.command: nvidia-ctk runtime configure --runtime=docker --set-as-default
   become: true
   register: ctk
-  changed_when: "'Config file has been modified' in (ctk.stderr | default(''))"
+  # nvidia-ctk logs to stderr and prints "Wrote updated config to <path>".
+  # It does NOT print "Config file has been modified" - that string does not
+  # exist in the binary (verified with strings), so grepping for it made this
+  # task permanently report ok and never notify the handler.
+  changed_when: "'Wrote updated config' in (ctk.stderr | default(''))"
   notify: Restart docker
 
-# Defaults tuned for an ML box. nvidia-ctk owns the "runtimes" block of
-# daemon.json, so read what is there and merge rather than overwrite -
-# clobbering it would strip the NVIDIA runtime registration added above.
+# nvidia-ctk owns the "runtimes" and "default-runtime" keys, so read and merge
+# rather than overwrite - a plain template here would strip the GPU runtime
+# registration made by the task above.
 - name: Read existing docker daemon.json
   ansible.builtin.slurp:
     src: /etc/docker/daemon.json
   become: true
   register: daemon_json_raw
-  failed_when: false
+  # Tolerate only "not there yet"; any other read failure must surface,
+  # because falling back to {} would silently discard the runtimes block.
+  failed_when:
+    - daemon_json_raw.failed | default(false)
+    - "'not exist' not in (daemon_json_raw.msg | default(''))"
+    - "'No such file' not in (daemon_json_raw.msg | default(''))"
 
 - name: Merge GX10 defaults into daemon.json
   ansible.builtin.copy:
@@ -63,9 +74,9 @@
     backup: true
     content: |
       {{
-        ((daemon_json_raw.content | default('') | b64decode | from_json)
+        ((daemon_json_raw.content | b64decode | from_json)
            if (daemon_json_raw.content is defined) else {})
-        | combine(docker_gx10_defaults)
+        | combine(docker_gx10_defaults, recursive=true)
         | to_nice_json(indent=2)
       }}
   become: true

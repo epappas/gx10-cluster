@@ -1,52 +1,28 @@
 ---
-# uv is the only Python installer used on this box. It resolves and builds
-# aarch64 wheels far faster than pip and manages interpreter versions itself,
-# which matters because the system Python 3.12 must stay untouched (DGX
-# tooling depends on it).
-
-- name: Check whether uv is installed
-  ansible.builtin.stat:
-    path: "{{ primary_home }}/.local/bin/uv"
-  register: uv_bin
+# uv is the only Python installer used here. It resolves aarch64 wheels far
+# faster than pip and manages interpreters itself, which matters because the
+# system Python 3.12 must stay untouched - DGX tooling depends on it.
+#
+# uv is NOT self-updated by this role. Auto-updating a build-critical tool on
+# every run contradicts the goal of two identical machines, and on DGX OS,
+# where uv is distro-installed, `uv self update` refuses outright.
 
 - name: Install uv
   ansible.builtin.shell:
     cmd: set -o pipefail && curl -LsSf https://astral.sh/uv/install.sh | sh
     executable: /bin/bash
-    creates: "{{ primary_home }}/.local/bin/uv"
-  become: true
+    creates: "{{ uv_bin }}"
   become_user: "{{ primary_user }}"
+  become: true
   environment:
     UV_INSTALL_DIR: "{{ primary_home }}/.local/bin"
-  when: not uv_bin.stat.exists
 
-- name: Update uv to the current release
-  ansible.builtin.command: "{{ primary_home }}/.local/bin/uv self update"
-  become: true
-  become_user: "{{ primary_user }}"
-  register: uv_update
-  changed_when: "'Upgraded uv' in (uv_update.stdout | default(''))"
-  failed_when: false
-
+# No --quiet: it suppresses all output, including the "Installed" string that
+# changed_when tests for, which made these silently report ok forever.
 - name: Install standalone Python tools with uv
-  ansible.builtin.command: "{{ primary_home }}/.local/bin/uv tool install --quiet {{ item }}"
-  become: true
+  ansible.builtin.command: "{{ uv_bin }} tool install {{ item }}"
   become_user: "{{ primary_user }}"
-  environment:
-    PATH: "{{ primary_home }}/.local/bin:{{ ansible_env.PATH }}"
-  loop:
-    - ruff
-    - ipython
-    - pre-commit
-    - httpie
+  become: true
+  loop: [ruff, ipython, pre-commit]
   register: uv_tools
   changed_when: "'Installed' in (uv_tools.stderr | default(''))"
-
-- name: Ensure the projects directory exists
-  ansible.builtin.file:
-    path: "{{ primary_home }}/projects"
-    state: directory
-    owner: "{{ primary_user }}"
-    group: "{{ primary_user }}"
-    mode: "0755"
-  become: true

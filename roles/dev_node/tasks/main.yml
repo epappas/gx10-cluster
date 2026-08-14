@@ -1,7 +1,6 @@
 ---
-# Node goes through nvm rather than apt or NodeSource: it keeps node in
-# userland (no sudo for global installs) and makes switching versions per
-# project trivial. NodeSource arm64 builds also lag behind on this platform.
+# Node via nvm rather than apt or NodeSource: it keeps node in userland (no
+# sudo for global installs) and NodeSource's arm64 builds lag on this platform.
 
 - name: Install nvm
   ansible.builtin.shell:
@@ -11,8 +10,8 @@
       | bash
     executable: /bin/bash
     creates: "{{ primary_home }}/.nvm/nvm.sh"
-  become: true
   become_user: "{{ primary_user }}"
+  become: true
 
 - name: Install Node.js {{ node_version }}
   ansible.builtin.shell:
@@ -22,10 +21,9 @@
       nvm install {{ node_version }}
       nvm alias default {{ node_version }}
     executable: /bin/bash
-  become: true
+    creates: "{{ primary_home }}/.nvm/alias/default"
   become_user: "{{ primary_user }}"
-  register: node_install
-  changed_when: "'already installed' not in (node_install.stdout | default(''))"
+  become: true
 
 - name: Install global npm packages
   ansible.builtin.shell:
@@ -35,7 +33,11 @@
       nvm use default >/dev/null
       npm install -g {{ npm_globals | join(' ') }}
     executable: /bin/bash
-  become: true
   become_user: "{{ primary_user }}"
+  become: true
   register: npm_global
-  changed_when: "'added' in (npm_global.stdout | default('')) or 'changed' in (npm_global.stdout | default(''))"
+  # npm prints "changed 0 packages" on a no-op, so testing for the substring
+  # "changed" matches every run. Count the actual number instead.
+  changed_when: >-
+    npm_global.stdout is search('added \d+ package')
+    or npm_global.stdout is search('changed [1-9]\d* package')

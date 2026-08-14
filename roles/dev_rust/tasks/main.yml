@@ -8,25 +8,23 @@
       --component rustfmt,clippy,rust-src,rust-analyzer
     executable: /bin/bash
     creates: "{{ primary_home }}/.cargo/bin/rustup"
-  become: true
   become_user: "{{ primary_user }}"
+  become: true
 
 - name: Update the rust toolchain
   ansible.builtin.command: "{{ primary_home }}/.cargo/bin/rustup update {{ rust_channel }}"
-  become: true
   become_user: "{{ primary_user }}"
+  become: true
   register: rustup_update
   changed_when: "'updated' in (rustup_update.stdout | default(''))"
 
-# Prefer the apt build where one exists; fall back to cargo for the rest.
-# Ubuntu names the fd binary `fdfind` and bat's `batcat`, which the shell
-# role aliases back to the upstream names.
+# apt where a build exists, cargo for the rest. This split IS the config -
+# there is no variable for it, because which tool has a Debian package is a
+# fact about Ubuntu, not a preference. Note apt names the binaries batcat and
+# fdfind; the shell role aliases those back.
 - name: Install rust CLI tools available from apt
   ansible.builtin.apt:
-    name:
-      - bat
-      - fd-find
-      - zoxide
+    name: [bat, fd-find, zoxide]
     state: present
   become: true
 
@@ -34,11 +32,8 @@
   ansible.builtin.command: "{{ primary_home }}/.cargo/bin/cargo install --locked {{ item }}"
   args:
     creates: "{{ primary_home }}/.cargo/bin/{{ item }}"
-  become: true
   become_user: "{{ primary_user }}"
-  loop:
-    - eza
-    - tokei
-    - hyperfine
+  become: true
+  loop: [eza, tokei, hyperfine]
   async: 1800
   poll: 30

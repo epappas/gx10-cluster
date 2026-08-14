@@ -16,8 +16,8 @@
     mode: "0755"
   become: true
 
-# The shared environment fragment. Both bash and zsh source this, so PATH and
-# CUDA settings are defined exactly once instead of drifting between shells.
+# One environment fragment sourced by both shells, so PATH and CUDA settings
+# are defined once instead of drifting between bash and zsh.
 - name: Install shared shell environment
   ansible.builtin.template:
     src: gx10env.sh.j2
@@ -38,9 +38,7 @@
     group: "{{ primary_user }}"
     mode: "0644"
   become: true
-  loop:
-    - .bashrc
-    - .zshrc
+  loop: [.bashrc, .zshrc]
 
 - name: Install tmux configuration
   ansible.builtin.copy:
@@ -52,9 +50,17 @@
     force: false
   become: true
 
-- name: Set zsh as the login shell
+# ansible.builtin.user does not validate the shell path. Setting a login shell
+# that does not exist means sshd cannot exec it and every connection closes
+# immediately - a second, independent lockout path.
+- name: Check the target login shell exists
+  ansible.builtin.stat:
+    path: "{{ default_shell }}"
+  register: shell_bin
+
+- name: Set the login shell
   ansible.builtin.user:
     name: "{{ primary_user }}"
     shell: "{{ default_shell }}"
   become: true
-  when: default_shell is defined
+  when: shell_bin.stat.exists

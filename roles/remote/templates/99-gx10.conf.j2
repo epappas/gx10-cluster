@@ -1,28 +1,29 @@
 # Managed by gx10-cluster ansible (roles/remote). Local edits are overwritten.
-# Ubuntu 24.04 reads this from /etc/ssh/sshd_config.d/ and last-match wins,
-# so these settings override the distribution defaults above them.
+# Read from /etc/ssh/sshd_config.d/; last match wins over the defaults above.
+#
+# No `Port` directive: this host socket-activates sshd and ssh.socket owns the
+# listen address. See the assert in roles/remote/tasks/main.yml.
 
-Port {{ ssh_port }}
 PermitRootLogin {{ ssh_permit_root_login }}
 PubkeyAuthentication yes
 
-{% if (not ssh_password_auth) and (safe_to_disable_passwords | bool) %}
+{% if safe_to_disable_passwords | bool %}
+# A declared key was verified to work by an actual login probe before this
+# was written.
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 {% else %}
-# Password auth left enabled: no authorized_keys present for {{ primary_user }}.
+# Password auth deliberately left ENABLED: no declared key has been proven to
+# work on this host. Disabling it here would be an unrecoverable lockout.
 PasswordAuthentication yes
 {% endif %}
 
 X11Forwarding yes
 AllowAgentForwarding yes
-AllowTcpForwarding yes
 
-# Long-running training jobs sit idle at the prompt for hours; keep the
-# session from being reaped mid-run.
+# Training runs sit idle at the prompt for hours; do not reap the session.
 ClientAliveInterval 60
 ClientAliveCountMax 30
-TCPKeepAlive yes
 
 MaxAuthTries 4
 LoginGraceTime 30

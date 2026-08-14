@@ -1,10 +1,7 @@
 ---
 # ---------------------------------------------------------------------------
-# CUDA libraries
-# The CUDA compute repo is already configured by DGX OS, so NCCL and cuDNN
-# come from apt and stay in step with the CUDA {{ cuda_major }} toolkit.
-# NCCL is what makes the second GX10 useful - it is the transport for
-# multi-node collectives over the ConnectX-7 link.
+# CUDA libraries. The CUDA compute repo is configured by DGX OS.
+# NCCL is the transport for multi-node collectives over the ConnectX-7.
 # ---------------------------------------------------------------------------
 - name: Install NCCL and cuDNN
   ansible.builtin.apt:
@@ -13,17 +10,7 @@
       - libnccl-dev
       - "cudnn9-cuda-{{ cuda_major }}"
     state: present
-    update_cache: true
   become: true
-
-- name: Install NVIDIA developer tooling
-  ansible.builtin.apt:
-    name:
-      - "cuda-nsight-systems-{{ cuda_major }}-0"
-      - "cuda-nsight-compute-{{ cuda_major }}-0"
-    state: present
-  become: true
-  failed_when: false   # optional; not present in every DGX OS release
 
 # ---------------------------------------------------------------------------
 # The shared ML virtualenv
@@ -38,33 +25,39 @@
   become: true
 
 - name: Create the ML virtualenv
-  ansible.builtin.command: "{{ primary_home }}/.local/bin/uv venv --python {{ ml_python }} {{ ml_venv }}"
+  ansible.builtin.command: "{{ uv_bin }} venv --python {{ ml_python }} {{ ml_venv }}"
   args:
     creates: "{{ ml_venv }}/bin/python"
-  become: true
   become_user: "{{ primary_user }}"
+  become: true
 
-# torch must come from the cu130 index. The wheels on PyPI are built for
-# x86 CUDA 12 and either fail to install or silently lack sm_121 kernels,
-# which shows up later as "no kernel image is available for execution".
-- name: Install PyTorch aarch64 sm_121 wheels for CUDA {{ cuda_major }}
+# torch must come from the cu130 index: it is the only one publishing aarch64
+# wheels with sm_121 kernels. Installing from PyPI gives you a wheel that
+# imports fine and then fails at the first kernel launch with
+# "no kernel image is available for execution on the device".
+- name: Install PyTorch aarch64 wheels for CUDA {{ cuda_major }}
   ansible.builtin.command: >-
-    {{ primary_home }}/.local/bin/uv pip install
+    {{ uv_bin }} pip install
     --python {{ ml_venv }}/bin/python
     --index-url {{ torch_index_url }}
-    torch=={{ torch_version }} torchvision torchaudio
-  become: true
+    torch=={{ torch_version }} torchvision
   become_user: "{{ primary_user }}"
+  become: true
   register: torch_install
   changed_when: "'Installed' in (torch_install.stderr | default(''))"
 
+# Also from the cu130 index. Several of these (peft, trl, bitsandbytes) depend
+# on torch, and resolving them against PyPI would try to pull the non-CUDA
+# build over the one just installed.
 - name: Install the rest of the ML stack
   ansible.builtin.command: >-
-    {{ primary_home }}/.local/bin/uv pip install
+    {{ uv_bin }} pip install
     --python {{ ml_venv }}/bin/python
-    {{ ml_packages | reject('search', '^torch') | list | join(' ') }}
-  become: true
+    --index-url {{ torch_index_url }}
+    --extra-index-url https://pypi.org/simple
+    {{ ml_packages | join(' ') }}
   become_user: "{{ primary_user }}"
+  become: true
   register: ml_install
   changed_when: "'Installed' in (ml_install.stderr | default(''))"
 
@@ -73,9 +66,13 @@
     {{ ml_venv }}/bin/python -c
     "import torch;
     assert torch.cuda.is_available(), 'CUDA not available to torch';
-    print(torch.__version__, torch.cuda.get_device_name(0), torch.cuda.get_device_capability(0))"
-  become: true
+    cc = torch.cuda.get_device_capability(0);
+    assert f'{cc[0]}.{cc[1]}' == '{{ gpu_arch_list }}', f'expected sm_{{ gpu_arch_list }}, got {cc}';
+    x = torch.randn(2048, 2048, device='cuda');
+    torch.cuda.synchronize();
+    print(torch.__version__, torch.cuda.get_device_name(0), cc)"
   become_user: "{{ primary_user }}"
+  become: true
   register: torch_check
   changed_when: false
 
@@ -84,7 +81,7 @@
     msg: "torch: {{ torch_check.stdout }}"
 
 # ---------------------------------------------------------------------------
-# Ollama - easiest path to running local models
+# Ollama
 # ---------------------------------------------------------------------------
 - name: Install ollama
   ansible.builtin.shell:
@@ -102,47 +99,53 @@
   become: true
   when: install_ollama | bool
 
-- name: Configure ollama to listen on the cluster network
+- name: Configure ollama
   ansible.builtin.copy:
     dest: /etc/systemd/system/ollama.service.d/override.conf
     mode: "0644"
     content: |
       # Managed by gx10-cluster ansible.
       [Service]
-      # Reachable from the other node and from your laptop, not just localhost.
-      Environment="OLLAMA_HOST=0.0.0.0:11434"
-      # 128 GB of unified memory means large models stay resident; keep them
-      # loaded rather than paying the reload cost on every request.
+      Environment="OLLAMA_HOST={{ ollama_host }}"
       Environment="OLLAMA_KEEP_ALIVE=30m"
-      Environment="OLLAMA_MAX_LOADED_MODELS=2"
+      # Deliberately 1. On unified memory nvidia-smi reports no framebuffer,
+      # so ollama's size estimation works against a pool the OS and page
+      # cache also live in. Two large models resident is how you reach the
+      # swap cliff. Raise only after measuring.
+      Environment="OLLAMA_MAX_LOADED_MODELS=1"
+      Environment="OLLAMA_FLASH_ATTENTION=1"
   become: true
   when: install_ollama | bool
   notify: Restart ollama
 
 # ---------------------------------------------------------------------------
-# llama.cpp - built from source with CUDA for sm_121
+# llama.cpp, built for sm_121
 # ---------------------------------------------------------------------------
 - name: Clone llama.cpp
   ansible.builtin.git:
     repo: https://github.com/ggml-org/llama.cpp.git
     dest: "{{ primary_home }}/src/llama.cpp"
-    version: master
+    version: "{{ llama_cpp_version }}"
     depth: 1
-  become: true
   become_user: "{{ primary_user }}"
+  become: true
   when: build_llama_cpp | bool
-  register: llama_src
 
+# CMAKE_CUDA_ARCHITECTURES=121 is correct as written: llama.cpp's own
+# CMakeLists rewrites 12X to 12Xa, because Blackwell's FP4 tensor core
+# instructions are not forward-compatible. No need to spell 121a here.
 - name: Build llama.cpp with CUDA
   ansible.builtin.shell:
     cmd: |
       set -e
-      cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=121 -DCMAKE_BUILD_TYPE=Release
+      cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=121 \
+            -DGGML_CUDA_FA_ALL_QUANTS=ON -DGGML_NATIVE=ON \
+            -DCMAKE_BUILD_TYPE=Release
       cmake --build build --config Release -j{{ ansible_processor_vcpus | default(20) }}
     chdir: "{{ primary_home }}/src/llama.cpp"
     creates: "{{ primary_home }}/src/llama.cpp/build/bin/llama-cli"
-  become: true
   become_user: "{{ primary_user }}"
+  become: true
   environment:
     PATH: "{{ cuda_home }}/bin:{{ ansible_env.PATH }}"
     CUDA_HOME: "{{ cuda_home }}"
@@ -156,12 +159,7 @@
     dest: "{{ primary_home }}/.local/bin/{{ item }}"
     state: link
     force: true
-  become: true
   become_user: "{{ primary_user }}"
-  loop:
-    - llama-cli
-    - llama-server
-    - llama-bench
-    - llama-quantize
+  become: true
+  loop: [llama-cli, llama-server, llama-bench, llama-quantize]
   when: build_llama_cpp | bool
-  failed_when: false
