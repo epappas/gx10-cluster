@@ -5,7 +5,9 @@
 # are never in CI - the GB10, the CUDA driver and the ConnectX-7 cannot be
 # faked in a container.
 
-SHELL := /bin/bash
+# -o pipefail so a failing command in a pipeline fails the recipe. Without it
+# `cmd | tee | tail` reports tail's status and a dead run looks successful.
+SHELL := /bin/bash -o pipefail
 export PATH := $(HOME)/.local/bin:$(PATH)
 
 LIMIT ?=
@@ -28,7 +30,11 @@ help:  ## Show this help
 # --- Checks that run anywhere (and in CI) ----------------------------------
 
 .PHONY: check
-check: lint syntax smoke render  ## Run every offline check (what CI runs)
+check: lint syntax smoke render handlers shellcheck  ## Every offline check (what CI runs)
+
+.PHONY: deps
+deps:  ## Install the pinned collections
+	ansible-galaxy collection install -r requirements.yml
 
 .PHONY: lint
 lint:  ## ansible-lint at the production profile
@@ -53,19 +59,30 @@ smoke:  ## Prove ansible.cfg actually loads and a play can run
 		|| { echo "smoke: FAILED - ansible.cfg is broken"; ansible-playbook .smoke.yml; rm -f .smoke.yml; exit 1; }
 	@rm -f .smoke.yml
 
-# Templates are the other thing lint cannot see: an undefined variable or a
-# bad filter only surfaces when it renders against real facts.
+# Templates are the other thing lint cannot see: an undefined variable or a bad
+# filter only surfaces when it renders.
 .PHONY: render
 render:  ## Render every template against real facts
-	@ansible-playbook tests/render.yml -e out=$$(mktemp -d) > /dev/null \
+	@d=$$(mktemp -d); trap 'rm -rf $$d' EXIT; \
+	ansible-playbook tests/render.yml -e out=$$d > /dev/null \
 		&& echo "render: all templates render" \
-		|| { echo "render: FAILED"; ansible-playbook tests/render.yml -e out=$$(mktemp -d); exit 1; }
+		|| { echo "render: FAILED"; ansible-playbook tests/render.yml -e out=$$d; exit 1; }
+
+# Ansible only errors on an unknown handler when the notifying task actually
+# reports changed - so a typo'd notify stays invisible on an already-provisioned
+# box and detonates on a first-time provision, the run you least want to fail.
+# Nothing else offline can catch it.
+.PHONY: handlers
+handlers:  ## Every notify: must name a handler that exists in the same role
+	@python3 tests/check_handlers.py
 
 .PHONY: shellcheck
 shellcheck:  ## Lint the shell scripts (skipped if shellcheck is absent)
-	@command -v shellcheck > /dev/null \
-		&& shellcheck bootstrap.sh && echo "shellcheck: clean" \
-		|| echo "shellcheck: not installed locally - CI runs it"
+	@if command -v shellcheck > /dev/null; then \
+		shellcheck bootstrap.sh && echo "shellcheck: clean"; \
+	else \
+		echo "shellcheck: not installed locally - CI runs it"; \
+	fi
 
 # --- Targets that need the real hardware -----------------------------------
 
@@ -82,8 +99,8 @@ verify:  ## Assert the node is in the expected state; fails loudly if not
 	ansible-playbook verify.yml $(ANSIBLE_ARGS)
 
 # The canonical Ansible test: a correct playbook changes nothing on a second
-# run. Anything reported changed here is a bug in a changed_when, a missing
-# `creates:`, or a task that rewrites a file every time.
+# run. NOTE it catches only one direction - a task that reports changed when it
+# should not. A changed_when that NEVER fires makes this target pass.
 .PHONY: idempotence
 idempotence:  ## Apply twice; the second run must report zero changes
 	@echo "==> first run"
@@ -91,7 +108,7 @@ idempotence:  ## Apply twice; the second run must report zero changes
 	@echo "==> second run (must be changed=0)"
 	@ansible-playbook site.yml -K $(ANSIBLE_ARGS) | tee .idem.log | tail -20
 	@if grep -qE 'changed=[1-9]' .idem.log; then \
-		echo; echo "IDEMPOTENCE FAILED - these tasks reported changed on a no-op run:"; \
-		grep -B2 'changed:' .idem.log | grep 'TASK' || true; \
-		rm -f .idem.log; exit 1; \
+		echo; echo "IDEMPOTENCE FAILED - tasks reported changed on a no-op run."; \
+		echo "Find them with: grep -B5 'changed:' .idem.log"; \
+		exit 1; \
 	else echo "idempotence: clean"; rm -f .idem.log; fi

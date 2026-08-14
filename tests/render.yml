@@ -1,32 +1,32 @@
 ---
 # Render every template against real facts.
 #
-# This exists because neither ansible-lint nor --syntax-check evaluates a
-# template. An undefined variable, a typo'd filter or a bad slice only shows
-# up when Jinja actually runs - which, without this, means the first time you
-# provision a machine.
+# Neither ansible-lint nor --syntax-check evaluates a template, so an undefined
+# variable or a bad filter surfaces only when Jinja runs - which, without this,
+# means the first time you provision a machine.
 #
-# Facts normally set at runtime by the roles are supplied here for both
-# branches, so conditional blocks get exercised too.
+# Runs on localhost, NOT the gx10 inventory group, deliberately:
+#   - inventory-independent, so renaming a group or fat-fingering --limit
+#     cannot turn this suite into a silent no-op that reports success;
+#   - it does not try to SSH to the second node the moment one is added, which
+#     would make CI permanently red for a template test that needs no cluster.
 #
 #   make render
 
 - name: Render all templates
-  hosts: gx10
+  hosts: localhost
+  connection: local
   gather_facts: true
 
   vars:
     out: /tmp/gx10-render
-    # Template lookups resolve relative to THIS playbook's directory, so
-    # paths must be anchored at the repo root explicitly.
     repo_root: "{{ playbook_dir | dirname }}"
 
-    # roles/cluster sets these after hardware detection
+    # Facts the roles set at runtime, supplied so conditional branches render.
+    cluster_index: 10
+    cluster_rank: 0
     cluster_link_present: true
     cluster_ifaces: [enp1s0f1np1, enP2p1s0f1np1]
-
-    # roles/remote sets this after the public-key login probe
-    safe_to_disable_passwords: false
 
   tasks:
     - name: Ensure the output directory exists
@@ -35,41 +35,84 @@
         state: directory
         mode: "0700"
 
-    - name: Render every template in the repo
-      ansible.builtin.template:
-        src: "{{ item }}"
-        dest: "{{ out }}/{{ item | basename | regex_replace('\\.j2$', '') }}"
-        mode: "0644"
-      loop:
-        - "{{ repo_root }}/roles/shell/templates/gx10env.sh.j2"
-        - "{{ repo_root }}/roles/cluster/templates/nccl.conf.j2"
-        - "{{ repo_root }}/roles/remote/templates/99-gx10.conf.j2"
+    # Discovered, not hand-listed: a new template is covered automatically.
+    # (fileglob cannot glob directory components; find can.)
+    - name: Discover every template in the repo
+      ansible.builtin.find:
+        paths: "{{ repo_root }}/roles"
+        patterns: "*.j2"
+        recurse: true
+      register: templates
 
-    # The shell fragment is sourced by every login. A syntax error in it
-    # breaks the shell for the user, which lint cannot catch.
+    - name: Fail if no templates were found
+      ansible.builtin.assert:
+        that: templates.files | length > 0
+        fail_msg: "Found no .j2 templates - the discovery glob is broken, not the repo."
+
+    - name: Render every template
+      ansible.builtin.template:
+        src: "{{ item.path }}"
+        dest: "{{ out }}/{{ item.path | basename | regex_replace('\\.j2$', '') }}"
+        mode: "0644"
+      loop: "{{ templates.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+      vars:
+        safe_to_disable_passwords: false
+
+    # The shell fragment is sourced by every login; a syntax error in it breaks
+    # the user's shell, which lint cannot see.
     - name: Check the rendered shell fragment parses
       ansible.builtin.command: "sh -n {{ out }}/gx10env.sh"
       changed_when: false
 
-    # Renders the OTHER branch of the password-auth conditional, so both
-    # paths through the sshd template are exercised.
+    # Both branches of the password-auth conditional must be exercised - the
+    # false branch is the one that runs on a fresh node.
+    - name: Assert the default branch keeps password auth on
+      ansible.builtin.lineinfile:
+        path: "{{ out }}/10-gx10.conf"
+        line: "PasswordAuthentication yes"
+        state: present
+      check_mode: true
+      register: haspass
+      failed_when: haspass.changed
+
     - name: Render the sshd fragment with passwords disabled
       ansible.builtin.template:
-        src: "{{ repo_root }}/roles/remote/templates/99-gx10.conf.j2"
-        dest: "{{ out }}/99-gx10-nopass.conf"
+        src: "{{ repo_root }}/roles/remote/templates/10-gx10.conf.j2"
+        dest: "{{ out }}/10-gx10-nopass.conf"
         mode: "0644"
       vars:
         safe_to_disable_passwords: true
 
-    - name: Assert the disabled-password branch actually disables passwords
+    - name: Assert the hardened branch disables password auth
       ansible.builtin.lineinfile:
-        path: "{{ out }}/99-gx10-nopass.conf"
+        path: "{{ out }}/10-gx10-nopass.conf"
         line: "PasswordAuthentication no"
         state: present
       check_mode: true
       register: nopass
       failed_when: nopass.changed
 
+    # verify_checks.yml is data, not code, so nothing else validates it. A
+    # missing `hint` breaks the failure path precisely when a check fails.
+    - name: Load the verify checks
+      ansible.builtin.include_vars:
+        file: "{{ repo_root }}/vars/verify_checks.yml"
+
+    - name: Assert every verify check is well-formed
+      ansible.builtin.assert:
+        that:
+          - item.name is defined
+          - item.cmd is defined
+          - item.hint is defined
+        fail_msg: "verify check {{ item.name | default('(unnamed)') }} is missing name/cmd/hint"
+      loop: "{{ verify_checks }}"
+      loop_control:
+        label: "{{ item.name | default('(unnamed)') }}"
+
     - name: Report
       ansible.builtin.debug:
-        msg: "rendered {{ 4 }} templates to {{ out }}"
+        msg: >-
+          rendered {{ templates.files | length }} templates,
+          validated {{ verify_checks | length }} verify checks

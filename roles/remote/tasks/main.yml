@@ -50,54 +50,62 @@
   loop: "{{ authorized_keys }}"
 
 # ---------------------------------------------------------------------------
-# Whether to disable password auth is settled by PROVING a key login works,
-# not by looking at a file. A non-empty authorized_keys says nothing about
-# whether any key in it is usable (wrong mode, wrong key, or - after one run -
-# only this node's own inter-node key, which you do not hold).
+# Disabling password auth is an EXPLICIT, deliberate act - never inferred.
+#
+# An earlier version probed `ssh -o PreferredAuthentications=publickey
+# user@localhost`. That was wrong in both directions. It cannot test the key
+# that matters, because its private half is on your laptop, not on the node:
+#   - false negative: the probe fails even when your key works fine, so the
+#     hardening never applies and the setting is decorative;
+#   - false positive: ANY locally-reachable key passes it - an agent key, a
+#     shared key, the node's own inter-node key - and passwords get disabled
+#     on the strength of a credential you do not hold.
+# It also inherited the invoking shell's SSH_AUTH_SOCK, so `make apply` over
+# `ssh -A` and the same command at the console produced DIFFERENT sshd configs.
+#
+# There is no way to prove from here that you can get back in. So we do not
+# pretend: you assert it, having checked, and the assert below makes the
+# unsafe combination impossible.
 # ---------------------------------------------------------------------------
-- name: Probe whether public-key login actually works
-  ansible.builtin.command: >-
-    ssh -o BatchMode=yes
-        -o PreferredAuthentications=publickey
-        -o StrictHostKeyChecking=no
-        -o ConnectTimeout=5
-        {{ primary_user }}@localhost true
-  become_user: "{{ primary_user }}"
-  become: true
-  register: pubkey_probe
-  changed_when: false
-  failed_when: false
+- name: Refuse to disable password auth without a declared key
+  ansible.builtin.assert:
+    that: authorized_keys | length > 0
+    fail_msg: >-
+      ssh_disable_passwords is true but authorized_keys is empty. That
+      combination is an unrecoverable lockout. Declare your public key in
+      group_vars/all.yml first.
+  when: ssh_disable_passwords | bool
 
-- name: Decide whether it is safe to disable password auth
+- name: Record the password-auth decision
   ansible.builtin.set_fact:
-    # Both must hold: a key was DECLARED in this repo (so you hold the private
-    # half), and a key login demonstrably succeeds right now.
-    safe_to_disable_passwords: >-
-      {{ (authorized_keys | length > 0) and (pubkey_probe.rc == 0) }}
+    safe_to_disable_passwords: "{{ ssh_disable_passwords | bool }}"
 
-- name: Explain why password auth is staying on
+- name: Explain that password auth is staying on
   ansible.builtin.debug:
     msg: >-
-      Leaving password authentication ENABLED.
-      Declared keys: {{ authorized_keys | length }}.
-      Public-key login probe: {{ 'ok' if pubkey_probe.rc == 0 else 'FAILED (rc=' ~ pubkey_probe.rc ~ ')' }}.
-      Add your key to authorized_keys in group_vars/all.yml and re-run
-      with --tags remote.
+      Password authentication stays ENABLED ({{ authorized_keys | length }}
+      key(s) declared). To turn it off: verify from ANOTHER terminal that
+      `ssh -o PreferredAuthentications=publickey {{ primary_user }}@{{ ansible_hostname }}`
+      works, then set ssh_disable_passwords: true and re-run --tags remote.
+      Keep that terminal open while you do.
   when: not (safe_to_disable_passwords | bool)
 
 - name: Harden sshd
   ansible.builtin.template:
-    src: 99-gx10.conf.j2
-    dest: /etc/ssh/sshd_config.d/99-gx10.conf
+    src: 10-gx10.conf.j2
+    dest: /etc/ssh/sshd_config.d/10-gx10.conf
     mode: "0644"
     validate: "/usr/sbin/sshd -t -f %s"
   become: true
   notify: Restart ssh
 
 # Apply the sshd change NOW rather than at end of play. If a later role fails,
-# an unflushed handler leaves PasswordAuthentication no sitting on disk,
-# unapplied, to detonate at the next reboot with nothing connecting it to this
-# run. An immediate failure is strictly better than a delayed one.
+# an unflushed handler leaves the new config sitting on disk, unapplied, to
+# detonate at the next reboot with nothing connecting it to this run. An
+# immediate failure is strictly better than a delayed one.
+#
+# Note this flushes ALL pending handlers, not only Restart ssh - a docker
+# restart notified earlier will also fire here.
 - name: Apply sshd configuration immediately
   ansible.builtin.meta: flush_handlers
 

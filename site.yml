@@ -47,3 +47,19 @@
     - { role: ml,         tags: [ml] }
     - { role: remote,     tags: [remote] }
     - { role: cluster,    tags: [cluster] }
+
+# Deliberately a second play with NO `serial:`. The play above completes host A
+# entirely before host B starts, so during A's run B has not generated its
+# inter-node key yet and cross-authorization would silently do nothing. A new
+# play begins only once every host has finished the previous one, which is the
+# first moment both keys exist.
+- name: Establish inter-node trust
+  hosts: gx10
+  gather_facts: false
+  any_errors_fatal: true
+  tags: [cluster]
+  tasks:
+    - name: Cross-authorize the cluster SSH keys
+      ansible.builtin.include_role:
+        name: cluster
+        tasks_from: trust

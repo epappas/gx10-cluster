@@ -1,0 +1,30 @@
+---
+# Cross-authorize the inter-node SSH keys.
+#
+# Must run in a play with NO `serial:`, after every node has generated its key.
+# See the note in main.yml.
+
+- name: Read this node's cluster public key
+  ansible.builtin.slurp:
+    src: "{{ primary_home }}/.ssh/id_gx10_cluster.pub"
+  become: true
+  register: cluster_pubkey
+
+- name: Authorize every node's cluster key on this node
+  ansible.posix.authorized_key:
+    user: "{{ primary_user }}"
+    key: "{{ hostvars[item].cluster_pubkey.content | b64decode | trim }}"
+    comment: "gx10 cluster - {{ item }}"
+    state: present
+  become: true
+  loop: "{{ ansible_play_hosts_all }}"
+  when: hostvars[item].cluster_pubkey is defined
+
+- name: Warn if trust is only partly established
+  ansible.builtin.debug:
+    msg: >-
+      Only {{ ansible_play_hosts_all | length }} of
+      {{ groups['gx10'] | length }} nodes took part in this run
+      ({{ ansible_play_hosts_all | join(', ') }}). Inter-node SSH is one-way
+      until you run the full play with every node reachable.
+  when: ansible_play_hosts_all | length < groups['gx10'] | length

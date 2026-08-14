@@ -2,3 +2,6 @@
 .vault_pass
 host_vars/*.vault.yml
 __pycache__/
+.smoke.yml
+.idem.log
+.ansible/

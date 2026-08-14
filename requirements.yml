@@ -1,0 +1,16 @@
+---
+# Collections this repo uses. Pinned to major versions so a breaking release
+# cannot silently change behaviour on a machine you cannot easily re-image.
+#
+# This file also fixes CI and pre-commit: both run ansible-lint in an isolated
+# venv containing ansible-core and NO collections, which fails every task using
+# a non-builtin module. ansible-lint auto-installs what is declared here.
+#
+#   ansible-galaxy collection install -r requirements.yml
+collections:
+  - name: community.general      # ufw, nmcli, git_config
+    version: ">=13.0.0,<14.0.0"
+  - name: ansible.posix          # authorized_key, sysctl
+    version: ">=2.0.0,<3.0.0"
+  - name: community.crypto       # openssh_keypair
+    version: ">=3.0.0,<4.0.0"

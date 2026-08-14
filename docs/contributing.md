@@ -32,8 +32,20 @@ do not touch hardware, while implying broader coverage), the split is explicit:
 | `make syntax` | anywhere, CI | malformed playbooks |
 | `make smoke` | anywhere, CI | a broken `ansible.cfg` — see below |
 | `make render` | anywhere, CI | undefined vars and bad filters in templates |
-| `make idempotence` | the box | wrong `changed_when`, missing `creates:` |
+| `make handlers` | anywhere, CI | a `notify:` naming a handler that doesn't exist |
+| `make idempotence` | the box | a task reporting changed when it shouldn't |
 | `make verify` | the box | the node not being in the state we claim |
+
+Know the blind spots, so you don't trust a green run further than it deserves:
+
+- **`make idempotence` is one-directional.** It catches a task that reports
+  changed on a no-op. It cannot catch the opposite — a `changed_when` that
+  *never* fires makes it pass. That bug has shipped here twice.
+- **`make render` only sees `.j2` files.** Inline Jinja in `content:` blocks
+  and `blockinfile` bodies is untested; a typo'd variable there surfaces at
+  apply time, on the box.
+- **Nothing offline can see a `when:` typo.** `when: instal_ollama` silently
+  never fires and every check stays green.
 
 `make smoke` exists because `--syntax-check` does **not** load stdout
 callbacks. This repo once shipped an `ansible.cfg` that aborted every real run

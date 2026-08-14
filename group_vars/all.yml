@@ -123,10 +123,14 @@ install_starship: true
 ssh_port: 22
 ssh_permit_root_login: "no"
 
-# Password auth is disabled ONLY when a declared key is proven to work.
-# See roles/remote - the guard is a real login probe, not a file check.
 # Example entry: "ssh-ed25519 AAAA... you@laptop"
 authorized_keys: []
+
+# Turning this on disables password SSH auth. Do it only after verifying, from
+# another terminal, that key login works - nothing on the node can prove that
+# for you, because your private key is not here. The remote role asserts that
+# authorized_keys is non-empty before honouring it.
+ssh_disable_passwords: false
 
 enable_ufw: true
 ufw_ssh_sources:

@@ -46,15 +46,22 @@
   register: torch_install
   changed_when: "'Installed' in (torch_install.stderr | default(''))"
 
-# Also from the cu130 index. Several of these (peft, trl, bitsandbytes) depend
-# on torch, and resolving them against PyPI would try to pull the non-CUDA
-# build over the one just installed.
+# Most of these come from PyPI, but several (peft, trl, bitsandbytes) depend on
+# torch, and a resolver free to pick torch would pull the PyPI build over the
+# cu130 one installed above.
+#
+# Note the flag order is NOT arbitrary: in uv, indexes given with
+# --extra-index-url take priority over --index-url. So cu130 must be the EXTRA
+# index to win. The reverse (which this file had) makes PyPI authoritative and
+# the cu130 pin inert. torch is also named explicitly so the resolver is
+# constrained rather than merely nudged.
 - name: Install the rest of the ML stack
   ansible.builtin.command: >-
     {{ uv_bin }} pip install
     --python {{ ml_venv }}/bin/python
-    --index-url {{ torch_index_url }}
-    --extra-index-url https://pypi.org/simple
+    --index-url https://pypi.org/simple
+    --extra-index-url {{ torch_index_url }}
+    torch=={{ torch_version }}
     {{ ml_packages | join(' ') }}
   become_user: "{{ primary_user }}"
   become: true

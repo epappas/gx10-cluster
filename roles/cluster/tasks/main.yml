@@ -58,30 +58,11 @@
   become: true
   register: cluster_key
 
-- name: Authorize every node's cluster key on this node
-  ansible.posix.authorized_key:
-    user: "{{ primary_user }}"
-    key: "{{ hostvars[item].cluster_key.public_key }}"
-    comment: "gx10 cluster - {{ item }}"
-    state: present
-  become: true
-  loop: "{{ groups['gx10'] }}"
-  when: hostvars[item].cluster_key is defined
-
-# hostvars[...].cluster_key only exists for hosts that ran the keygen task in
-# THIS play, so a --limit run authorizes trust in one direction only. Say so
-# rather than leaving it silent.
-- name: Warn if inter-node trust is only half-established
-  ansible.builtin.debug:
-    msg: >-
-      Only {{ keyed_nodes | length }} of {{ groups['gx10'] | length }} nodes
-      ran the key exchange in this play ({{ keyed_nodes | join(', ') }}).
-      Inter-node SSH will be one-way until you run the FULL play (no --limit)
-      with every node reachable.
-  vars:
-    keyed_nodes: >-
-      {{ groups['gx10'] | select('in', ansible_play_hosts_all) | list }}
-  when: keyed_nodes | length < groups['gx10'] | length
+# The cross-authorization deliberately does NOT live here. With `serial: 1`
+# host A completes this entire play before host B starts, so B's key does not
+# exist yet when A runs - trust would never be established in either
+# direction. It happens in the "Establish inter-node trust" play at the end of
+# site.yml, which runs once every host has finished this one.
 
 - name: Configure SSH to use the cluster key between nodes
   ansible.builtin.blockinfile:
@@ -104,6 +85,12 @@
 # ===========================================================================
 # Hardware-dependent half - skips cleanly when the cable is not connected.
 # ===========================================================================
+# NOTE the explicit `exit 0`. A `for` loop's exit status is that of its last
+# iteration, so the natural `[ carrier = 1 ] && echo "$iface"` form returns 1
+# whenever the alphabetically-last mlx5 device is not the linked one - which
+# on a CABLED box (4 devices, 2 linked) is a coin flip. With `pipefail` that
+# became the task's status, and with any_errors_fatal it killed the run at the
+# very end of provisioning with only "non-zero return code" to go on.
 - name: Detect ConnectX (mlx5) interfaces that have carrier
   ansible.builtin.shell:
     cmd: |
@@ -112,11 +99,13 @@
         [ -e "$d" ] || continue
         [ "$(basename "$(readlink -f "$d")")" = "mlx5_core" ] || continue
         iface=$(basename "$(dirname "$(dirname "$d")")")
-        # Only the pair belonging to the cabled port carries a link; the
-        # other pair exists but is down. Taking the first N regardless
-        # would configure dead interfaces.
-        [ "$(cat /sys/class/net/$iface/carrier 2>/dev/null)" = "1" ] && echo "$iface"
+        # Only the pair belonging to the cabled port carries a link; the other
+        # pair exists but is down. Configuring those would be silently wrong.
+        if [ "$(cat "/sys/class/net/$iface/carrier" 2>/dev/null)" = "1" ]; then
+          printf '%s\n' "$iface"
+        fi
       done | sort
+      exit 0
     executable: /bin/bash
   register: mlx_ifaces
   changed_when: false

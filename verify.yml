@@ -45,7 +45,7 @@
         fail_msg: >-
           {{ item.item.name }} FAILED (rc={{ item.rc }}):
           {{ (item.stdout | default('') or item.stderr | default('')) | trim }}
-          -- {{ item.item.hint }}
+          -- {{ item.item.hint | default('(no hint recorded)') }}
       loop: "{{ checks.results }}"
       loop_control:
         label: "{{ item.item.name }}"
@@ -53,7 +53,7 @@
 
     - name: Report optional checks that did not pass
       ansible.builtin.debug:
-        msg: "{{ item.item.name }}: {{ item.item.hint }}"
+        msg: "{{ item.item.name }}: {{ item.item.hint | default('(no hint recorded)') }}"
       loop: "{{ checks.results }}"
       loop_control:
         label: "{{ item.item.name }}"

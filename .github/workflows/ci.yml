@@ -24,8 +24,16 @@ jobs:
         run: |
           pipx install --include-deps ansible-core
           pipx inject ansible-core ansible
-          pipx install ansible-lint
+          # Pinned to the pre-commit hook's version so a new ansible-lint
+          # major cannot turn CI red with zero repo changes.
+          pipx install 'ansible-lint==25.6.1'
           pipx install yamllint
+
+      # ansible-lint runs in its own isolated venv with ansible-core and NO
+      # collections, so every non-builtin module errors as unknown. It
+      # auto-installs whatever requirements.yml declares.
+      - name: Install pinned collections
+        run: ansible-galaxy collection install -r requirements.yml
 
       - name: yamllint
         run: yamllint .

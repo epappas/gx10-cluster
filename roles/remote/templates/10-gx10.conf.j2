@@ -1,5 +1,11 @@
 # Managed by gx10-cluster ansible (roles/remote). Local edits are overwritten.
-# Read from /etc/ssh/sshd_config.d/; last match wins over the defaults above.
+#
+# sshd uses the FIRST obtained value for each keyword (not the last). The main
+# sshd_config has `Include /etc/ssh/sshd_config.d/*.conf` at line 12, before
+# its own directives, so drop-ins win over the defaults below it. Within the
+# drop-in directory files are read in lexical order, so a LOW prefix wins --
+# hence 10-, not 99-. A 99- file would lose to any earlier fragment, including
+# in the dangerous direction (something else turning passwords off).
 #
 # No `Port` directive: this host socket-activates sshd and ssh.socket owns the
 # listen address. See the assert in roles/remote/tasks/main.yml.
