@@ -1,172 +1,28 @@
 ---
-# Prometheus + Grafana + node/GPU exporters.
+# Observability with ZERO resident cost.
 #
-# One platform caveat drives the design: on GB10 nvidia-smi reports NO
-# framebuffer (memory.total and memory.used are both [N/A]), because CPU and
-# GPU share one coherent pool. So "GPU memory used" does not exist as a
-# metric - node_exporter's host memory IS the GPU memory. A dashboard copied
-# from a discrete-GPU setup will show blank panels and mislead you.
+# On a unified-memory box every MB a monitoring daemon holds is a MB the model
+# cannot use, and CPU cycles spent scraping are cycles not spent on the job.
+# Prometheus alone is 105 MB on disk plus a TSDB in RAM; Grafana adds a Go
+# server on top. That is real capacity spent watching a machine instead of
+# using it.
+#
+# So the default is a script you run, not a service that runs. The full
+# Prometheus/Grafana stack is still available - see roles/observability, which
+# only optional.yml installs, and which is better run OFF this box entirely.
 
-- name: Install prometheus and node exporter
-  ansible.builtin.apt:
-    name:
-      - prometheus
-      - prometheus-node-exporter
-    state: present
-  become: true
-
-# Grafana is not in the Ubuntu archive. Same signed-apt-repo pattern as
-# tailscale and gh - no curl-pipe-shell.
-- name: Add the Grafana apt key
-  ansible.builtin.get_url:
-    url: https://apt.grafana.com/gpg.key
-    dest: /usr/share/keyrings/grafana.asc
-    mode: "0644"
-  become: true
-
-- name: Add the Grafana apt repository
-  ansible.builtin.apt_repository:
-    repo: "deb [arch={{ apt_arch }} signed-by=/usr/share/keyrings/grafana.asc] https://apt.grafana.com stable main"
-    filename: grafana
-    state: present
-  become: true
-
-- name: Install grafana
-  ansible.builtin.apt:
-    name: grafana
-    state: present
-    update_cache: true
-  become: true
-
-# DCGM is NVIDIA's GPU telemetry daemon; dcgm-exporter turns it into
-# Prometheus metrics. Support on GB10 is partial (see the memory caveat
-# above), so this is best-effort: if it does not come up, node_exporter plus
-# the nvidia-smi textfile collector below still give you the numbers that
-# matter here.
-- name: Install NVIDIA DCGM
-  ansible.builtin.apt:
-    name: datacenter-gpu-manager-4-core
-    state: present
-  become: true
-  register: dcgm_install
-  failed_when: false
-
-- name: Enable the DCGM service
-  ansible.builtin.systemd:
-    name: nvidia-dcgm
-    enabled: true
-    state: started
-  become: true
-  register: dcgm_service
-  failed_when: false
-
-- name: Note DCGM status
-  ansible.builtin.debug:
-    msg: >-
-      DCGM {{ 'is running' if (dcgm_service.status is defined and not dcgm_service.failed | default(false))
-      else 'did not start - GPU metrics fall back to the nvidia-smi collector' }}
-
-# The metrics that DO work on GB10, exported via node_exporter's textfile
-# collector: utilisation, temperature, power. Memory deliberately absent - it
-# is host memory, which node_exporter already reports properly.
-- name: Install the GPU textfile collector
-  ansible.builtin.template:
-    src: gpu-metrics.sh.j2
-    dest: /usr/local/bin/gx10-gpu-metrics
+- name: Install the status tool
+  ansible.builtin.copy:
+    src: gx10-status
+    dest: "{{ primary_home }}/.local/bin/gx10-status"
+    owner: "{{ primary_user }}"
+    group: "{{ primary_user }}"
     mode: "0755"
   become: true
 
-- name: Ensure the textfile collector directory exists
-  ansible.builtin.file:
-    path: /var/lib/prometheus/node-exporter
-    state: directory
-    owner: prometheus
-    group: prometheus
-    mode: "0755"
-  become: true
-
-- name: Install the GPU metrics timer
-  ansible.builtin.copy:
-    dest: "/etc/systemd/system/{{ item.name }}"
-    mode: "0644"
-    content: "{{ item.content }}"
-  become: true
-  loop:
-    - name: gx10-gpu-metrics.service
-      content: |
-        # Managed by gx10-cluster ansible.
-        [Unit]
-        Description=Export GB10 GPU metrics for node_exporter
-        [Service]
-        Type=oneshot
-        ExecStart=/usr/local/bin/gx10-gpu-metrics
-    - name: gx10-gpu-metrics.timer
-      content: |
-        # Managed by gx10-cluster ansible.
-        [Unit]
-        Description=Sample GB10 GPU metrics every 15s
-        [Timer]
-        OnBootSec=30s
-        OnUnitActiveSec=15s
-        AccuracySec=1s
-        [Install]
-        WantedBy=timers.target
-  loop_control:
-    label: "{{ item.name }}"
-  notify: Reload systemd
-
-- name: Configure node exporter to read the textfile directory
-  ansible.builtin.copy:
-    dest: /etc/default/prometheus-node-exporter
-    mode: "0644"
-    content: |
-      # Managed by gx10-cluster ansible.
-      ARGS="--collector.textfile.directory=/var/lib/prometheus/node-exporter"
-  become: true
-  notify: Restart node exporter
-
-- name: Configure prometheus
-  ansible.builtin.template:
-    src: prometheus.yml.j2
-    dest: /etc/prometheus/prometheus.yml
-    mode: "0644"
-    validate: "promtool check config %s"
-  become: true
-  notify: Restart prometheus
-
-- name: Bind grafana to the chosen address
-  ansible.builtin.copy:
-    dest: /etc/grafana/grafana.ini
-    mode: "0640"
-    backup: true
-    content: |
-      # Managed by gx10-cluster ansible.
-      [server]
-      http_addr = {{ monitoring_bind }}
-      http_port = {{ grafana_port }}
-      [analytics]
-      reporting_enabled = false
-      check_for_updates = false
-  become: true
-  notify: Restart grafana
-
-- name: Enable the monitoring services
-  ansible.builtin.systemd:
-    name: "{{ item }}"
-    enabled: true
-    state: started
-    daemon_reload: true
-  become: true
-  loop:
-    - prometheus
-    - prometheus-node-exporter
-    - grafana-server
-    - gx10-gpu-metrics.timer
-
-- name: Explain how to reach it
+- name: Explain
   ansible.builtin.debug:
     msg: >-
-      Grafana on {{ monitoring_bind }}:{{ grafana_port }} (admin/admin on first
-      login), Prometheus on {{ monitoring_bind }}:{{ prometheus_port }}. Bound
-      to localhost - reach them with
-      `ssh -L {{ grafana_port }}:localhost:{{ grafana_port }} {{ ansible_facts['hostname'] }}`.
+      `gx10-status` shows GPU, throttling, unified memory, swap and disk with
+      no daemon. `gx10-status -w` watches. For a scrapeable metrics endpoint
+      or dashboards, see docs/runbooks/monitoring.md

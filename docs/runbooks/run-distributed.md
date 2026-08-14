@@ -9,8 +9,8 @@
 | You want | Use | Install needed |
 |---|---|---|
 | A 2-node training run | **torchrun** | none |
-| Multi-node vLLM (a model too big for one node) | **Ray** | `make orchestrator TAGS=ray` |
-| A queue, fair-share, job accounting | **Slurm** | `make orchestrator TAGS=slurm` |
+| Multi-node vLLM (a model too big for one node) | **Ray** | `make optional TAGS=ray` |
+| A queue, fair-share, job accounting | **Slurm** | `make optional TAGS=slurm` |
 
 Neither orchestrator is installed by default, and neither is needed to run
 across both boxes — `torchrun` already does that. Reach for one when you want
@@ -46,7 +46,7 @@ see [connect-cluster](connect-cluster.md#reading-the-result).
 ## Ray
 
 ```bash
-make orchestrator TAGS=ray
+make optional TAGS=ray
 ~/venvs/ml/bin/ray status          # both nodes listed?
 ```
 
@@ -70,7 +70,7 @@ Dashboard on the head at `:8265`, bound to localhost:
 ## Slurm
 
 ```bash
-make orchestrator TAGS=slurm
+make optional TAGS=slurm
 sinfo                      # both nodes idle?
 srun -N2 hostname          # smoke test
 sbatch job.sh

@@ -53,8 +53,8 @@ inventory.yml       nodes, interconnect index and rank
 group_vars/all.yml  every tunable
 vars/               playbook-scoped data          -> vars/README.md
 tests/              render, handler and docs checks
-orchestrator.yml    ray / slurm - opt-in, never run by site.yml
-roles/              14 roles, run order = site.yml -> roles/README.md
+optional.yml        ray / slurm / metrics - opt-in, never run by site.yml
+roles/              15 roles, run order = site.yml -> roles/README.md
 docs/               runbooks and reference         -> docs/README.md
 ```
 

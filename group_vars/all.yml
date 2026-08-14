@@ -158,13 +158,17 @@ model_catalog:
 model_min_free_gb: 100
 
 # ---------------------------------------------------------------------------
-# Orchestrators - installed only by orchestrator.yml, never by site.yml
+# Orchestrators - installed only by optional.yml, never by site.yml
 # ---------------------------------------------------------------------------
 ray_version: "2.57.0"
 ray_port: 6379
 
 # ---------------------------------------------------------------------------
 # Monitoring
+#
+# The default is `gx10-status`, a script with no resident cost. These only
+# matter if you install the optional stack (optional.yml --tags dashboards),
+# which is better run OFF this box - see docs/runbooks/monitoring.md.
 # ---------------------------------------------------------------------------
 grafana_port: 3000
 prometheus_port: 9090

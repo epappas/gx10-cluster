@@ -15,24 +15,26 @@ Run order is the order in `site.yml`. Each row's tag is what you pass to
 | `dev_node` | `node`, `dev` | nvm + Node 22 |
 | `ml` | `ml` | NCCL, cuDNN, PyTorch cu130, ollama, llama.cpp built for sm_121 |
 | `inference` | `inference`, `serving` | vLLM container, `vllm-serve`, templated systemd unit |
-| `monitoring` | `monitoring` | prometheus, node_exporter, grafana, GB10 GPU textfile collector |
+| `monitoring` | `monitoring` | `gx10-status` — GPU, throttling, unified memory, swap. **No daemons** |
 | `remote` | `remote` | sshd, ufw, tailscale |
 | `cluster` | `cluster` | RDMA, interconnect addressing, inter-node SSH, `/etc/nccl.conf` |
 | `models` | `models` | pre-loads open weights. **The long pole** — ~130 GB |
 
-## Opt-in — run only by `orchestrator.yml`
+## Opt-in — run only by `optional.yml`
 
 Behind the `never` tag, so `site.yml` never touches them and a bare
-`ansible-playbook orchestrator.yml` is a no-op. Neither is required: `torchrun`
-already runs 2-node jobs.
+`ansible-playbook optional.yml` is a no-op. None is required: `torchrun`
+already runs 2-node jobs, and `gx10-status` already shows you the machine.
 
 | Role | Tag | Does |
 |---|---|---|
 | `ray` | `ray` | Ray head/worker by `cluster_rank`. The substrate multi-node vLLM uses for tensor parallelism |
 | `slurm` | `slurm` | slurmctld/slurmd + munge. Real queueing; heavy for two nodes |
+| `observability` | `exporters` | node_exporter + GPU textfile collector, ~20 MB RSS, for an external scraper |
+| `observability` | `dashboards` | the above plus prometheus + grafana **on this box** — costs model capacity |
 
 ```bash
-make orchestrator TAGS=ray
+make optional TAGS=ray
 ```
 
 ## Conventions

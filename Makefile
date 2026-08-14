@@ -108,10 +108,10 @@ verify:  ## Assert the node is in the expected state; fails loudly if not
 models:  ## Download the model sets (long; resumable)
 	ansible-playbook site.yml -K --tags models $(ANSIBLE_ARGS)
 
-.PHONY: orchestrator
-orchestrator:  ## Install ray or slurm: make orchestrator TAGS=ray
-	@[ -n "$(TAGS)" ] || { echo "pick one: make orchestrator TAGS=ray|slurm"; exit 1; }
-	ansible-playbook orchestrator.yml -K --tags $(TAGS) $(if $(LIMIT),--limit $(LIMIT),) $(EXTRA)
+.PHONY: optional
+optional:  ## Install an opt-in component: make optional TAGS=ray|slurm|exporters|dashboards
+	@[ -n "$(TAGS)" ] || { echo "pick one: make optional TAGS=ray|slurm|exporters|dashboards"; exit 1; }
+	ansible-playbook optional.yml -K --tags $(TAGS) $(if $(LIMIT),--limit $(LIMIT),) $(EXTRA)
 
 # The canonical Ansible test: a correct playbook changes nothing on a second
 # run. NOTE it catches only one direction - a task that reports changed when it

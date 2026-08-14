@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# Managed by gx10-cluster ansible (roles/monitoring). Local edits overwritten.
+#
+# Deliberately a plain file, not a .j2: it substitutes nothing, and shell is
+# full of sequences Jinja claims - ${#arr[@]} opens a comment tag, {{ }} and
+# {% %} appear in awk and parameter expansion. A template that templates
+# nothing is pure downside.
+#
+# Everything worth knowing about this box, with ZERO resident cost. On a
+# unified-memory machine every MB a monitoring daemon holds is a MB the model
+# cannot use, so the default observability story is a script you run, not a
+# service that runs.
+#
+#   gx10-status          once
+#   gx10-status -w       watch, 2s
+set -euo pipefail
+
+watch_mode=false
+[[ "${1:-}" == "-w" ]] && watch_mode=true
+
+b() { printf '\033[1m%s\033[0m\n' "$1"; }
+warn() { printf '\033[33m%s\033[0m\n' "$1"; }
+bad() { printf '\033[31m%s\033[0m\n' "$1"; }
+
+report() {
+    read -r util temp power clk < <(
+        nvidia-smi --query-gpu=utilization.gpu,temperature.gpu,power.draw,clocks.sm \
+                   --format=csv,noheader,nounits | tr -d ' ' | tr ',' ' '
+    )
+    b "GPU"
+    printf '  util %s%%   temp %s C   power %s W   sm %s MHz\n' "$util" "$temp" "$power" "$clk"
+
+    # Throttling is invisible until you look for it, and this box ships with a
+    # shared CPU/GPU power budget - a compile can steal headroom from a job.
+    # NB: test for exactly "Active". Matching /Active/ also matches "Not
+    # Active", which reports every reason as firing, always.
+    local active
+    active=$(nvidia-smi -q -d PERFORMANCE 2>/dev/null \
+        | awk '/Clocks Event Reasons/,/Counters/' \
+        | awk -F': *' '$2 == "Active" {gsub(/^ +| +$/,"",$1); print $1}' || true)
+    if [[ -n "$active" ]]; then
+        warn "  throttled: $(echo "$active" | paste -sd', ')"
+    else
+        printf '  throttling: none active\n'
+    fi
+    local capped
+    capped=$(nvidia-smi -q -d PERFORMANCE 2>/dev/null \
+        | awk -F': *' '/SW Power Capping/ {gsub(/ us/,"",$2); print $2; exit}' || true)
+    [[ -n "${capped:-}" && "$capped" != "0" ]] \
+        && printf '  power-capped for %s min since boot\n' "$((capped / 60000000))"
+
+    # THE number on this hardware. nvidia-smi reports no framebuffer because
+    # CPU and GPU share one pool, so host memory IS GPU memory.
+    echo
+    b "Unified memory (this IS GPU memory)"
+    free -g | awk '/^Mem:/ {printf "  total %s GB   used %s GB   available %s GB\n", $2, $3, $7}'
+
+    local swap_used
+    swap_used=$(free -m | awk '/^Swap:/ {print $3}')
+    if [[ "$swap_used" -gt 0 ]]; then
+        bad "  SWAP IN USE: ${swap_used} MB - on coherent memory this is a cliff, not a slope"
+    fi
+
+    echo
+    b "Top memory consumers"
+    ps -eo rss=,comm= --sort=-rss | head -5 \
+        | awk '{printf "  %6.1f GB  %s\n", $1/1048576, $2}'
+
+    echo
+    b "Disk (weights + swap live here)"
+    df -h --output=avail,pcent,target / | tail -1 | awk '{printf "  %s free (%s used)\n", $1, $2}'
+
+    local models
+    models=$(du -sh "$HOME/.cache/huggingface" 2>/dev/null | cut -f1 || true)
+    [[ -n "${models:-}" ]] && printf '  HF cache: %s\n' "$models"
+
+    # Only mention services that exist; this box may run none of them.
+    local svc=""
+    for s in ollama prometheus grafana-server ray; do
+        systemctl is-active --quiet "$s" 2>/dev/null && svc+="  $s"$'\n'
+    done
+    systemctl list-units --state=active 'vllm@*' --no-legend 2>/dev/null \
+        | awk '{print "  " $1}' | while read -r l; do svc+="$l"$'\n'; done
+    if [[ -n "$svc" ]]; then
+        echo
+        b "Serving"
+        printf '%s' "$svc"
+    fi
+}
+
+if $watch_mode; then
+    while true; do clear; report; sleep 2; done
+else
+    report
+fi

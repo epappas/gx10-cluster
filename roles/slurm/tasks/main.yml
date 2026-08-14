@@ -6,7 +6,7 @@
 # its place when you want real queueing, fair-share or job accounting - not
 # merely to run something on both boxes, which torchrun already does.
 #
-#   ansible-playbook orchestrator.yml --tags slurm -K
+#   ansible-playbook optional.yml --tags slurm -K
 
 - name: Install slurm and munge
   ansible.builtin.apt:

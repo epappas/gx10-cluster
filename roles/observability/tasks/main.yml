@@ -1,0 +1,165 @@
+---
+# The heavyweight monitoring stack. NOT installed by site.yml.
+#
+# Cost, measured from apt: prometheus 105 MB on disk plus a TSDB in RAM,
+# grafana a Go server on top, DCGM another 48 MB. On a box where host memory
+# IS GPU memory, that is model capacity spent watching the machine rather than
+# using it - which is why `gx10-status` (roles/monitoring) is the default and
+# this is opt-in.
+#
+# Two tiers, so you can take the cheap half without the expensive half:
+#
+#   --tags exporters    node_exporter + GPU textfile collector (~13 MB, ~20 MB
+#                       RSS). Enough for something ELSE to scrape.
+#   --tags dashboards   the above plus prometheus and grafana ON THIS BOX.
+#
+# Prefer running prometheus/grafana on your laptop or the second node and
+# pointing them at this one's exporter. See docs/runbooks/monitoring.md.
+
+# --- exporters: the cheap half --------------------------------------------
+- name: Install node exporter
+  ansible.builtin.apt:
+    name: prometheus-node-exporter
+    state: present
+  become: true
+  tags: [exporters, dashboards]
+
+- name: Install the GPU textfile collector
+  ansible.builtin.template:
+    src: gpu-metrics.sh.j2
+    dest: /usr/local/bin/gx10-gpu-metrics
+    mode: "0755"
+  become: true
+  tags: [exporters, dashboards]
+
+- name: Ensure the textfile collector directory exists
+  ansible.builtin.file:
+    path: /var/lib/prometheus/node-exporter
+    state: directory
+    owner: prometheus
+    group: prometheus
+    mode: "0755"
+  become: true
+  tags: [exporters, dashboards]
+
+- name: Install the GPU metrics timer
+  ansible.builtin.copy:
+    dest: "/etc/systemd/system/{{ item.name }}"
+    mode: "0644"
+    content: "{{ item.content }}"
+  become: true
+  loop:
+    - name: gx10-gpu-metrics.service
+      content: |
+        # Managed by gx10-cluster ansible.
+        [Unit]
+        Description=Export GB10 GPU metrics for node_exporter
+        [Service]
+        Type=oneshot
+        ExecStart=/usr/local/bin/gx10-gpu-metrics
+    - name: gx10-gpu-metrics.timer
+      content: |
+        # Managed by gx10-cluster ansible.
+        [Unit]
+        Description=Sample GB10 GPU metrics every 15s
+        [Timer]
+        OnBootSec=30s
+        OnUnitActiveSec=15s
+        AccuracySec=1s
+        [Install]
+        WantedBy=timers.target
+  loop_control:
+    label: "{{ item.name }}"
+  notify: Reload systemd
+  tags: [exporters, dashboards]
+
+- name: Point node exporter at the textfile directory
+  ansible.builtin.copy:
+    dest: /etc/default/prometheus-node-exporter
+    mode: "0644"
+    content: |
+      # Managed by gx10-cluster ansible.
+      ARGS="--collector.textfile.directory=/var/lib/prometheus/node-exporter"
+  become: true
+  notify: Restart node exporter
+  tags: [exporters, dashboards]
+
+- name: Enable the exporters
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  become: true
+  loop:
+    - prometheus-node-exporter
+    - gx10-gpu-metrics.timer
+  tags: [exporters, dashboards]
+
+# --- dashboards: the expensive half ---------------------------------------
+- name: Install prometheus
+  ansible.builtin.apt:
+    name: prometheus
+    state: present
+  become: true
+  tags: [dashboards]
+
+- name: Add the Grafana apt key
+  ansible.builtin.get_url:
+    url: https://apt.grafana.com/gpg.key
+    dest: /usr/share/keyrings/grafana.asc
+    mode: "0644"
+  become: true
+  tags: [dashboards]
+
+- name: Add the Grafana apt repository
+  ansible.builtin.apt_repository:
+    repo: "deb [arch={{ apt_arch }} signed-by=/usr/share/keyrings/grafana.asc] https://apt.grafana.com stable main"
+    filename: grafana
+    state: present
+  become: true
+  tags: [dashboards]
+
+- name: Install grafana
+  ansible.builtin.apt:
+    name: grafana
+    state: present
+    update_cache: true
+  become: true
+  tags: [dashboards]
+
+- name: Configure prometheus
+  ansible.builtin.template:
+    src: prometheus.yml.j2
+    dest: /etc/prometheus/prometheus.yml
+    mode: "0644"
+    validate: "promtool check config %s"
+  become: true
+  notify: Restart prometheus
+  tags: [dashboards]
+
+- name: Bind grafana to the chosen address
+  ansible.builtin.copy:
+    dest: /etc/grafana/grafana.ini
+    mode: "0640"
+    backup: true
+    content: |
+      # Managed by gx10-cluster ansible.
+      [server]
+      http_addr = {{ monitoring_bind }}
+      http_port = {{ grafana_port }}
+      [analytics]
+      reporting_enabled = false
+      check_for_updates = false
+  become: true
+  notify: Restart grafana
+  tags: [dashboards]
+
+- name: Enable prometheus and grafana
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  become: true
+  loop: [prometheus, grafana-server]
+  tags: [dashboards]

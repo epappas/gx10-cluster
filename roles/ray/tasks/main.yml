@@ -5,7 +5,7 @@
 # training, so Ray earns its place only when you want a cluster that outlives a
 # single job - or multi-node vLLM, which uses Ray for tensor parallelism.
 #
-#   ansible-playbook orchestrator.yml --tags ray -K
+#   ansible-playbook optional.yml --tags ray -K
 
 - name: Install ray
   ansible.builtin.command: >-

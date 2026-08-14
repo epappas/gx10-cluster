@@ -96,20 +96,16 @@ verify_checks:
     cmd: "test -x $HOME/.local/bin/vllm-serve"
     hint: "vllm-serve launcher missing. Re-run: make apply TAGS=inference"
 
-  - name: "prometheus"
-    cmd: "systemctl is-active --quiet prometheus"
-    required: false
-    hint: "Prometheus not running. See docs/runbooks/monitoring.md"
+  - name: "gx10-status"
+    cmd: "test -x $HOME/.local/bin/gx10-status"
+    hint: "Status tool missing. Re-run: make apply TAGS=monitoring"
 
-  - name: "grafana"
-    cmd: "systemctl is-active --quiet grafana-server"
+    # The metrics stack is opt-in and deliberately absent by default - it costs
+    # memory, which on this box is model capacity.
+  - name: "metrics exporter"
+    cmd: "systemctl is-active --quiet prometheus-node-exporter"
     required: false
-    hint: "Grafana not running. See docs/runbooks/monitoring.md"
-
-  - name: "GPU metrics"
-    cmd: "test -s /var/lib/prometheus/node-exporter/gx10_gpu.prom"
-    required: false
-    hint: "GPU textfile metrics absent. See docs/runbooks/monitoring.md#failure-modes"
+    hint: "Exporter not installed (opt-in). See docs/runbooks/monitoring.md"
 
   - name: "models cached"
     cmd: "test -d $HOME/.cache/huggingface/hub && [ \"$(ls -1 $HOME/.cache/huggingface/hub 2>/dev/null | wc -l)\" -gt 0 ]"

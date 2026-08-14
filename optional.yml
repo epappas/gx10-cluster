@@ -1,0 +1,31 @@
+---
+# Things that are ready but NOT installed by site.yml.
+#
+# torchrun already runs a 2-node job across both boxes, so neither of these is
+# needed to use the cluster. They are here, ready, for when the need appears:
+#
+#   ray         a cluster that outlives a single job, and the substrate
+#               multi-node vLLM uses for tensor parallelism.
+#   slurm       real queueing, fair-share and accounting. Heavy for two nodes.
+#   exporters   node_exporter + GPU metrics, ~20 MB RSS, for an EXTERNAL
+#               prometheus to scrape.
+#   dashboards  the above plus prometheus and grafana on this box. Costs real
+#               memory, which here is model capacity - prefer running them
+#               elsewhere and pointing at the exporter.
+#
+#   ansible-playbook optional.yml --tags ray -K
+#   ansible-playbook optional.yml --tags exporters -K
+#
+# Nothing runs without a tag, so an accidental invocation is a no-op.
+
+- name: Install optional components
+  hosts: gx10
+  serial: 1
+  any_errors_fatal: true
+
+  # The `never` tag means a bare `ansible-playbook optional.yml` does
+  # nothing at all. You have to ask for one by name.
+  roles:
+    - { role: ray,           tags: [ray, never] }
+    - { role: slurm,         tags: [slurm, never] }
+    - { role: observability, tags: [exporters, dashboards, never] }
