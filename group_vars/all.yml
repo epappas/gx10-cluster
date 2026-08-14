@@ -26,6 +26,9 @@ gpu_arch_list: "12.1"
 cuda_major: "13"
 cuda_home: /usr/local/cuda
 
+# dpkg calls aarch64 "arm64", and apt repo lines need the dpkg spelling.
+apt_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else ansible_architecture }}"
+
 # The performance cores. Verified via /proc/cpuinfo CPU part:
 #   0xd85 = Cortex-X925 @ 3.90 GHz -> 5-9, 15-19
 #   0xd87 = Cortex-A725 @ 2.81 GHz -> 0-4, 10-14
