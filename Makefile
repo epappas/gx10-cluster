@@ -30,7 +30,7 @@ help:  ## Show this help
 # --- Checks that run anywhere (and in CI) ----------------------------------
 
 .PHONY: check
-check: lint syntax smoke render handlers shellcheck  ## Every offline check (what CI runs)
+check: lint syntax smoke render handlers docs shellcheck  ## Every offline check (what CI runs)
 
 .PHONY: deps
 deps:  ## Install the pinned collections
@@ -75,6 +75,12 @@ render:  ## Render every template against real facts
 .PHONY: handlers
 handlers:  ## Every notify: must name a handler that exists in the same role
 	@python3 tests/check_handlers.py
+
+# A stale index is worse than no index - it denies the existence of a role or
+# runbook, confidently. This checks coverage only, not prose quality.
+.PHONY: docs
+docs:  ## Directory indexes must list every role, runbook and vars file
+	@python3 tests/check_docs.py
 
 .PHONY: shellcheck
 shellcheck:  ## Lint the shell scripts (skipped if shellcheck is absent)

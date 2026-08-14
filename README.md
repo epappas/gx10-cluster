@@ -32,6 +32,8 @@ Task-oriented. Start here.
 
 ## Reference
 
+- [docs/](docs/README.md) — index of everything below
+- [roles/](roles/README.md) — what each role does, and its tag
 - [hardware.md](docs/hardware.md) — GX10 facts that drive the design, and what
   DGX OS already manages so you don't re-tune it
 - [decisions.md](docs/decisions.md) — why things are the way they are, one
@@ -46,13 +48,11 @@ bootstrap.sh        the one thing you run by hand
 Makefile            every command you need
 inventory.yml       nodes, interconnect index and rank
 group_vars/all.yml  every tunable
-vars/               playbook-scoped data (verify checks)
-tests/render.yml    renders all templates against real facts
+vars/               playbook-scoped data          -> vars/README.md
+tests/              render, handler and docs checks
 orchestrator.yml    ray / slurm - opt-in, never run by site.yml
-roles/              base docker shell dev_python dev_rust dev_node ml
-                    inference monitoring remote cluster models
-                    ray slurm (orchestrator.yml only)
-docs/               runbooks and reference
+roles/              14 roles, run order = site.yml -> roles/README.md
+docs/               runbooks and reference         -> docs/README.md
 ```
 
 Run one role with `make apply TAGS=ml`, skip one with `make apply SKIP=ml`, and

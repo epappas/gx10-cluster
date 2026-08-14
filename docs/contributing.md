@@ -33,6 +33,7 @@ do not touch hardware, while implying broader coverage), the split is explicit:
 | `make smoke` | anywhere, CI | a broken `ansible.cfg` — see below |
 | `make render` | anywhere, CI | undefined vars and bad filters in templates |
 | `make handlers` | anywhere, CI | a `notify:` naming a handler that doesn't exist |
+| `make docs` | anywhere, CI | a directory index gone stale |
 | `make idempotence` | the box | a task reporting changed when it shouldn't |
 | `make verify` | the box | the node not being in the state we claim |
 
@@ -59,7 +60,9 @@ while lint and syntax-check both passed. Never trust those two alone.
 4. Add a check to `vars/verify_checks.yml` with a `hint` naming the runbook
    that fixes it.
 5. If it adds a template, add it to `tests/render.yml`.
-6. If the choice was non-obvious, add an entry to [decisions.md](decisions.md).
+6. Add a row to [roles/README.md](../roles/README.md) — `make docs` fails
+   without one.
+7. If the choice was non-obvious, add an entry to [decisions.md](decisions.md).
 
 ## Conventions
 
