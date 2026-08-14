@@ -85,7 +85,7 @@
     msg: >-
       Password authentication stays ENABLED ({{ authorized_keys | length }}
       key(s) declared). To turn it off: verify from ANOTHER terminal that
-      `ssh -o PreferredAuthentications=publickey {{ primary_user }}@{{ ansible_hostname }}`
+      `ssh -o PreferredAuthentications=publickey {{ primary_user }}@{{ ansible_facts['hostname'] }}`
       works, then set ssh_disable_passwords: true and re-run --tags remote.
       Keep that terminal open while you do.
   when: not (safe_to_disable_passwords | bool)
@@ -177,7 +177,7 @@
 # apt-managed, pinnable package instead of piping a live URL into root's shell.
 - name: Add the tailscale apt key
   ansible.builtin.get_url:
-    url: "https://pkgs.tailscale.com/stable/ubuntu/{{ ansible_distribution_release }}.noarmor.gpg"
+    url: "https://pkgs.tailscale.com/stable/ubuntu/{{ ansible_facts['distribution_release'] }}.noarmor.gpg"
     dest: /usr/share/keyrings/tailscale-archive-keyring.gpg
     mode: "0644"
   become: true
@@ -187,7 +187,7 @@
   ansible.builtin.apt_repository:
     repo: >-
       deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg]
-      https://pkgs.tailscale.com/stable/ubuntu {{ ansible_distribution_release }} main
+      https://pkgs.tailscale.com/stable/ubuntu {{ ansible_facts['distribution_release'] }} main
     filename: tailscale
     state: present
   become: true

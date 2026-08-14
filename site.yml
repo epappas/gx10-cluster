@@ -12,11 +12,11 @@
     - name: Assert this is an aarch64 GX10-class machine
       ansible.builtin.assert:
         that:
-          - ansible_architecture == "aarch64"
-          - ansible_distribution == "Ubuntu"
+          - ansible_facts['architecture'] == "aarch64"
+          - ansible_facts['distribution'] == "Ubuntu"
         fail_msg: >-
           This playbook targets aarch64 Ubuntu (DGX OS on GX10).
-          Found {{ ansible_architecture }} / {{ ansible_distribution }}.
+          Found {{ ansible_facts['architecture'] }} / {{ ansible_facts['distribution'] }}.
 
     - name: Read GPU identity
       ansible.builtin.command: nvidia-smi --query-gpu=name,driver_version,compute_cap --format=csv,noheader

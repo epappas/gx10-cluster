@@ -118,7 +118,7 @@
 - name: Explain a missing interconnect
   ansible.builtin.debug:
     msg: >-
-      No ConnectX-7 interface with carrier on {{ ansible_hostname }}. On GX10
+      No ConnectX-7 interface with carrier on {{ ansible_facts['hostname'] }}. On GX10
       the NIC appears via PCIe hotplug only once a QSFP cable links the two
       boxes. Cable them and re-run: ansible-playbook site.yml --tags cluster
   when: not cluster_link_present

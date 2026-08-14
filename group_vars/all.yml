@@ -6,11 +6,11 @@
 # Skip work with tags (`--tags ml`, `--skip-tags ml`) rather than toggles.
 # ============================================================================
 
-# ansible_user_id is a fact from the target. Do NOT use lookup('env', ...)
+# ansible_facts['user_id'] is a fact from the target. Do NOT use lookup('env', ...)
 # here - lookups evaluate on the CONTROL node, so driving node B from node A
 # would silently install everything under node A's username.
-primary_user: "{{ ansible_user_id }}"
-primary_home: "{{ ansible_env.HOME }}"
+primary_user: "{{ ansible_facts['user_id'] }}"
+primary_home: "{{ ansible_facts['env']['HOME'] }}"
 
 # Set these to configure git on the provisioned node. Left empty, the task is
 # skipped and the node's existing git config is untouched - so a fork does not
@@ -27,7 +27,7 @@ cuda_major: "13"
 cuda_home: /usr/local/cuda
 
 # dpkg calls aarch64 "arm64", and apt repo lines need the dpkg spelling.
-apt_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else ansible_architecture }}"
+apt_arch: "{{ 'arm64' if ansible_facts['architecture'] == 'aarch64' else ansible_facts['architecture'] }}"
 
 # The performance cores. Verified via /proc/cpuinfo CPU part:
 #   0xd85 = Cortex-X925 @ 3.90 GHz -> 5-9, 15-19
@@ -172,7 +172,7 @@ cluster_mtu: ""
 #
 # It must be an interface BOTH nodes can reach each other on. Override here if
 # the default route is not the path between the nodes.
-mgmt_iface: "{{ mgmt_iface_override | default(ansible_default_ipv4.interface, true) }}"
+mgmt_iface: "{{ mgmt_iface_override | default(ansible_facts['default_ipv4']['interface'], true) }}"
 mgmt_iface_override: ""
 
 # NCCL. NCCL_SOCKET_IFNAME selects the BOOTSTRAP/out-of-band channel, not the

@@ -214,6 +214,6 @@
 - name: Warn on pending reboot
   ansible.builtin.debug:
     msg: >-
-      A reboot is pending on {{ ansible_hostname }} (kernel or driver update).
+      A reboot is pending on {{ ansible_facts['hostname'] }} (kernel or driver update).
       Reboot before trusting any CUDA result from this run.
   when: reboot_required.stat.exists

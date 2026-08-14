@@ -152,13 +152,13 @@
       cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=121 \
             -DGGML_CUDA_FA_ALL_QUANTS=ON -DGGML_NATIVE=ON \
             -DCMAKE_BUILD_TYPE=Release
-      cmake --build build --config Release -j{{ ansible_processor_vcpus | default(20) }}
+      cmake --build build --config Release -j{{ ansible_facts['processor_vcpus'] | default(20) }}
     chdir: "{{ primary_home }}/src/llama.cpp"
     creates: "{{ primary_home }}/src/llama.cpp/build/bin/llama-cli"
   become_user: "{{ primary_user }}"
   become: true
   environment:
-    PATH: "{{ cuda_home }}/bin:{{ ansible_env.PATH }}"
+    PATH: "{{ cuda_home }}/bin:{{ ansible_facts['env']['PATH'] }}"
     CUDA_HOME: "{{ cuda_home }}"
   when: build_llama_cpp | bool
   async: 3600
