@@ -22,3 +22,11 @@ rules:
   truthy:
     allowed-values: ["true", "false"]
     check-keys: false
+
+  # Required by ansible-lint for config compatibility. Without these it warns
+  # on every run and disables fix mode - a permanent warning you learn to
+  # ignore is worse than the rule it protects.
+  comments-indentation: false
+  octal-values:
+    forbid-implicit-octal: true
+    forbid-explicit-octal: true

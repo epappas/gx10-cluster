@@ -28,6 +28,10 @@ jobs:
           # major cannot turn CI red with zero repo changes.
           pipx install 'ansible-lint==25.6.1'
           pipx install yamllint
+          # tests/check_handlers.py parses YAML with the plain interpreter,
+          # and setup-python provides a bare one. pipx venvs are isolated, so
+          # ansible-core's own PyYAML is not importable from here.
+          python -m pip install --quiet pyyaml
 
       # ansible-lint runs in its own isolated venv with ansible-core and NO
       # collections, so every non-builtin module errors as unknown. It

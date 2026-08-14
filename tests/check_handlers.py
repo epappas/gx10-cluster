@@ -17,7 +17,14 @@ from __future__ import annotations
 import pathlib
 import sys
 
-import yaml
+try:
+    import yaml
+except ModuleNotFoundError:  # pragma: no cover - environment problem, not a finding
+    sys.exit(
+        "handlers: PyYAML is required (pip install pyyaml).\n"
+        "  A bare interpreter cannot import it, and pipx venvs are isolated,\n"
+        "  so ansible-core's own copy is not visible from here."
+    )
 
 
 def collect_notifies(node) -> list[str]:

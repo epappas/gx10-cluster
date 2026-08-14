@@ -88,6 +88,23 @@ cost hours to rediscover: the hotplug behaviour of the CX-7, the cu130 index,
 you out, [recover-ssh-lockout](runbooks/recover-ssh-lockout.md) must say how to
 get back in.
 
+## Tooling versions
+
+`ansible-lint` is pinned to the same version in CI and in `.pre-commit-config.yaml`.
+Keep your local copy matched, or you will chase findings that only exist in one
+of the three:
+
+```bash
+uv tool install --with ansible 'ansible-lint==25.6.1'
+ansible-galaxy collection install -r requirements.yml
+python3 -m pip install pyyaml     # tests/check_handlers.py
+```
+
+`requirements.yml` matters more than it looks: `ansible-lint` runs in an
+isolated venv with `ansible-core` and no collections, so without it every
+non-builtin module reports as unknown — locally it may pass only because your
+environment happens to have them.
+
 ## Pre-commit
 
 ```bash
