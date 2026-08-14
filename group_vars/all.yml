@@ -12,8 +12,11 @@
 primary_user: "{{ ansible_user_id }}"
 primary_home: "{{ ansible_env.HOME }}"
 
-git_user_name: "Evangelos Pappas"
-git_user_email: "you@example.com"
+# Set these to configure git on the provisioned node. Left empty, the task is
+# skipped and the node's existing git config is untouched - so a fork does not
+# silently inherit somebody else's identity.
+git_user_name: ""
+git_user_email: ""
 
 # ---------------------------------------------------------------------------
 # Platform. Asserted in site.yml against nvidia-smi, not assumed.

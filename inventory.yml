@@ -21,8 +21,8 @@ all:
           cluster_rank: 0
 
         # gx10-b:
-        #   ansible_host: <node-2-lan-address>    # LAN address of the second box
-        #   ansible_user: epappas
+        #   ansible_host: <node-2-lan-address>
+        #   ansible_user: <your-user>
         #   cluster_index: 11
         #   cluster_rank: 1
 
