@@ -81,7 +81,7 @@ links the boxes. If it *is* cabled:
 
 ```bash
 lspci | grep -i mellanox                  # did hotplug fire?
-systemctl status dgx-spark-mlnx-hotplug
+journalctl -b | grep -i mtk-hotplug   # it's a udev rule, not a service
 dmesg | grep -i mlx5 | tail
 ```
 

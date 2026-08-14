@@ -6,10 +6,15 @@ written so a second box comes up identical to the first.
 ```bash
 ./bootstrap.sh        # install ansible via uv, no sudo
 make apply            # provision (prompts for sudo). Run under tmux.
+# log out and back in  -- docker group, zsh, shell environment
 make verify           # assert the node is in the expected state
 ```
 
 `make` on its own lists every target.
+
+> **Status: applied end-to-end on zero machines so far.** The hardware facts in
+> [hardware.md](docs/hardware.md) are verified on a live GX10; the playbook's
+> own behaviour is reviewed and statically checked, not yet proven by a run.
 
 ## Runbooks
 
@@ -46,8 +51,14 @@ roles/              base docker shell dev_python dev_rust dev_node ml remote clu
 docs/               runbooks and reference
 ```
 
-Run one role with `make apply TAGS=ml`; skip one with `--skip-tags`. There are
-no `enable_*` variables — tags already do that job.
+Run one role with `make apply TAGS=ml`, skip one with `make apply SKIP=ml`, and
+pass anything else with `EXTRA='-e allow_apt_upgrade=true'`. (Not `make apply
+-e ...` — make eats `-e` as its own flag and the variable never reaches
+Ansible.)
+
+There is no `enable_*` variable *per role* — tags do that. A few within-role
+toggles remain (`build_llama_cpp`, `install_ollama`, `enable_ufw`) because tags
+cannot reach inside a role.
 
 ## Requirements
 

@@ -9,7 +9,7 @@ sheet.
 | CPU | 20-core ARM: 10x Cortex-X925 + 10x Cortex-A725, `aarch64` |
 | Memory | 128 GB **unified**, coherent between CPU and GPU |
 | Storage | 1 TB NVMe |
-| Interconnect | 2x ConnectX-7 QSFP |
+| Interconnect | ConnectX-7, 2x QSFP ports (4 RoCE devices) |
 | OS | DGX OS 7.5 (Ubuntu 24.04), driver 580.173, CUDA 13.0 |
 
 ## Everything must be aarch64
@@ -35,10 +35,12 @@ framebuffer** (`FB Memory Total: N/A`), which has consequences:
   memory and over-allocate against a pool the OS also lives in. The failure
   mode is swapping, and on coherent memory swapping is a cliff, not a slope.
   Hence `vm.swappiness=1` and a conservative `OLLAMA_MAX_LOADED_MODELS`.
-- **Keep `pin_memory=True`.** The intuitive conclusion — no PCIe transfer, so
-  pinning is a wasted copy — is backwards here. Pinned host-to-device copies
-  are several times faster than pageable, dramatically so for many small
-  copies. Same reason `--no-mmap` is right for llama.cpp on this box.
+- **Keep `pin_memory=True`.** *(Confidence: community-reported.)* The intuitive
+  conclusion — no PCIe transfer, so pinning is a wasted copy — is reportedly
+  backwards here: pinned host-to-device copies measure several times faster
+  than pageable, dramatically so for many small copies. Same claim underlies
+  `--no-mmap` for llama.cpp. **Measure it yourself before designing around it**
+  — copy a GB with and without `pin_memory` and compare.
 - ECC, power limits and clock control are all `N/A`. `nvidia-smi -pl` / `-ac`
   do not work on GB10; a playbook that tried would fail.
 
@@ -57,6 +59,11 @@ runs at the pace of its slowest thread, so spreading across E-cores makes every
 barrier wait on them.
 
 ## The ConnectX-7 is not there until you cable it
+
+> **Confidence: NVIDIA docs.** This section is from NVIDIA's
+> `connect-two-sparks` playbook, not measured here — our NIC is not on the bus
+> because the box is not cabled. Upgrade this note once it is.
+
 
 It arrives via PCIe hotplug (`dgx-spark-mlnx-hotplug`). Before cabling there is
 no `mlx5` device and `ibv_devices` is empty.
@@ -78,7 +85,7 @@ worst; several were removed from this repo for exactly that reason.
 | CPU governor | `nv-cpu-governor` | `performance` on all 20 cores |
 | `vm.max_map_count` | `10-map-count.conf` | 1048576 |
 | `nofile` | `nv-limits.conf` | 500000 (and it sorts *after* ours, so it wins) |
-| GPU persistence mode | `nv-persistence-mode` | enabled |
+| GPU persistence mode | `nv-persistence-mode` pkg → `nvidia-persistenced.service` | enabled |
 | NVMe scheduler | kernel | `none`, already optimal |
 | ARP for multi-NIC | `20-nvidia-defaults.conf` | `arp_ignore=1`, `arp_announce=2` |
 | Driver pinning | `cuda-compute-repo-lowpri2` | pins `nvidia-*580`, **not** `nvidia-modprobe` |

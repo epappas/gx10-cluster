@@ -10,7 +10,13 @@ export PATH := $(HOME)/.local/bin:$(PATH)
 
 LIMIT ?=
 TAGS  ?=
-ANSIBLE_ARGS := $(if $(LIMIT),--limit $(LIMIT),) $(if $(TAGS),--tags $(TAGS),)
+SKIP  ?=
+# Passthrough for anything else. Note you CANNOT write `make apply -e foo=bar`
+# - make eats -e as --environment-overrides and the variable never reaches
+# ansible. Use: make apply EXTRA='-e allow_apt_upgrade=true'
+EXTRA ?=
+ANSIBLE_ARGS := $(if $(LIMIT),--limit $(LIMIT),) $(if $(TAGS),--tags $(TAGS),) \
+                $(if $(SKIP),--skip-tags $(SKIP),) $(EXTRA)
 
 .DEFAULT_GOAL := help
 

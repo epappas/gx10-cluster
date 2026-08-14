@@ -70,6 +70,21 @@ The play is idempotent — fix the cause and re-run. Nothing needs unwinding.
 make apply TAGS=ml      # re-run just the role that failed
 ```
 
+## Your first session
+
+Everything lives where the shell environment points it:
+
+```bash
+ml                       # activate the shared venv (~/venvs/ml) - torch lives here
+pcore <cmd>              # pin to the performance cores (5-9,15-19)
+gpuw                     # watch the GPU
+llama-cli --help         # llama.cpp binaries are on PATH
+ollama run <model>       # bound to localhost; tunnel in with ssh -L 11434:localhost:11434
+```
+
+`torchrun` is **not** on PATH — it is `~/venvs/ml/bin/torchrun`, or run `ml`
+first. Models land in `~/.cache/huggingface` and ollama's own store.
+
 ## Rollback
 
 No automated rollback, by design: the roles are additive and idempotent. To
@@ -77,9 +92,20 @@ undo specific changes:
 
 | Change | Undo |
 |---|---|
-| Package holds | `sudo apt-mark unhold nvidia-modprobe` |
-| sysctl | `sudo rm /etc/sysctl.d/90-gx10.conf && sudo sysctl --system` |
+| Package holds | `sudo apt-mark unhold $(apt-mark showhold)` |
+| sysctl | `sudo rm /etc/sysctl.d/90-gx10.conf && sudo sysctl -w vm.swappiness=60 vm.min_free_kbytes=45155` |
 | limits | `sudo rm /etc/security/limits.d/90-gx10.conf` |
 | sshd | `sudo rm /etc/ssh/sshd_config.d/99-gx10.conf && sudo systemctl restart ssh` |
+| firewall | `sudo ufw disable` |
+| interconnect | `sudo nmcli con delete gx10-cluster-0 gx10-cluster-1` |
 | docker daemon | restore the timestamped `daemon.json.*~` backup the role writes |
+| docker group | `sudo gpasswd -d $USER docker` |
+| apt policy | `sudo rm /etc/apt/apt.conf.d/51gx10-blacklist /etc/apt/apt.conf.d/20auto-upgrades` |
+| NCCL / ollama | `sudo rm /etc/nccl.conf /etc/systemd/system/ollama.service.d/override.conf` |
+| shell env | `rm ~/.gx10env.sh` and delete the ANSIBLE MANAGED blocks in `~/.bashrc`, `~/.zshrc` |
+| hosts / ssh config | delete the ANSIBLE MANAGED blocks in `/etc/hosts` and `~/.ssh/config` |
 | login shell | `chsh -s /bin/bash` |
+
+Note `sysctl --system` alone does **not** restore the tuned values — nothing
+else on the box sets `vm.swappiness` or `vm.min_free_kbytes`, so they persist
+until you set them back explicitly or reboot.

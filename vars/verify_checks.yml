@@ -10,21 +10,28 @@ verify_checks:
     cmd: "nvidia-smi --query-gpu=compute_cap --format=csv,noheader | grep -qx '{{ gpu_arch_list }}'"
     hint: "GPU is not reporting sm_{{ gpu_arch_list }}. See docs/runbooks/troubleshoot.md"
 
+    # Absolute path: nvcc reaches PATH via /etc/profile.d/nv_paths.sh, which
+    # only login shells read. Ansible's shell module is non-login, so a bare
+    # `nvcc` passes locally and fails over SSH.
   - name: "CUDA toolkit"
-    cmd: "nvcc --version | grep -q 'release {{ cuda_major }}'"
+    cmd: "{{ cuda_home }}/bin/nvcc --version | grep -q 'release {{ cuda_major }}'"
     hint: "nvcc is missing or not CUDA {{ cuda_major }}. See docs/runbooks/upgrade-drivers.md"
 
   - name: "driver held"
     cmd: "apt-mark showhold | grep -q nvidia-modprobe"
     hint: "The driver stack is not held; apt could skew it. Re-run: make apply TAGS=base"
 
+    # Not required: passes only after a NEW login session picks up the docker
+    # group, so it legitimately fails on the first verify after provisioning.
   - name: "docker without sudo"
     cmd: "docker info > /dev/null 2>&1"
-    hint: "Not in the docker group, or you have not logged out and back in since provisioning."
+    required: false
+    hint: "Log out and back in (or `newgrp docker`) to pick up the docker group, then re-run."
 
   - name: "docker nvidia runtime"
-    cmd: "docker info --format '{{ '{{' }}.DefaultRuntime{{ '}}' }}' | grep -q nvidia"
-    hint: "NVIDIA runtime is not the docker default. Re-run: make apply TAGS=docker"
+    cmd: "sudo -n docker info --format '{{ '{{' }}.DefaultRuntime{{ '}}' }}' | grep -q nvidia"
+    required: false
+    hint: "NVIDIA runtime is not the docker default (or sudo needs a password here). Re-run: make apply TAGS=docker"
 
   - name: "NCCL installed"
     cmd: "dpkg -s libnccl2 > /dev/null 2>&1"
@@ -47,9 +54,13 @@ verify_checks:
     cmd: "systemctl is-active --quiet ssh.socket"
     hint: "ssh.socket is not active. See docs/runbooks/recover-ssh-lockout.md"
 
+    # sshd -t needs to read the host keys, so it requires root. verify.yml
+    # runs unprivileged by design; use sudo -n so the check degrades to a
+    # reported failure rather than hanging on a password prompt.
   - name: "sshd config valid"
-    cmd: "/usr/sbin/sshd -t"
-    hint: "Merged sshd config is invalid - fix before rebooting. See docs/runbooks/recover-ssh-lockout.md"
+    cmd: "sudo -n /usr/sbin/sshd -t"
+    required: false
+    hint: "Run `sudo sshd -t` by hand. If it errors, fix before rebooting - see docs/runbooks/recover-ssh-lockout.md"
 
   - name: "swappiness"
     cmd: "[ \"$(sysctl -n vm.swappiness)\" = '1' ]"

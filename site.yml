@@ -22,6 +22,10 @@
       ansible.builtin.command: nvidia-smi --query-gpu=name,driver_version,compute_cap --format=csv,noheader
       register: gpu_info
       changed_when: false
+      # --check skips command modules by default, which would leave gpu_info
+      # empty and make the assert below fail with a misleading "wrong GPU"
+      # during `make diff`. This task only reads.
+      check_mode: false
 
     - name: Assert the GPU is the expected compute capability
       ansible.builtin.assert:

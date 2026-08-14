@@ -20,6 +20,16 @@ Three platform facts explain every step below.
 
 ## How
 
+**0. Check the management interface first.** NCCL bootstraps over it, and a
+dead interface makes every collective hang before it starts. On both nodes:
+
+```bash
+ip -br link show "$(ip route show default | awk '/default/{print $5; exit}')"
+```
+
+The repo detects this from the default route. If the two nodes reach each other
+over something else, set `mgmt_iface_override` in `group_vars/all.yml`.
+
 **1. Cable the boxes** QSFP-to-QSFP.
 
 **2. Confirm the NIC appeared** — on both nodes:
@@ -27,6 +37,8 @@ Three platform facts explain every step below.
 ```bash
 ibdev2netdev
 ```
+
+Expected shape (from NVIDIA's playbook; our box is not cabled yet):
 
 ```
 roceP2p1s0f1 port 1 ==> enP2p1s0f1np1 (Up)     <- cabled pair
@@ -65,23 +77,33 @@ One line means half bandwidth.
 ping -c3 192.168.100.11 && ping -c3 192.168.101.11
 ```
 
-**6. Benchmark.** Same command on both boxes, changing only `--node_rank`:
+**6. Benchmark.** Same command on both boxes, changing only `--node_rank`.
+torch lives in the shared venv, so use its `torchrun` (or run `ml` first):
 
 ```bash
-# node A                                    # node B
-torchrun --nnodes 2 --nproc_per_node 1 \    torchrun --nnodes 2 --nproc_per_node 1 \
-  --node_rank 0 --master_addr gx10-a \        --node_rank 1 --master_addr gx10-a \
-  --master_port 29500 \                       --master_port 29500 \
-  ~/cluster/allreduce_test.py                 ~/cluster/allreduce_test.py
+# on node A
+~/venvs/ml/bin/torchrun --nnodes 2 --nproc_per_node 1 --node_rank 0 \
+  --master_addr gx10-a --master_port 29500 ~/cluster/allreduce_test.py
+
+# on node B -- identical except --node_rank 1
+~/venvs/ml/bin/torchrun --nnodes 2 --nproc_per_node 1 --node_rank 1 \
+  --master_addr gx10-a --master_port 29500 ~/cluster/allreduce_test.py
 ```
 
 ## Reading the result
+
+Expected shape (illustrative — not captured on our hardware yet):
 
 ```
 correctness: ok
 size=1.07 GB  iters=10  algbw=10.4 GB/s
 busbw=10.4 GB/s
 ```
+
+**~10 GB/s is the healthy number, and it is not 200 Gb/s.** 200 Gb/s is the
+link rate across both partitions; ~10 GB/s busbw is ~80 Gb/s, after protocol
+overhead, one GPU per node, and the ring moving 2(N-1)/N of the buffer. Do not
+go chasing the gap — the fault worth hunting is the 13 Gbps one below.
 
 | busbw | Meaning | Fix |
 |---|---|---|

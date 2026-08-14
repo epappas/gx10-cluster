@@ -30,19 +30,10 @@ jobs:
       - name: yamllint
         run: yamllint .
 
-      - name: ansible-lint
-        run: ansible-lint --nocolor
-
-      - name: Syntax check
-        run: |
-          ansible-playbook site.yml --syntax-check
-          ansible-playbook verify.yml --syntax-check
-
-      # --syntax-check does not load stdout callbacks, so it passes on a
-      # config that aborts every real run. This repo shipped exactly that bug
-      # once; the smoke target exists so it cannot happen again silently.
-      - name: Smoke test the ansible config
-        run: make smoke
+      # Exactly what `make check` runs locally - lint, syntax, smoke, render -
+      # so "CI is green" and "make check passes" cannot drift apart.
+      - name: make check
+        run: make check
 
       - name: shellcheck
         run: shellcheck bootstrap.sh

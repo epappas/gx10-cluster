@@ -156,11 +156,17 @@ cluster_master_port: 29500
 # measured. Set cluster_mtu to enable it.
 cluster_mtu: ""
 
-# The management interface, used for NCCL/MPI bootstrap and for reaching the
-# box. This is the onboard 10GbE port, and it is what NVIDIA's nccl playbook
-# names. It must be an interface BOTH nodes can reach each other on - if you
-# run the pair over WiFi only, set this to wlP9s9.
-mgmt_iface: enP7s7
+# The management interface: NCCL/MPI bootstrap, and how you reach the box.
+#
+# Detected from the default route rather than hardcoded. NVIDIA's nccl
+# playbook names the onboard 10GbE port (enP7s7), but that port is DOWN on a
+# box running over WiFi - and writing a dead interface into
+# NCCL_SOCKET_IFNAME makes every collective hang at bootstrap.
+#
+# It must be an interface BOTH nodes can reach each other on. Override here if
+# the default route is not the path between the nodes.
+mgmt_iface: "{{ mgmt_iface_override | default(ansible_default_ipv4.interface, true) }}"
+mgmt_iface_override: ""
 
 # NCCL. NCCL_SOCKET_IFNAME selects the BOOTSTRAP/out-of-band channel, not the
 # data path - the data path is RoCE via ibverbs and is chosen separately.

@@ -16,7 +16,8 @@ make verify          # asserts, does not just print
 make idempotence     # applies twice; second run must be changed=0
 ```
 
-`make check` is what CI runs. The rest needs the real GB10.
+CI runs `make check` plus `yamllint` and `shellcheck`. The rest needs the real
+GB10.
 
 ## Why testing is tiered
 

@@ -75,10 +75,14 @@
   become: true
   register: torch_check
   changed_when: false
+  # Read-only, but it depends on tasks above that --check skips, so it cannot
+  # run in check mode at all.
+  when: not ansible_check_mode
 
 - name: Report the PyTorch check
   ansible.builtin.debug:
     msg: "torch: {{ torch_check.stdout }}"
+  when: not ansible_check_mode
 
 # ---------------------------------------------------------------------------
 # Ollama

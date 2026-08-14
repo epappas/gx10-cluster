@@ -16,11 +16,13 @@
   ansible.builtin.command: docker --version
   register: docker_version
   changed_when: false
+  check_mode: false   # read-only; must run under --check too
 
 - name: Verify the NVIDIA Container Toolkit is present
   ansible.builtin.command: nvidia-ctk --version
   register: ctk_version
   changed_when: false
+  check_mode: false
 
 - name: Report docker versions
   ansible.builtin.debug:
@@ -41,15 +43,23 @@
       (or run `newgrp docker`) before docker works without sudo.
   when: docker_group.changed
 
+# nvidia-ctk rewrites daemon.json and logs "Wrote updated config" on EVERY
+# invocation - there is no unchanged path - so running it unconditionally
+# makes this task report changed forever and breaks `make idempotence`.
+# Ask docker what it is already using and skip when it is correct.
+- name: Check whether the NVIDIA runtime is already the default
+  ansible.builtin.command: docker info --format '{{ '{{' }}.DefaultRuntime{{ '}}' }}'
+  become: true
+  register: docker_runtime
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
 - name: Register the NVIDIA runtime with the docker daemon
   ansible.builtin.command: nvidia-ctk runtime configure --runtime=docker --set-as-default
   become: true
-  register: ctk
-  # nvidia-ctk logs to stderr and prints "Wrote updated config to <path>".
-  # It does NOT print "Config file has been modified" - that string does not
-  # exist in the binary (verified with strings), so grepping for it made this
-  # task permanently report ok and never notify the handler.
-  changed_when: "'Wrote updated config' in (ctk.stderr | default(''))"
+  when: (docker_runtime.stdout | default('') | trim) != 'nvidia'
+  changed_when: true
   notify: Restart docker
 
 # nvidia-ctk owns the "runtimes" and "default-runtime" keys, so read and merge

@@ -49,7 +49,7 @@ sudo apt update && sudo apt upgrade
 Or via the playbook, which is the same thing plus the holds:
 
 ```bash
-make apply TAGS=base -e allow_apt_upgrade=true
+make apply TAGS=base EXTRA='-e allow_apt_upgrade=true'
 ```
 
 ## After any driver or kernel change
@@ -71,7 +71,8 @@ dpkg -l | grep -E "nvidia-modprobe|nvidia-driver|nvidia-kernel"
 nvidia-smi --query-gpu=driver_version --format=csv,noheader
 
 # pin the helper back to the driver branch
-sudo apt install --allow-downgrades nvidia-modprobe=580.95.05-0ubuntu1
+sudo apt install --allow-downgrades \
+  nvidia-modprobe=$(apt-cache madison nvidia-modprobe | awk '/ 580\./{print $3; exit}')
 sudo apt-mark hold nvidia-modprobe
 sudo reboot
 ```
