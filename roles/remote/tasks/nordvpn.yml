@@ -104,6 +104,23 @@
   failed_when: false
   check_mode: false
 
+# Both login-state tests below require rc 0 AND the absence of the "not logged
+# in" string, and that is not belt-and-braces.
+#
+# `nordvpn account` prints "You're not logged in" when it is not, and account
+# details when it is - but it also exits non-zero with nothing useful on stdout
+# when the daemon socket is unreachable, the CLI is not installed yet, or this
+# user is not in the nordvpn group. Testing the string alone gets that case
+# backwards, because `'not logged in' not in ""` is TRUE: an absent client
+# reads as logged in, and the meshnet commands then run against nothing. Both
+# streams are checked because the CLI does not consistently use stdout.
+- name: Record whether NordVPN was already logged in
+  ansible.builtin.set_fact:
+    nordvpn_logged_in: >-
+      {{ (nordvpn_account_pre.rc | default(1)) == 0
+         and 'not logged in' not in ((nordvpn_account_pre.stdout | default(''))
+                                     ~ (nordvpn_account_pre.stderr | default(''))) }}
+
 # `--token` is a BOOLEAN flag and the token is a POSITIONAL argument. The
 # obvious `--token=<t>` fails with
 #   Incorrect Usage: invalid boolean value "<t>" for -token: parse error
@@ -116,7 +133,7 @@
   changed_when: true
   when:
     - nordvpn_token | length > 0
-    - "'not logged in' in (nordvpn_account_pre.stdout | default(''))"
+    - not (nordvpn_logged_in | bool)
 
 - name: Re-read the NordVPN login state
   ansible.builtin.command: nordvpn account
@@ -126,9 +143,14 @@
   failed_when: false
   check_mode: false
 
+# Asks the daemon again rather than inferring from whether the login task ran -
+# same rc-and-string test as above, for the same reason.
 - name: Record whether NordVPN is usable
   ansible.builtin.set_fact:
-    nordvpn_ready: "{{ 'not logged in' not in (nordvpn_account.stdout | default('not logged in')) }}"
+    nordvpn_ready: >-
+      {{ (nordvpn_account.rc | default(1)) == 0
+         and 'not logged in' not in ((nordvpn_account.stdout | default(''))
+                                     ~ (nordvpn_account.stderr | default(''))) }}
 
 - name: Explain that NordVPN is installed but not logged in
   ansible.builtin.debug:

@@ -17,6 +17,10 @@
   register: vllm_image_present
   changed_when: false
   failed_when: false
+  # Read-only, and the next task's `when:` dereferences .rc. --check skips
+  # command modules by default, which would leave that undefined and abort
+  # `make diff` on a task that only ever looks.
+  check_mode: false
 
 - name: Pull the vLLM image
   ansible.builtin.command: "docker pull {{ vllm_image }}"
