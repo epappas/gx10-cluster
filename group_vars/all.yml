@@ -327,6 +327,22 @@ nordvpn_analytics: false
 # Set to "" to keep Nord's generated name.
 nordvpn_nickname: "gx10-{{ inventory_hostname }}"
 
+# Meshnet peers granted access to this box's LOCAL networks - which is what
+# lets them reach a container here, vLLM included, since Meshnet otherwise
+# treats 172.17.0.0/16 as local and drops peer traffic aimed at it.
+#
+# Defaults to the OTHER cluster nodes and nothing else. The Meshnet namespace
+# is your whole account - phones, laptops, anything you have accepted an invite
+# from - so this is deliberately not "every peer". Put extra peers (your
+# laptop, say) in nordvpn_local_allow_extra as `<name>.nord`.
+nordvpn_local_allow_extra: []
+nordvpn_local_peers: >-
+  {{ groups['gx10'] | difference([inventory_hostname])
+     | map('extract', hostvars, 'nordvpn_nickname')
+     | select('defined') | select('truthy')
+     | map('regex_replace', '$', '.nord') | list
+     + nordvpn_local_allow_extra }}
+
 nordvpn_iface: "nordlynx"
 nordvpn_mesh_cidr: "100.64.0.0/10"
 

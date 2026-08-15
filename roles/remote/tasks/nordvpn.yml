@@ -313,13 +313,35 @@
 # Meshnet treats 172.17.0.0/16 as a local network and drops peer traffic aimed
 # at it, so without this a peer cannot reach anything in a container on this
 # box - which includes vLLM. Documented behaviour, not a workaround.
-- name: Allow peers to reach local (docker) networks
-  ansible.builtin.command: nordvpn meshnet peer local allow all
+#
+# PER PEER. This was `nordvpn meshnet peer local allow all`, which answers
+# "Peer 'all' is unknown." - there is no `all` keyword, so the task had never
+# once done what it says, and `failed_when: false` hid that while it reported
+# "changed" on every run forever.
+#
+# The peer set comes from INVENTORY, not from parsing `peer list`. Two reasons:
+# the output has no stable machine format, and more importantly this grants
+# local-network access, so it should reach the cluster's own nodes and nothing
+# else by default. The Meshnet namespace is the whole account - phones, laptops,
+# other people's machines if you have ever accepted an invite - and "allow
+# everything on the account into this box's docker networks" is not a default
+# worth having. Add anything else deliberately via nordvpn_local_allow_extra.
+#
+# Addressed by nickname, because the generated hostname is recycled between
+# devices (see the ssh config note in roles/cluster).
+- name: Allow cluster peers to reach local (docker) networks
+  ansible.builtin.command: nordvpn meshnet peer local allow {{ item }}
   become: true
   register: nordvpn_local
-  changed_when: "'already' not in nordvpn_local.stdout"
+  # "... is already allowed." is the client's own no-op message.
+  changed_when: "'already allowed' not in nordvpn_local.stdout"
+  # A peer that is not registered yet is not an error - the other node may not
+  # have joined, and this run is what would tell you so.
   failed_when: false
-  when: nordvpn_ready | bool
+  loop: "{{ nordvpn_local_peers }}"
+  when:
+    - nordvpn_ready | bool
+    - nordvpn_mesh_on | default(false) | bool
 
 - name: Report the Meshnet address
   ansible.builtin.shell:

@@ -91,6 +91,17 @@
 # direction. It happens in the "Establish inter-node trust" play at the end of
 # site.yml, which runs once every host has finished this one.
 
+# Three names per node, one per path, matching the split described above:
+#
+#   poseidon          management  - the always-up LAN address
+#   poseidon.cluster  interconnect - the 200G cable, absent until cabled
+#   poseidon.nord     Meshnet      - reachable from off the LAN entirely
+#
+# The .nord alias maps to the Meshnet NICKNAME rather than the name Nord
+# generates, because the generated one is random and gets recycled: poseidon
+# registered as epappas-everest.nord, a name that belonged to a Windows box an
+# hour earlier. Pinning ssh config to that would break the first time a device
+# is removed and re-added. Skipped entirely when nordvpn_nickname is empty.
 - name: Configure SSH to use the cluster key between nodes
   ansible.builtin.blockinfile:
     path: "{{ primary_home }}/.ssh/config"
@@ -112,6 +123,14 @@
           User {{ primary_user }}
           IdentityFile ~/.ssh/id_gx10_cluster
           StrictHostKeyChecking accept-new
+      {% if hostvars[h].nordvpn_nickname | default('') | length > 0 %}
+
+      Host {{ h }}.nord
+          HostName {{ hostvars[h].nordvpn_nickname }}.nord
+          User {{ primary_user }}
+          IdentityFile ~/.ssh/id_gx10_cluster
+          StrictHostKeyChecking accept-new
+      {% endif %}
       {% endfor %}
   become: true
 
