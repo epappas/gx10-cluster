@@ -52,6 +52,87 @@
     state: absent
   become: true
 
+# ---------------------------------------------------------------------------
+# Management address
+# ---------------------------------------------------------------------------
+# The line above just wrote ansible_host into /etc/hosts as this node's
+# routable address. On DHCP that is a claim with nothing behind it: the lease
+# can hand the box a different address on any renewal, and then the name every
+# peer resolves, every ssh config points at and ufw trusts for NCCL bootstrap
+# refers to a machine that has moved.
+#
+# nmcli, not netplan, for the reason spelled out at the top of roles/cluster:
+# `netplan apply` disconnects every NM-managed device, which on node 2 severs
+# the SSH connection this play is running over.
+- name: Find the NetworkManager profile on the management interface
+  ansible.builtin.command:
+    cmd: nmcli -g GENERAL.CONNECTION device show {{ mgmt_iface }}
+  register: mgmt_profile
+  changed_when: false
+  check_mode: false
+  when: mgmt_addr_static | bool
+
+# The safety interlock, and the reason this role can touch the interface it is
+# being driven over at all. Pinning an address the interface does NOT already
+# hold would cut the session mid-play and leave a node reachable at neither
+# the old address nor the new one - the lockout runbook exists because of
+# exactly this class of mistake. Equal addresses means there is nothing to
+# apply at runtime, only a profile to rewrite.
+- name: Assert the pinned address is the one the interface already holds
+  ansible.builtin.assert:
+    that:
+      - mgmt_profile.stdout | trim | length > 0
+      - ansible_facts[mgmt_iface]['ipv4']['address'] | default('') == ansible_host
+    fail_msg: >-
+      ansible_host for {{ inventory_hostname }} is {{ ansible_host }}, but
+      {{ mgmt_iface }} currently holds
+      {{ ansible_facts[mgmt_iface]['ipv4']['address'] | default('no address') }}
+      (profile: {{ mgmt_profile.stdout | trim | default('none', true) }}).
+      Pinning would cut this connection. Make inventory.yml agree with the
+      address the box actually has - or set mgmt_addr_static: false - and
+      re-run.
+    quiet: true
+  when: mgmt_addr_static | bool
+
+# -t -f rather than -g: it emits `key:value` for every field asked for,
+# including the empty ones, so the comparison below is against a stable
+# four-line shape. -g drops trailing empties and the list silently changes
+# length depending on how the profile is currently configured.
+- name: Read the management profile's IPv4 settings
+  ansible.builtin.command:
+    cmd: >-
+      nmcli -t -f ipv4.method,ipv4.addresses,ipv4.gateway,ipv4.dns
+      connection show {{ mgmt_profile.stdout | trim | quote }}
+  register: mgmt_ipv4
+  changed_when: false
+  check_mode: false
+  when: mgmt_addr_static | bool
+
+# Writes the profile only. It deliberately does NOT `nmcli connection up`:
+# the address being written is byte-identical to the one the interface already
+# holds (asserted above), so there is nothing to change at runtime, and
+# reactivating the management interface from inside a play running over it is
+# all risk for no effect. The profile governs from the next activation.
+- name: Pin the management address
+  ansible.builtin.command:
+    cmd: >-
+      nmcli connection modify {{ mgmt_profile.stdout | trim | quote }}
+      ipv4.method manual
+      ipv4.addresses {{ ansible_host }}/{{ mgmt_prefix }}
+      ipv4.gateway {{ mgmt_gateway }}
+      ipv4.dns {{ mgmt_dns | join(',') | quote }}
+  become: true
+  vars:
+    mgmt_ipv4_wanted:
+      - "ipv4.method:manual"
+      - "ipv4.addresses:{{ ansible_host }}/{{ mgmt_prefix }}"
+      - "ipv4.gateway:{{ mgmt_gateway }}"
+      - "ipv4.dns:{{ mgmt_dns | join(',') }}"
+  when:
+    - mgmt_addr_static | bool
+    - (mgmt_ipv4.stdout_lines | default([]) | sort) != (mgmt_ipv4_wanted | sort)
+  changed_when: true
+
 # See sudo_passwordless in group_vars/all.yml for why this is on. validate is
 # not optional: a malformed file in sudoers.d breaks sudo for EVERY user, and
 # on a box with no BMC and root login disabled that is unrecoverable without

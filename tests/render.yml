@@ -42,7 +42,7 @@
     # what makes the main loop render the HEAD branch. The worker pass below
     # points it elsewhere.
     cluster_controller: "{{ inventory_hostname }}"
-    cluster_peer_mgmt_addrs: ["192.168.4.37"]
+    cluster_peer_mgmt_addrs: ["192.168.1.68"]
 
   tasks:
     - name: Ensure the output directory exists

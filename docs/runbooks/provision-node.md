@@ -56,7 +56,7 @@ the zsh login shell, and the shell environment.
 Both nodes are already in `inventory.yml`, so there is nothing to add. Get the
 box on the LAN at the address `poseidon` declares, then:
 
-1. `ssh-copy-id <user>@192.168.4.37`, or make sure password auth works.
+1. `ssh-copy-id <user>@192.168.1.68`, or make sure password auth works.
 2. Run the full play — **no `--limit` this time**:
 
 ```bash
@@ -116,7 +116,7 @@ it from the cluster:
 
 ```bash
 # from your laptop
-scp epappas@192.168.4.36:.ssh/gx10_admin ~/.ssh/gx10_admin
+scp epappas@192.168.1.70:.ssh/gx10_admin ~/.ssh/gx10_admin
 chmod 600 ~/.ssh/gx10_admin
 ssh-keygen -p -f ~/.ssh/gx10_admin        # add a passphrase; it has none
 

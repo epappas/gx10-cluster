@@ -142,6 +142,13 @@
     executable: /bin/bash
   register: mlx_ifaces
   changed_when: false
+  # Reads /sys and nothing else, so it is safe under --check - and it has to
+  # run there, because everything below keys off its output. Skipped (the
+  # default for shell in check mode) it registers no stdout, cluster_ifaces
+  # comes out empty, and `make diff` on a correctly cabled pair reports "No
+  # ConnectX-7 interface with carrier" and shows the addressing as unnecessary.
+  # A dry run that hides the work it would do is worse than no dry run.
+  check_mode: false
 
 - name: Record interconnect state
   ansible.builtin.set_fact:

@@ -377,6 +377,25 @@ cluster_mtu: ""
 mgmt_iface: "{{ mgmt_iface_override | default(ansible_facts['default_ipv4']['interface'], true) }}"
 mgmt_iface_override: ""
 
+# Pin the management address instead of leaving it on DHCP.
+#
+# ansible_host is this node's identity in /etc/hosts, in every peer's ssh
+# config and in the ufw rule that lets NCCL's bootstrap through. A DHCP lease
+# is free to move it, and nothing in this repo would notice - the node would
+# simply stop being reachable at the name everything resolves it by.
+#
+# The ADDRESS is not configured here on purpose. It comes from ansible_host in
+# inventory.yml, which is already the one source for the management address;
+# a second copy here is a second thing to forget to change.
+#
+# roles/base writes the profile but deliberately does NOT re-activate the
+# interface - see the task for why. Turn this off to stay on DHCP.
+mgmt_addr_static: true
+mgmt_prefix: 24
+mgmt_gateway: "192.168.1.254"
+mgmt_dns:
+  - "192.168.1.254"
+
 # NCCL. NCCL_SOCKET_IFNAME selects the BOOTSTRAP/out-of-band channel, not the
 # data path - the data path is RoCE via ibverbs and is chosen separately.
 # NVIDIA's playbook points it at the MANAGEMENT interface, which is why this
