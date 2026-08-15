@@ -303,6 +303,22 @@ ufw_ssh_sources:
 # ---------------------------------------------------------------------------
 install_nordvpn: true
 nordvpn_token: ""
+
+# Whether to let the NordVPN client send its anonymous telemetry.
+#
+# This is NOT cosmetic, and it is not really about the telemetry. A client that
+# has never recorded a choice asks for one INTERACTIVELY at `nordvpn login`:
+#
+#   Do you allow us to collect and use limited app performance data? (y/n)
+#
+# With no stdin the CLI rejects its own empty answer and re-asks in a tight
+# loop, forever - 224 MB of prompt text in four minutes, buffered in the
+# ansible module's memory, on a task that can never finish. roles/remote
+# records the choice BEFORE logging in so the question is never asked.
+#
+# Off because nothing here needs it, and this is the same posture as
+# nordvpn_disable_firewall below.
+nordvpn_analytics: false
 nordvpn_iface: "nordlynx"
 nordvpn_mesh_cidr: "100.64.0.0/10"
 

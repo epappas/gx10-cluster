@@ -121,13 +121,43 @@
          and 'not logged in' not in ((nordvpn_account_pre.stdout | default(''))
                                      ~ (nordvpn_account_pre.stderr | default(''))) }}
 
+# MUST come before the login. On a client that has never recorded an analytics
+# choice, `nordvpn login` asks for one interactively:
+#
+#   Do you allow us to collect and use limited app performance data? (y/n)
+#
+# Under ansible there is no interactive stdin, so the read returns nothing, the
+# CLI answers itself "Invalid response. Please answer with yes/no.", and asks
+# again - forever, at full speed. Observed: 224 MB of prompt text written to
+# the stdout pipe in four minutes, every byte of it buffered in the ansible
+# module's memory, with the run wedged on a task that can never complete.
+#
+# Setting the choice explicitly first is what stops the prompt being asked at
+# all. It works while logged OUT, which is the only reason this ordering is
+# possible. It is also a privacy decision, so it is a variable rather than a
+# hardcoded flag - see nordvpn_analytics in group_vars/all.yml.
+- name: Record the analytics consent choice
+  ansible.builtin.command:
+    argv: ["nordvpn", "set", "analytics", "{{ 'on' if nordvpn_analytics | bool else 'off' }}"]
+  become: true
+  changed_when: true
+
 # `--token` is a BOOLEAN flag and the token is a POSITIONAL argument. The
 # obvious `--token=<t>` fails with
 #   Incorrect Usage: invalid boolean value "<t>" for -token: parse error
 # argv form so the token is never handed to a shell.
+#
+# Wrapped in `timeout` as a backstop, NOT as the fix - the consent task above
+# is the fix. This exists so that the next interactive prompt nordvpn decides
+# to add fails the run in 60 seconds with a diagnosable rc=124, instead of
+# spooling gigabytes into memory until something dies.
+#
+# Note the CLI exits 0 even when the login FAILS ("We couldn't log you in - the
+# access token is not valid" comes back with rc=0), so rc proves nothing here.
+# That is why the state is re-read below rather than inferred from this task.
 - name: Log in to NordVPN
   ansible.builtin.command:
-    argv: ["nordvpn", "login", "--token", "{{ nordvpn_token }}"]
+    argv: ["timeout", "60", "nordvpn", "login", "--token", "{{ nordvpn_token }}"]
   become: true
   no_log: true
   changed_when: true

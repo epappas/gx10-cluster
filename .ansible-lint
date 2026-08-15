@@ -17,3 +17,12 @@ skip_list:
 
 exclude_paths:
   - .git/
+
+  # Vault files are ciphertext, not YAML. Line 1 is `$ANSIBLE_VAULT;1.1;AES256`
+  # and ansible-lint reports `yaml[document-start]: Missing document start` on
+  # it - so `make check` starts failing the moment anyone follows the runbook
+  # and creates a vault, which is the one thing the runbook tells you to do.
+  # Invisible in CI, because these paths are gitignored; it only ever breaks on
+  # the machine of the person who actually set the token up.
+  - group_vars/*/vault.yml
+  - host_vars/*/vault.yml
