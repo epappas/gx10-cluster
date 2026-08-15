@@ -163,21 +163,39 @@ sudo nordvpn login --token <TOKEN>     # token is POSITIONAL - see below
 sudo nordvpn set meshnet on
 ```
 
-**or** let Ansible do it on both, which is the point of having Ansible:
+**or** let Ansible do it on both, which is the point of having Ansible. The
+token belongs to your Nord *account*, not to a machine, so it goes in
+`group_vars` for the whole cluster rather than per host:
 
 ```bash
-ansible-vault create host_vars/odysseus.vault.yml
-# nordvpn_token: "<TOKEN>"
+mkdir -p group_vars/gx10
+ansible-vault create group_vars/gx10/vault.yml
 ```
 
-…and the same for `poseidon`, then:
+```yaml
+nordvpn_token: "<TOKEN>"
+```
 
 ```bash
 make apply TAGS=remote EXTRA='--ask-vault-pass'
 ```
 
-`host_vars/*.vault.yml` is already in `.gitignore`. Every task that touches the
-token is `no_log`.
+**The directory form is not cosmetic.** Ansible auto-loads
+`group_vars/<group>/*` and `host_vars/<host>/*`, or a single
+`group_vars/<group>.yml` — but **not** `host_vars/<host>.vault.yml`, which this
+runbook used to tell you to create. A dot in that position makes Ansible read
+it as a host named `<host>.vault`, so the file is silently never loaded: you
+would set the token, see no error, and Meshnet would stay down.
+
+If you do want a per-node token, the working path is
+`host_vars/odysseus/vault.yml` — note the slash.
+
+`group_vars/*/vault.yml` and `host_vars/*/vault.yml` are both in `.gitignore`.
+Every task that touches the token is `no_log`.
+
+Rather than typing the vault password each run, put it in `.vault_pass`
+(also gitignored) and add `vault_password_file = .vault_pass` to the
+`[defaults]` section of `ansible.cfg`.
 
 **3. Confirm:**
 
