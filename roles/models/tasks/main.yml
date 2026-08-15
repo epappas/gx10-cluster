@@ -34,6 +34,10 @@
     executable: /bin/bash
   register: free_gb
   changed_when: false
+  # The assert below reads .stdout, and --check skips shell modules by default.
+  # This only measures, so run it under --check too - otherwise `make diff`
+  # fails on the guard rather than telling you what it would download.
+  check_mode: false
 
 # Weights are tens to hundreds of GB. Filling the root filesystem on a box
 # whose swap lives there too is a bad afternoon.
@@ -163,6 +167,7 @@
     executable: /bin/bash
   register: cache_size
   changed_when: false
+  check_mode: false   # read-only; the debug below reads .stdout
 
 - name: Show the cache
   ansible.builtin.debug:

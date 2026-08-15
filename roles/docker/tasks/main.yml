@@ -65,27 +65,40 @@
 # nvidia-ctk owns the "runtimes" and "default-runtime" keys, so read and merge
 # rather than overwrite - a plain template here would strip the GPU runtime
 # registration made by the task above.
+# Ask whether the file exists rather than pattern-matching slurp's failure
+# message. This used to tolerate "not exist" / "No such file"; ansible-core
+# 2.21 words it "File not found: /etc/docker/daemon.json", which matches
+# neither - so a box that has never had a daemon.json (the normal state before
+# the first apply) aborted the play here. An existence test cannot go stale
+# with a phrasing change.
+#
+# Still no blanket failed_when: a read that fails for any OTHER reason must
+# surface, because falling back to {} would silently discard the runtimes block.
+- name: Check whether docker daemon.json exists
+  ansible.builtin.stat:
+    path: /etc/docker/daemon.json
+  become: true
+  register: daemon_json_stat
+
 - name: Read existing docker daemon.json
   ansible.builtin.slurp:
     src: /etc/docker/daemon.json
   become: true
   register: daemon_json_raw
-  # Tolerate only "not there yet"; any other read failure must surface,
-  # because falling back to {} would silently discard the runtimes block.
-  failed_when:
-    - daemon_json_raw.failed | default(false)
-    - "'not exist' not in (daemon_json_raw.msg | default(''))"
-    - "'No such file' not in (daemon_json_raw.msg | default(''))"
+  when: daemon_json_stat.stat.exists
 
 - name: Merge GX10 defaults into daemon.json
   ansible.builtin.copy:
     dest: /etc/docker/daemon.json
     mode: "0644"
     backup: true
+    # Tests the decoded content, not just `is defined`: a present-but-empty
+    # daemon.json decodes to "" and from_json raises on it.
     content: |
       {{
-        ((daemon_json_raw.content | b64decode | from_json)
-           if (daemon_json_raw.content is defined) else {})
+        ((daemon_json_raw.content | default('') | b64decode | from_json)
+           if ((daemon_json_raw.content | default('') | b64decode | trim | length) > 0)
+           else {})
         | combine(docker_gx10_defaults, recursive=true)
         | to_nice_json(indent=2)
       }}

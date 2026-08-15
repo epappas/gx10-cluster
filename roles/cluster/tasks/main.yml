@@ -53,9 +53,17 @@
   ansible.builtin.blockinfile:
     path: /etc/hosts
     marker: "# {mark} ANSIBLE MANAGED - gx10 cluster"
+    # PEERS only for the bare name. roles/base already maps this node's own
+    # name to its routable address, outside this block - if both wrote it, the
+    # lineinfile there and this blockinfile would each rewrite the other's copy
+    # on every run, and `make idempotence` would never settle. The `.cluster`
+    # names are all emitted here, self included, because the interconnect
+    # address is this role's business and nothing else writes it.
     block: |
       {% for h in groups['gx10'] %}
+      {% if h != inventory_hostname %}
       {{ hostvars[h].ansible_host }}  {{ h }}
+      {% endif %}
       {{ cluster_subnets[0] }}.{{ hostvars[h].cluster_index }}  {{ h }}.cluster
       {% endfor %}
   become: true

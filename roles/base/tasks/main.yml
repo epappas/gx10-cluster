@@ -2,33 +2,54 @@
 # ---------------------------------------------------------------------------
 # Node identity
 # ---------------------------------------------------------------------------
+# Captured BEFORE the rename, because ansible.builtin.hostname returns updated
+# ansible_facts - after it runs, ansible_facts['hostname'] is the NEW name and
+# the old one is unrecoverable, so the stale /etc/hosts line below could never
+# be found again.
+- name: Record the hostname before any rename
+  ansible.builtin.set_fact:
+    previous_hostname: "{{ ansible_facts['hostname'] }}"
+
 - name: Set the system hostname
   ansible.builtin.hostname:
     name: "{{ node_hostname }}"
   become: true
 
-# The hostname module does NOT touch /etc/hosts, and Ubuntu ships
-# `127.0.1.1 <hostname>`. Left alone after a rename that line names a machine
-# that no longer exists, and `sudo` spends a DNS timeout on every invocation
-# complaining it cannot resolve the host.
+# The hostname module does NOT touch /etc/hosts, so the name has to be mapped
+# here, and it must map to the ROUTABLE address rather than loopback. torchrun
+# is launched as `--master_addr {{ cluster_controller }}` and rank 0 resolves
+# that name ITSELF: a loopback answer binds the rendezvous socket to 127.x, the
+# peer then connects to a port nothing is listening on, and the job hangs at
+# init with no error at all.
 #
-# It is replaced with the ROUTABLE address rather than repaired in place, and
-# that matters more than it looks. torchrun is launched as
-# `--master_addr {{ cluster_controller }}`, and on rank 0 that name is resolved
-# by rank 0 itself: pointing it at 127.0.1.1 makes the rendezvous socket bind
-# loopback, so the peer connects to a port nothing is listening on and the job
-# hangs at init with no error. The cluster role's block adds the same mapping,
-# but it is appended at EOF - this line comes first in the file, so it is the
-# one that wins.
+# Note the address family. Debian convention is `127.0.1.1 <hostname>` and an
+# earlier version keyed off exactly that - but DGX OS ships
+# `127.0.0.1 <hostname>` (verified: /etc/hosts here was two lines,
+# `127.0.0.1 localhost` and `127.0.0.1 gx10-ce93`). Matching only 127.0.1.1
+# found nothing, so the routable line was added and the stale one left behind.
+# Both forms are handled now.
+#
+# This owns SELF only; roles/cluster adds the peers. They never write the same
+# line, so neither fights the other on a re-run.
 - name: Point this host's name at its routable address in /etc/hosts
   ansible.builtin.lineinfile:
     path: /etc/hosts
-    regexp: '^127\.0\.1\.1\s'
+    # Any line mapping this name, whatever address it currently carries, so a
+    # pre-existing loopback entry is rewritten in place rather than duplicated.
+    regexp: '^\S+\s+{{ node_hostname | regex_escape }}(\s|$)'
     line: "{{ ansible_host }}  {{ node_hostname }}"
-    # If Ubuntu's line was already replaced on a previous run there is nothing
-    # matching 127.0.1.1 left; put it back near the top rather than at EOF.
     insertafter: '^127\.0\.0\.1\s'
     firstmatch: true
+  become: true
+
+# Whatever the box was called before. Left in place it names a machine that no
+# longer exists, and anything that resolves it pays a resolver timeout to find
+# that out - `sudo` on every invocation, most visibly.
+- name: Drop loopback mappings of this host's former name from /etc/hosts
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^127\.0\.[01]\.1\s+({{ previous_hostname | regex_escape }}|{{ node_hostname | regex_escape }})(\s|$)'
+    state: absent
   become: true
 
 # See sudo_passwordless in group_vars/all.yml for why this is on. validate is
