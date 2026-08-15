@@ -150,8 +150,10 @@ Three traps, none of which announces itself:
   not in your current session — log out and back in, or use `sudo`.
 
 Generate a token in Nord Account → NordVPN → Advanced settings → Get access
-token. To persist it, put `nordvpn_token` in a vault file, not in
-`group_vars/all.yml`.
+token. To persist it, put `nordvpn_token` in `group_vars/gx10/vault.yml` — the
+directory form, which is the one ansible actually loads — never in
+`group_vars/all.yml`. Full steps in
+[provision-node](provision-node.md#join-the-meshnet).
 
 ## Prevention
 

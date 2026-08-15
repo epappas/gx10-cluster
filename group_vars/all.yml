@@ -135,7 +135,9 @@ ollama_host: "127.0.0.1:11434"
 # ---------------------------------------------------------------------------
 # Needed only for gated repos (most Llama weights). Leave empty for the public
 # models in the default sets. Put a real value in a vault file, never here:
-#   ansible-vault create host_vars/odysseus.vault.yml
+#   ansible-vault create group_vars/gx10/vault.yml
+# Note the DIRECTORY form. `host_vars/<host>.vault.yml` is not loaded by
+# ansible at all - the dot makes it a host named "<host>.vault".
 # The models role marks every task that touches it no_log.
 hf_token: ""
 
@@ -292,7 +294,12 @@ ufw_ssh_sources:
 # NordVPN Meshnet, not Tailscale. Values filled in by roles/remote.
 # nordvpn_token is a Nord Account access token; leave empty to install the
 # client and enable the daemon without logging in, then run `nordvpn login
-# --token ...` by hand. Vault it if you set it here.
+# --token ...` by hand.
+#
+# Do NOT put a real token here - this file is committed. It goes in
+# `group_vars/gx10/vault.yml` (the directory form; `host_vars/<host>.vault.yml`
+# is silently not loaded by ansible), which overrides the empty default below.
+# See docs/runbooks/provision-node.md#join-the-meshnet.
 # ---------------------------------------------------------------------------
 install_nordvpn: true
 nordvpn_token: ""

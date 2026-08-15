@@ -1,6 +1,12 @@
 *.retry
 .vault_pass
-host_vars/*.vault.yml
+# Vault files, in the DIRECTORY form. Ansible auto-loads group_vars/<group>/*
+# and host_vars/<host>/*, or a single group_vars/<group>.yml - but NOT
+# host_vars/<host>.vault.yml, which is what this used to say. That path parses
+# as a host named "<host>.vault" and is silently never read, so the ignore rule
+# guarded a file that could not work. Verified with a real play.
+group_vars/*/vault.yml
+host_vars/*/vault.yml
 __pycache__/
 .smoke.yml
 .idem.log
