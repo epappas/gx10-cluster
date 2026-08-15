@@ -86,6 +86,45 @@ command -v fdfind  >/dev/null 2>&1 && alias fd='fdfind'
 # once that stopped, taking `ll` with them in zsh, which has no default for it.
 alias ll='ls -lah --group-directories-first'
 
+# --- Prompt ----------------------------------------------------------------
+# The prompt was previously left to the shell, which on zsh means bare
+# `<host>%`: no user, no path, no branch. On a two-node cluster where you are
+# constantly ssh'd into the other box, "which machine am I on" is the single
+# most useful thing a prompt can tell you, and the default does not.
+#
+# user@host  path  branch $
+#
+# The zsh half is wrapped in eval on purpose. This file is `#!/bin/sh` and the
+# header asks for POSIX: `precmd_functions+=(...)` is a PARSE error in dash,
+# and a parse error aborts the WHOLE file - taking PATH, CUDA_HOME and every
+# alias with it, for a prompt. eval hides that syntax from every parser but
+# zsh's own.
+#
+# vcs_info rather than shelling out to git: it ships with zsh and does not
+# fork a process on every prompt.
+if [ -n "$ZSH_VERSION" ]; then
+    eval '
+        autoload -Uz vcs_info
+        zstyle ":vcs_info:*" enable git
+        zstyle ":vcs_info:git:*" formats " %F{yellow}%b%f"
+        zstyle ":vcs_info:git:*" actionformats " %F{red}%b|%a%f"
+        precmd_functions+=(vcs_info)
+        setopt prompt_subst
+        PROMPT="%F{green}%n@%m%f %F{blue}%~%f\${vcs_info_msg_0_} \$ "
+    '
+elif [ -n "$BASH_VERSION" ]; then
+    # bash has no vcs_info, so this does fork - but only in a repo, and only
+    # once per prompt. symbolic-ref first so a detached HEAD still shows
+    # something useful rather than nothing.
+    _gx10_git_branch() {
+        _b=$(git symbolic-ref --short HEAD 2>/dev/null) \
+            || _b=$(git rev-parse --short HEAD 2>/dev/null) \
+            || return 0
+        printf ' %s' "$_b"
+    }
+    PS1='\[\033[32m\]\u@\h\[\033[0m\] \[\033[34m\]\w\[\033[0m\]\[\033[33m\]$(_gx10_git_branch)\[\033[0m\] \$ '
+fi
+
 # --- Shell integrations ----------------------------------------------------
 if [ -n "$ZSH_VERSION" ]; then
     _gx10_shell=zsh

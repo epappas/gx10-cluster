@@ -12,7 +12,7 @@ make verify           # assert the nodes are in the expected state
 
 `make` on its own lists every target.
 
-The two nodes are `odysseus` (192.168.4.36) and `poseidon` (192.168.4.37). The
+The two nodes are `odysseus` (192.168.1.70) and `poseidon` (192.168.1.68). The
 inventory name **is** the machine's hostname — the play sets it, and
 `/etc/hosts`, `~/.ssh/config`, the Slurm `NodeName` and the Prometheus label all
 derive from that one string. To rename a box, rename it in `inventory.yml` and

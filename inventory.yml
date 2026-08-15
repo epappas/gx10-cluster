@@ -17,6 +17,21 @@
 # local host silently skips the SSH path every other host exercises - so the
 # path that breaks is the one you never test.
 #
+# ansible_host is the MANAGEMENT address, and it is load-bearing well beyond
+# ssh: roles/base maps it to the node name in /etc/hosts, roles/cluster writes
+# it into every peer's ssh config, and roles/remote opens ufw to it so NCCL's
+# bootstrap channel (ephemeral ports, no port-scoped rule can express it) is
+# not dropped. So it must be the address on the interface the nodes actually
+# reach each other over - the one `mgmt_iface` resolves to.
+#
+# These are the wired enP7s7 addresses, which is the default route on both
+# boxes and therefore what mgmt_iface auto-detects. The WiFi addresses these
+# replaced (192.168.4.36/.37) were neither: 130 ms against 0.88 ms, and on a
+# different subnet from the interface NCCL would have bootstrapped over.
+#
+# roles/base pins them, so a DHCP lease cannot move a node's identity out from
+# under this file. See mgmt_addr_static in group_vars/all.yml.
+#
 # cluster_index is the host octet on BOTH interconnect subnets, matching
 # NVIDIA's connect-two-sparks playbook: .10 and .11.
 #
@@ -33,12 +48,12 @@ all:
     gx10:
       hosts:
         odysseus:
-          ansible_host: 192.168.4.36
+          ansible_host: 192.168.1.70
           cluster_index: 10
           cluster_rank: 0
 
         poseidon:
-          ansible_host: 192.168.4.37
+          ansible_host: 192.168.1.68
           cluster_index: 11
           cluster_rank: 1
 

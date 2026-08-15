@@ -2,7 +2,11 @@
 # Starship was removed rather than pinned. It was `curl | sh` into root's
 # shell, unpinned, from a third-party domain - the same pattern this repo
 # refuses everywhere else - and what it bought was a prompt theme. zoxide and
-# fzf still get wired up in gx10env.sh; the prompt is left to the shell.
+# fzf still get wired up in gx10env.sh.
+#
+# The prompt was then left to the shell, which on zsh means bare `<host>%`.
+# That is now set in gx10env.sh too - user@host, path and git branch, built
+# from zsh's own vcs_info, so it costs no fork and no third-party binary.
 
 - name: Ensure user bin directory exists
   ansible.builtin.file:
@@ -37,6 +41,12 @@
   become: true
   loop: [.bashrc, .zshrc]
 
+# force: true, deliberately. This was `force: false` to protect local edits,
+# but a file the repo ships and can then never update is a file that drifts -
+# change the prefix key here and no existing box ever sees it, which is the
+# opposite of this repo's claim. Local customisation moved to
+# ~/.tmux.conf.local, sourced at the end of the shipped config and never
+# written by the play, so it survives every run.
 - name: Install tmux configuration
   ansible.builtin.copy:
     src: tmux.conf
@@ -44,7 +54,7 @@
     owner: "{{ primary_user }}"
     group: "{{ primary_user }}"
     mode: "0644"
-    force: false
+    force: true
   become: true
 
 # ansible.builtin.user does not validate the shell path. Setting a login shell
