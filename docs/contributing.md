@@ -9,7 +9,7 @@ How to add to it without it rotting.
 # 2. if you touched roles/ml/files/requirements-ml.in
 make lock            # re-resolve the ML lockfile. aarch64 only; commit the .txt
 # 3. offline checks - fast, run these constantly
-make check           # lint + syntax + smoke + render + handlers + docs + shellcheck
+make check           # lint + syntax + smoke + render + handlers + docs + lockfile + shellcheck
 
 # 4. on the hardware
 make diff            # what would change
@@ -44,6 +44,7 @@ do not touch hardware, while implying broader coverage), the split is explicit:
 | `make render` | anywhere, CI | undefined vars and bad filters in templates |
 | `make handlers` | anywhere, CI | a `notify:` naming a handler that doesn't exist |
 | `make docs` | anywhere, CI | a stale directory index, a dead relative link or `#anchor` |
+| `make lockfile` | anywhere, CI | an ML lockfile regenerated without the resolution flags, or unpinned |
 | `make shellcheck` | anywhere, CI | shell bugs in `bootstrap.sh` |
 | `make idempotence` | the box | a task reporting changed when it shouldn't |
 | `make verify` | the box | the node not being in the state we claim |
@@ -114,6 +115,25 @@ Three things will bite you:
 - **Review the diff.** `make lock` re-resolves everything, so a one-line change
   to the `.in` can move fifty pins. That is the point — but it is the moment to
   look, not after `make apply`.
+
+### If a bot opens a PR against the lockfile
+
+Close it and run `make lock` instead. A single bumped pin corresponds to no
+real resolution — it was not produced against the cu130 index on aarch64 with
+`--index-strategy` — and it looks entirely plausible in review, which is what
+makes it dangerous.
+
+`.github/dependabot.yml` configures GitHub Actions only, so no *version* update
+will ever touch the file. Dependabot **security** updates are a different
+mechanism: they read the dependency graph regardless of that config, GitHub
+provides no way to exclude a manifest path from them, and they are enabled on
+this repo. So this will eventually happen.
+
+`make check` runs `tests/check_lockfile.py`, which asserts the header still
+records the resolution flags, both index directives survive, torch keeps its
+`+cu130` local version, and every requirement is pinned with `==`. That catches
+a lockfile regenerated the wrong way. It does **not** catch a plausible
+single-line edit — only reading the diff does.
 
 Adding a package to the venv by hand with `uv pip install` is not an error, but
 it is invisible: `make verify`'s `lockfile applied` check compares the installed

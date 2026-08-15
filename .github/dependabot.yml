@@ -1,0 +1,33 @@
+---
+# GitHub Actions only, deliberately.
+#
+# `pip` is ABSENT on purpose. roles/ml/files/requirements-ml.txt is not a
+# hand-maintained dependency list - it is the output of one resolution that
+# only means anything as a whole:
+#
+#   - resolved on aarch64, against the cu130 index that publishes the only
+#     torch wheels carrying sm_121 kernels;
+#   - with --index-strategy unsafe-best-match, because that index also carries
+#     frozen copies of torch's own dependencies and, as the priority index,
+#     shadows PyPI for all of them. Without the flag the same input resolves
+#     certifi 2022.12.7 and datasets 1.1.1, and says nothing about it.
+#
+# A bot bumping a single pin in that file produces a lockfile that corresponds
+# to no real resolution, and it looks entirely plausible in review. The only
+# correct way to change it is `make lock` on a GX10.
+#
+# IMPORTANT: this file governs VERSION updates only. Dependabot SECURITY
+# updates are a repository-level setting, they read the dependency graph
+# regardless of what is configured here, and GitHub provides no supported way
+# to exclude a manifest path from them. If one opens a PR against the lockfile:
+# close it, run `make lock`, and review the whole diff. `tests/check_lockfile.py`
+# catches a lockfile regenerated the wrong way; nothing catches a plausible
+# hand-edit except reading it.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: ci
