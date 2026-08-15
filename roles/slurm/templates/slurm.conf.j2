@@ -1,6 +1,12 @@
 # Managed by gx10-cluster ansible (roles/slurm). Local edits are overwritten.
+#
+# The controller comes from cluster_controller, which is derived from
+# cluster_rank - not from inventory order. `groups['gx10'][0]` here disagreed
+# with the `cluster_rank == 0` the tasks used the moment inventory.yml was
+# reordered, and slurm gives you no warning when the host it is told to reach
+# for slurmctld is not the host running one.
 ClusterName=gx10
-SlurmctldHost={{ groups['gx10'][0] }}
+SlurmctldHost={{ cluster_controller }}
 
 # One GPU per node and no preemption to arbitrate, so consumable resources
 # with cores is the right level - not the full cgroup/GRES apparatus.
@@ -26,6 +32,10 @@ MinJobAge=300
 KillWait=30
 Waittime=0
 
+# NodeAddr is the interconnect address, so job traffic takes the 200G link and
+# not WiFi. It exists only once the QSFP cable is in; roles/slurm asserts that
+# before it installs anything, rather than leaving the controller to mark a
+# node DOWN for reasons that never mention cabling.
 {% for h in groups['gx10'] %}
 NodeName={{ h }} NodeAddr={{ cluster_subnets[0] }}.{{ hostvars[h].cluster_index }} CPUs={{ ansible_facts['processor_vcpus'] | default(20) }} RealMemory={{ (ansible_facts['memtotal_mb'] | default(121000) * 0.9) | int }} State=UNKNOWN
 {% endfor %}

@@ -6,10 +6,12 @@ How to add to it without it rotting.
 
 ```bash
 # 1. change something (usually group_vars/all.yml, not a role)
-# 2. offline checks - fast, run these constantly
-make check           # lint + syntax + smoke + render
+# 2. if you touched roles/ml/files/requirements-ml.in
+make lock            # re-resolve the ML lockfile. aarch64 only; commit the .txt
+# 3. offline checks - fast, run these constantly
+make check           # lint + syntax + smoke + render + handlers + docs + shellcheck
 
-# 3. on the hardware
+# 4. on the hardware
 make diff            # what would change
 make apply
 make verify          # asserts, does not just print
@@ -18,6 +20,14 @@ make idempotence     # applies twice; second run must be changed=0
 
 CI runs `make check` plus `yamllint` and `shellcheck`. The rest needs the real
 GB10.
+
+`make apply` drives **both** nodes over SSH, one at a time (`serial: 1`,
+`any_errors_fatal`), and `-K` prompts once per run — so both boxes must accept
+the same sudo password
+([why](decisions.md#ssh-both-nodes)). Use `LIMIT=poseidon` when you
+deliberately want one, but read the warning in
+[provision-node](runbooks/provision-node.md#how--node-2) first: a limited run
+cannot establish inter-node trust and cannot distribute the munge key.
 
 ## Why testing is tiered
 
@@ -33,7 +43,8 @@ do not touch hardware, while implying broader coverage), the split is explicit:
 | `make smoke` | anywhere, CI | a broken `ansible.cfg` — see below |
 | `make render` | anywhere, CI | undefined vars and bad filters in templates |
 | `make handlers` | anywhere, CI | a `notify:` naming a handler that doesn't exist |
-| `make docs` | anywhere, CI | a directory index gone stale |
+| `make docs` | anywhere, CI | a stale directory index, a dead relative link or `#anchor` |
+| `make shellcheck` | anywhere, CI | shell bugs in `bootstrap.sh` |
 | `make idempotence` | the box | a task reporting changed when it shouldn't |
 | `make verify` | the box | the node not being in the state we claim |
 
@@ -47,6 +58,13 @@ Know the blind spots, so you don't trust a green run further than it deserves:
   apply time, on the box.
 - **Nothing offline can see a `when:` typo.** `when: instal_ollama` silently
   never fires and every check stays green.
+- **`make verify` with a `--limit` is a weaker check than it looks.** The
+  cross-node comparison of driver, kernel and torch version needs both hosts in
+  the play. It says so rather than passing silently, but only if you read the
+  output.
+- **`make docs` checks coverage, not truth.** It cannot tell you a command in a
+  runbook is wrong, only that the file it links to exists. Grep the tree for
+  every variable, tag and path you write.
 
 `make smoke` exists because `--syntax-check` does **not** load stdout
 callbacks. This repo once shipped an `ansible.cfg` that aborted every real run
@@ -55,14 +73,54 @@ while lint and syntax-check both passed. Never trust those two alone.
 ## Adding a role
 
 1. `roles/<name>/{tasks,defaults,handlers,templates,files}/`
-2. Add it to `site.yml` with a tag.
+2. Add it to `site.yml` with a tag. If it is opt-in, add it to `optional.yml`
+   instead, as an `include_role` **task** tagged `[<name>, never]` — never as a
+   `roles:` entry. Role-level tags are additive with task tags, which is how
+   `--tags exporters` came to install grafana
+   ([why](decisions.md#optional-include-role)).
 3. Put every tunable in `group_vars/all.yml`, not in the role.
 4. Add a check to `vars/verify_checks.yml` with a `hint` naming the runbook
    that fixes it.
-5. If it adds a template, add it to `tests/render.yml`.
+5. Templates need nothing: `tests/render.yml` discovers `roles/**/*.j2` by
+   `find`. Add an explicit case only if the template has a conditional branch
+   the default render would not reach — as `ray.service.j2` does.
 6. Add a row to [roles/README.md](../roles/README.md) — `make docs` fails
    without one.
 7. If the choice was non-obvious, add an entry to [decisions.md](decisions.md).
+
+## Adding or changing a Python package
+
+The ML venv is not a package list any more. `roles/ml/files/requirements-ml.in`
+holds the **top-level wants** — 16 of them today; `requirements-ml.txt` is their
+fully pinned resolution, 87 packages, and it is what the role installs.
+
+```bash
+# edit roles/ml/files/requirements-ml.in
+make lock                 # regenerates the .txt
+git diff roles/ml/files/requirements-ml.txt    # review, then commit
+```
+
+Three things will bite you:
+
+- **`make lock` must run on a GX10.** uv resolves for the platform it runs on,
+  so a laptop produces a lockfile pinning x86_64 wheels and an `nvidia-*` stack
+  this box cannot use. The target refuses on anything but aarch64.
+- **`--index-strategy unsafe-best-match` is load-bearing**, not tuning. The
+  cu130 index carries frozen copies of torch's runtime dependencies and, being
+  the priority index, shadows PyPI for every one of them. Without the flag the
+  same `.in` resolves `certifi==2022.12.7` and `datasets==1.1.1` and says
+  nothing about it ([the whole story](decisions.md#ml-lockfile)). It is already
+  on `make lock` and on the install task; do not drop it from either.
+- **Review the diff.** `make lock` re-resolves everything, so a one-line change
+  to the `.in` can move fifty pins. That is the point — but it is the moment to
+  look, not after `make apply`.
+
+Adding a package to the venv by hand with `uv pip install` is not an error, but
+it is invisible: `make verify`'s `lockfile applied` check compares the installed
+torch against the copy of the lockfile in the venv, so it will not notice
+anything else you added, and the next `make apply` will not remove it either
+(the role uses `pip install -r`, deliberately not `pip sync` — that would
+uninstall Ray).
 
 ## Conventions
 
@@ -103,6 +161,9 @@ ansible-galaxy collection install -r requirements.yml
 python3 -m pip install pyyaml     # tests/check_handlers.py
 ```
 
+`uv` itself is a hard requirement of `make lock` — `bootstrap.sh` puts it in
+`~/.local/bin`, which the Makefile prepends to `PATH`.
+
 `requirements.yml` matters more than it looks: `ansible-lint` runs in an
 isolated venv with `ansible-core` and no collections, so without it every
 non-builtin module reports as unknown — locally it may pass only because your
@@ -131,6 +192,16 @@ example for anything you would otherwise have to guess at.
   do not delete it.
 - `hardware.md` is verified facts only. If you cannot produce the command that
   proves it, it does not belong there.
+
+`make docs` enforces the mechanical half: every role, runbook, reference doc and
+`vars/` file is indexed, and every relative link and `#anchor` resolves. A dead
+anchor is otherwise silent — the page loads and ignores the fragment. Give a
+`decisions.md` entry an explicit `<a name="…">` if you intend to link to it;
+heading slugs are long and they move when you reword the heading.
+
+A wrong command is worse than a missing one, so grep before you write: every
+variable, tag, filename and command in a doc should exist in the tree at the
+moment you commit it.
 
 ### Label provenance
 

@@ -6,6 +6,9 @@
 # assertion; `make verify` returns non-zero if the node is not in the state
 # this repo claims it is.
 #
+# Two layers: the per-node checks in vars/verify_checks.yml, then a cross-node
+# block at the end for the things only visible with both hosts in the play.
+#
 # Read-only: no image pulls, no sudo, no changes.
 
 - name: Verify GX10 node
@@ -16,6 +19,16 @@
   # and a group_vars file would have to be named after a real inventory group.
   vars_files:
     - vars/verify_checks.yml
+
+  vars:
+    # Every host that got as far as recording its versions. Deliberately
+    # ansible_play_hosts_ALL: a host that fails an assertion is dropped from
+    # ansible_play_hosts, and drift is precisely what you want reported when
+    # something else on that node is already broken.
+    version_hosts: >-
+      {{ ansible_play_hosts_all | map('extract', hostvars)
+         | selectattr('gx10_versions', 'defined')
+         | map(attribute='inventory_hostname') | list }}
 
   tasks:
     - name: Read node state
@@ -28,6 +41,24 @@
       register: checks
       changed_when: false
       failed_when: false
+
+    # Collected BEFORE the asserts below, so a node that fails one of them has
+    # still published its versions for the cross-node comparison at the end.
+    - name: Read the versions that must match across nodes
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail;
+          printf '{"driver": "%s", "kernel": "%s", "torch": "%s"}'
+          "$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)"
+          "$(uname -r)"
+          "$({{ ml_venv }}/bin/python -c 'import torch; print(torch.__version__)' 2>/dev/null)"
+        executable: /bin/bash
+      register: node_versions
+      changed_when: false
+
+    - name: Record this node's versions
+      ansible.builtin.set_fact:
+        gx10_versions: "{{ node_versions.stdout | from_json }}"
 
     - name: Report
       ansible.builtin.debug:
@@ -60,3 +91,47 @@
       when:
         - not (item.item.required | default(true))
         - item.rc != 0
+
+    # --- Cross-node ----------------------------------------------------------
+    # Every check above validates one node in isolation, which misses the
+    # failure this cluster is most likely to have: the two boxes disagreeing on
+    # driver, kernel or torch version. NCCL then aborts or hangs at init with an
+    # error that reads like a fabric problem, while both nodes verify clean.
+    #
+    # This cannot be a verify_checks entry - those are shell commands run on one
+    # host, and nothing in a shell on node A can see node B's state.
+    #
+    # Both tasks below compare all hosts at once, so they need to run on ONE of
+    # them. `inventory_hostname == ansible_play_hosts | first` rather than
+    # run_once: identical under the default linear strategy, and it does not
+    # trip run-once[task], whose warning about `strategy: free` is real - under
+    # it a host can reach this before the other has recorded anything.
+    - name: Note when drift could not be checked
+      ansible.builtin.debug:
+        msg: >-
+          Only {{ version_hosts | join(', ') }} took part in this run, so
+          cross-node version drift was NOT checked. This node has
+          {{ gx10_versions }}. Run `make verify` with no --limit before
+          trusting a distributed job.
+      when:
+        - inventory_hostname == ansible_play_hosts | first
+        - version_hosts | length < 2
+
+    - name: Assert the nodes agree on driver, kernel and torch version
+      ansible.builtin.assert:
+        that: >-
+          version_hosts | map('extract', hostvars, ['gx10_versions', item.key])
+          | unique | length == 1
+        fail_msg: >-
+          {{ item.key }} differs across nodes:
+          {% for h in version_hosts %}{{ h }}={{ hostvars[h].gx10_versions[item.key] | default('(none)', true) }} {% endfor %}
+          -- ranks that disagree fail in ways that look like a fabric problem. {{ item.hint }}
+      loop:
+        - { key: driver, hint: "See docs/runbooks/upgrade-drivers.md" }
+        - { key: kernel, hint: "See docs/runbooks/upgrade-drivers.md" }
+        - { key: torch,  hint: "Re-run: make apply TAGS=ml. See docs/runbooks/troubleshoot.md" }
+      loop_control:
+        label: "{{ item.key }}"
+      when:
+        - inventory_hostname == ansible_play_hosts | first
+        - version_hosts | length > 1

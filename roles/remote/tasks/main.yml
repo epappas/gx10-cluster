@@ -27,10 +27,20 @@
     mode: "0700"
   become: true
 
-# This is not cosmetic. OpenSSH's StrictModes (on by default) refuses any
-# authorized_keys with group or other write bits - it silently ignores every
-# key in the file. This box shipped with mode 0664, which is why its journal
-# shows only "Accepted password" and never "Accepted publickey".
+# Hygiene - and deliberately no longer claiming to be more than that.
+#
+# The comment here used to assert this was fixing a live fault: that OpenSSH
+# StrictModes was ignoring every key because the file shipped at 0664, "which
+# is why its journal shows only Accepted password". That is measurably false on
+# this hardware. Both nodes have authorized_keys at 0664 right now, the journal
+# shows "Accepted publickey", and an explicit
+# `-o PreferredAuthentications=publickey` login succeeds. Whatever the precise
+# StrictModes rule is, 0664 owned by a user-private group is not tripping it.
+#
+# Tighten it anyway: 0600/0700 is what every piece of SSH documentation assumes,
+# the tolerance above is not a property to depend on, and if it ever stops
+# applying the failure is silent - every key in the file ignored, no error
+# logged, and you are back to passwords without being told.
 - name: Enforce authorized_keys permissions
   ansible.builtin.file:
     path: "{{ primary_home }}/.ssh/authorized_keys"
@@ -141,18 +151,21 @@
   loop: "{{ ufw_ssh_sources }}"
   when: enable_ufw | bool
 
-# Tailscale is the out-of-LAN access path, so allow it by interface rather
-# than relying on its CGNAT range surviving a rule reshuffle.
-- name: Allow all traffic on the tailscale interface
+# The mesh VPN is the out-of-LAN access path, so allow it by INTERFACE rather
+# than by its address range. Both NordVPN Meshnet and Tailscale hand out
+# 100.64.0.0/10, which is shared CGNAT space and not something to grant blanket
+# trust to by CIDR - the interface is the precise statement of "traffic that
+# arrived through the mesh".
+- name: Allow all traffic on the mesh VPN interface
   community.general.ufw:
     rule: allow
-    interface: tailscale0
+    interface: "{{ nordvpn_iface }}"
     direction: in
-    comment: "tailscale"
+    comment: "nordvpn meshnet"
   become: true
   when:
     - enable_ufw | bool
-    - install_tailscale | bool
+    - install_nordvpn | bool
 
 - name: Allow traffic on the cluster interconnect subnets
   community.general.ufw:
@@ -163,6 +176,30 @@
   loop: "{{ cluster_subnets }}"
   when: enable_ufw | bool
 
+# ---------------------------------------------------------------------------
+# The other nodes, on the MANAGEMENT path. This rule is load-bearing, not
+# belt-and-braces.
+#
+# NCCL_SOCKET_IFNAME points at the management NIC by design (see decisions.md),
+# and NCCL's bootstrap listener on rank 0 binds an EPHEMERAL port there - so
+# there is no port-scoped rule that can describe it. With only `allow 22/tcp`
+# from the LAN plus a default deny, the peer's bootstrap connection is silently
+# dropped and every collective hangs at init. That is indistinguishable from a
+# broken interconnect and gets debugged as one, for hours, on the fabric you
+# just cabled correctly. torchrun's rendezvous and Ray's ports sit in exactly
+# the same position.
+#
+# Scoped to the peers' own addresses, not the whole LAN.
+# ---------------------------------------------------------------------------
+- name: Allow all traffic from the other cluster nodes
+  community.general.ufw:
+    rule: allow
+    src: "{{ item }}"
+    comment: "gx10 peer node"
+  become: true
+  loop: "{{ cluster_peer_mgmt_addrs }}"
+  when: enable_ufw | bool
+
 - name: Enable ufw with default deny incoming
   community.general.ufw:
     state: enabled
@@ -171,40 +208,10 @@
   become: true
   when: enable_ufw | bool
 
-# --- Tailscale -------------------------------------------------------------
-# Installed from the apt repo rather than `curl | sh` as root - the script
-# only adds this repo and key, and doing it directly gives a signed,
-# apt-managed, pinnable package instead of piping a live URL into root's shell.
-- name: Add the tailscale apt key
-  ansible.builtin.get_url:
-    url: "https://pkgs.tailscale.com/stable/ubuntu/{{ ansible_facts['distribution_release'] }}.noarmor.gpg"
-    dest: /usr/share/keyrings/tailscale-archive-keyring.gpg
-    mode: "0644"
-  become: true
-  when: install_tailscale | bool
-
-- name: Add the tailscale apt repository
-  ansible.builtin.apt_repository:
-    repo: >-
-      deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg]
-      https://pkgs.tailscale.com/stable/ubuntu {{ ansible_facts['distribution_release'] }} main
-    filename: tailscale
-    state: present
-  become: true
-  when: install_tailscale | bool
-
-- name: Install tailscale
-  ansible.builtin.apt:
-    name: tailscale
-    state: present
-    update_cache: true
-  become: true
-  when: install_tailscale | bool
-
-- name: Enable tailscaled
-  ansible.builtin.systemd:
-    name: tailscaled
-    enabled: true
-    state: started
-  become: true
-  when: install_tailscale | bool
+# --- Mesh VPN --------------------------------------------------------------
+# NordVPN Meshnet, not Tailscale. Its own file: this role was already long, and
+# the mesh client has enough platform-specific behaviour (group handling, a
+# kill-switch unit, its own packet filter) to be worth reading in one piece.
+- name: Configure the mesh VPN
+  ansible.builtin.include_tasks: nordvpn.yml
+  when: install_nordvpn | bool

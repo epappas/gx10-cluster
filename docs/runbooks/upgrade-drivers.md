@@ -60,6 +60,13 @@ sudo reboot
 make verify                    # asserts nvcc, torch, and a real kernel launch
 ```
 
+**Upgrade both nodes, and verify them together.** `make verify` with no
+`--limit` compares driver and kernel version *across* the nodes and fails if
+they disagree — two ranks on different drivers abort or hang at NCCL init with
+an error that reads like a fabric problem, while each node verifies clean on its
+own. A one-node upgrade is a two-node outage waiting for the next distributed
+run.
+
 ## If you already broke it
 
 Symptom: `nvidia-smi` reports `Failed to initialize NVML: Driver/library

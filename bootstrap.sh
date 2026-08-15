@@ -35,14 +35,18 @@ if ! command -v ansible-playbook >/dev/null 2>&1; then
 fi
 ansible --version | head -1
 
-echo "==> Checking required collections"
+echo "==> Installing the pinned collections"
+# Install, not merely check. The `ansible` bundle ships whatever collection
+# versions it was built with, which is usually - but not always - inside the
+# ranges requirements.yml declares. Checking for presence let a wrong version
+# through and made those pins decorative on exactly the machine they exist to
+# protect.
+ansible-galaxy collection install -r requirements.yml
 for c in community.general ansible.posix community.crypto; do
-    if ansible-galaxy collection list 2>/dev/null | grep -q "^$c "; then
-        echo "    ok   $c"
-    else
-        echo "    !!   $c missing" >&2
+    ansible-galaxy collection list 2>/dev/null | grep -q "^$c " || {
+        echo "    !!   $c still missing after install" >&2
         exit 1
-    fi
+    }
 done
 
 echo "==> Validating the playbook"
@@ -75,11 +79,12 @@ Bootstrap complete.
 
 Next:
   1. Put your laptop's public key in group_vars/all.yml under authorized_keys.
-     Until you do, password SSH auth stays ON by design - the playbook proves
-     a key login works before it will disable passwords.
+     Password SSH auth stays ON until you ALSO set ssh_disable_passwords, and
+     that is a decision you make after checking from another terminal that key
+     login works - nothing on the node can prove that for you.
   2. Apply:   ansible-playbook site.yml -K
   3. Verify:  ansible-playbook verify.yml
-  4. Log out and back in (docker group, zsh, shell environment).
+  4. Log out and back in (docker and nordvpn groups, zsh, shell environment).
 
 Run it under tmux. The play touches sshd and networking.
 EOF

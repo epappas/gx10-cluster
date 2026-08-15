@@ -14,8 +14,10 @@ PermitRootLogin {{ ssh_permit_root_login }}
 PubkeyAuthentication yes
 
 {% if safe_to_disable_passwords | bool %}
-# A declared key was verified to work by an actual login probe before this
-# was written.
+# ssh_disable_passwords was set deliberately, with at least one key declared in
+# authorized_keys. Nothing on this node probed that the key works - it cannot,
+# the private half is not here - so this reflects the operator's assertion, not
+# a measurement. See docs/decisions.md.
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 {% else %}
@@ -24,7 +26,14 @@ KbdInteractiveAuthentication no
 PasswordAuthentication yes
 {% endif %}
 
+{% if ssh_x11_forwarding %}
 X11Forwarding yes
+{% else %}
+# Off: this is a headless compute node reached over SSH, so X11 forwarding is
+# one more thing sshd will set up on request for a display nobody has. Set
+# ssh_x11_forwarding to turn it back on.
+X11Forwarding no
+{% endif %}
 AllowAgentForwarding yes
 
 # Training runs sit idle at the prompt for hours; do not reap the session.

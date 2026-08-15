@@ -1,0 +1,24 @@
+# Managed by gx10-cluster ansible (roles/ml). Local edits are overwritten.
+#
+# Operational settings - OLLAMA_HOST and friends - live in
+# ollama.service.d/override.conf, not here, so that replacing this unit on a
+# version bump cannot drop them.
+
+[Unit]
+Description=Ollama Service
+After=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/ollama serve
+User=ollama
+Group=ollama
+Restart=always
+RestartSec=3
+# Spelled out, unlike upstream's install.sh which writes Environment="PATH=$PATH"
+# and so bakes in whatever PATH the shell running the installer happened to
+# have. That makes the unit differ between two boxes depending on who installed
+# them, which is precisely what this repo exists to prevent.
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+[Install]
+WantedBy=default.target

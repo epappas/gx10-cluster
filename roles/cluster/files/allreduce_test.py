@@ -4,13 +4,13 @@
 Run the SAME command on both boxes, changing only --node_rank. Addresses come
 from /etc/hosts, which the cluster role populates:
 
-    # on gx10-a
+    # on odysseus
     torchrun --nnodes 2 --nproc_per_node 1 --node_rank 0 \
-             --master_addr gx10-a --master_port 29500 allreduce_test.py
+             --master_addr odysseus --master_port 29500 allreduce_test.py
 
-    # on gx10-b
+    # on poseidon
     torchrun --nnodes 2 --nproc_per_node 1 --node_rank 1 \
-             --master_addr gx10-a --master_port 29500 allreduce_test.py
+             --master_addr odysseus --master_port 29500 allreduce_test.py
 
 Published two-node GB10 figures are around 10 GB/s bus bandwidth. Well under
 that suggests the collective fell back to TCP over the LAN instead of RoCE

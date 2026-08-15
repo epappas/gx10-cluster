@@ -12,9 +12,28 @@
 primary_user: "{{ ansible_facts['user_id'] }}"
 primary_home: "{{ ansible_facts['env']['HOME'] }}"
 
-# Set these to configure git on the provisioned node. Left empty, the task is
-# skipped and the node's existing git config is untouched - so a fork does not
-# silently inherit somebody else's identity.
+# The machine's hostname, and the single source for it. Defaults to the
+# inventory name, so `odysseus` in inventory.yml is what `hostname` reports,
+# what /etc/hosts maps, what ~/.ssh/config keys off, and what Slurm and
+# Prometheus label the node. Override per host in host_vars only if you need
+# the inventory alias and the system hostname to differ - they should not.
+node_hostname: "{{ inventory_hostname }}"
+
+# Passwordless sudo for the primary user.
+#
+# This is a real privilege decision, so it is a variable rather than a
+# side-effect: `NOPASSWD:ALL` means anything that can execute as this user can
+# become root without a secret. It is on because this is a two-node cluster
+# driven entirely by Ansible over SSH, key-only, and the alternative is typing
+# a password into every `make apply`, `make models` and `make optional` - which
+# in practice means it gets typed into shell history and CI scripts instead.
+#
+# The FIRST run still needs -K: the drop-in does not exist yet.
+sudo_passwordless: true
+
+# Set these to configure git on the provisioned node. Left empty, only the
+# identity is skipped - init.defaultBranch and pull.rebase still apply, because
+# they are opinions about this repo's machines, not about who you are.
 git_user_name: ""
 git_user_email: ""
 
@@ -29,7 +48,7 @@ cuda_home: /usr/local/cuda
 # dpkg calls aarch64 "arm64", and apt repo lines need the dpkg spelling.
 apt_arch: "{{ 'arm64' if ansible_facts['architecture'] == 'aarch64' else ansible_facts['architecture'] }}"
 
-# The performance cores. Verified via /proc/cpuinfo CPU part:
+# The performance cores. Verified via /proc/cpuinfo CPU part and cpufreq:
 #   0xd85 = Cortex-X925 @ 3.90 GHz -> 5-9, 15-19
 #   0xd87 = Cortex-A725 @ 2.81 GHz -> 0-4, 10-14
 # They INTERLEAVE. `taskset -c 0-9` is half efficiency cores, which is not
@@ -60,38 +79,36 @@ memlock_limit_kb: 67108864
 
 # ---------------------------------------------------------------------------
 # Python / ML
+#
+# The package list lives in roles/ml/files/requirements-ml.in and the resolved
+# versions in roles/ml/files/requirements-ml.txt, NOT here.
+#
+# Two identical machines is this repo's whole claim, and an unpinned package
+# list does not deliver it: provision node A today and node B in three months
+# and you get different transformers, different numpy, different everything.
+# `make lock` regenerates the lockfile from the .in on real aarch64 hardware.
 # ---------------------------------------------------------------------------
-# Only the cu130 index carries aarch64 wheels with sm_121 kernels.
+# Only the cu130 index carries aarch64 wheels with sm_121 kernels. Declared
+# here AND in the .in file: the .in is what uv reads, this is what the roles
+# and the docs interpolate.
 torch_index_url: "https://download.pytorch.org/whl/cu130"
 torch_version: "2.13.0"
 
 ml_venv: "{{ primary_home }}/venvs/ml"
 ml_python: "3.12"
 
-# torchaudio is deliberately ABSENT. The cu130 index stops at torchaudio
-# 2.11.0, whose wheel declares no torch pin at all, so it resolves happily
-# next to torch 2.13.0 and then fails at import with an ABI error. Add it back
-# only pinned against a matching torch.
-ml_packages:
-  - transformers
-  - accelerate
-  - datasets
-  - peft
-  - trl
-  - safetensors
-  - sentencepiece
-  # No [cli,hf_transfer] extras - neither exists in huggingface-hub 1.x, and
-  # hf_transfer is superseded by hf-xet, already a hard dependency.
-  - huggingface-hub
-  - bitsandbytes
-  - einops
-  - numpy
-  - pandas
-  - matplotlib
-  - jupyterlab
-  - rich
+# torchaudio is deliberately ABSENT from the .in. The cu130 index stops at
+# torchaudio 2.11.0, whose wheel declares no torch pin at all, so it resolves
+# happily next to torch 2.13.0 and then fails at import with an ABI error.
+# Add it back only pinned against a matching torch.
 
 uv_bin: "{{ primary_home }}/.local/bin/uv"
+
+# Standalone CLI tools, pinned for the same reason as everything else.
+uv_tools:
+  - "ruff==0.14.4"
+  - "ipython==9.7.0"
+  - "pre-commit==4.4.0"
 
 # Pinned, not `master`. The point of this repo is that both boxes come up
 # identical; cloning whatever HEAD happens to be that day defeats it.
@@ -99,11 +116,28 @@ build_llama_cpp: true
 llama_cpp_version: b6100
 
 install_ollama: true
+# Pinned and installed from the release tarball, not `curl | sh` as root - the
+# same reasoning that put gh and the mesh VPN on signed apt repos. See
+# roles/ml/tasks/ollama.yml.
+ollama_version: "0.32.13"
+# The release asset is zstd, NOT gzip - ollama-linux-arm64.tgz is a 404 on
+# current releases and only exists "for older versions". Checksum from the
+# release's own sha256sum.txt; it must be bumped together with the version.
+ollama_sha256: "ce2ebf080a5fee73ffd51bdf4684ccb5d44b3ee5bd4ac6fa80155595b26bb910"
 # Bound to localhost by design. Ollama has no authentication, and ufw does not
 # filter docker-published ports, so 0.0.0.0 is a wide-open model API on every
-# interface. Reach it over SSH (-L 11434:localhost:11434) or the tailscale
+# interface. Reach it over SSH (-L 11434:localhost:11434) or the mesh VPN
 # address; set 0.0.0.0:11434 here only if you accept that.
 ollama_host: "127.0.0.1:11434"
+
+# ---------------------------------------------------------------------------
+# Hugging Face
+# ---------------------------------------------------------------------------
+# Needed only for gated repos (most Llama weights). Leave empty for the public
+# models in the default sets. Put a real value in a vault file, never here:
+#   ansible-vault create host_vars/odysseus.vault.yml
+# The models role marks every task that touches it no_log.
+hf_token: ""
 
 # ---------------------------------------------------------------------------
 # Inference serving
@@ -128,12 +162,14 @@ vllm_gpu_memory_utilization: "0.85"
 # ---------------------------------------------------------------------------
 # Pre-loaded weights
 #
-# Sizes measured from the HF API, against ~114 GB usable of the 121 GB pool:
-#   Nemotron-3-Super-120B  BF16 230.3 GB  - needs BOTH nodes (TP=2)
-#                          FP8  119.6 GB  - weights alone exceed one node
-#                          NVFP4 74.8 GB  - fits, ~39 GB headroom
-#   Llama-3_3-Nemotron-Super-49B bf16 92.9 GB - the unquantized one that fits
+# size_gb is DATA, not a comment. The disk guard in roles/models subtracts the
+# planned download from free space; a floor checked once before pulling 130 GB
+# is not a guard, it is a formality.
 #
+# Sizes measured from the HF API, against ~114 GB usable of the 121 GB pool,
+# rounded up:
+#   Nemotron-3-Super-120B  BF16 231 GB  - needs BOTH nodes (TP=2)
+#                          NVFP4 75 GB  - fits, ~39 GB headroom
 # NVFP4 is the native format for GB10's Blackwell FP4 tensor cores - the same
 # reason llama.cpp compiles for 121a. It is both smaller and faster here.
 # ---------------------------------------------------------------------------
@@ -141,20 +177,22 @@ model_sets: [smoke, nvfp4]
 
 model_catalog:
   smoke:
-    - Qwen/Qwen3-8B                                    # 15.3 GB
+    - { id: "Qwen/Qwen3-8B",                                  size_gb: 16 }
   nvfp4:
-    - nvidia/Qwen3.6-27B-NVFP4                         # 20.4 GB
-    - nvidia/Qwen3.6-35B-A3B-NVFP4                     # 21.9 GB
-    - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4   # 74.8 GB
-  # Unquantized, single-node. Add 'large' to model_sets to pull it.
+    - { id: "nvidia/Qwen3.6-27B-NVFP4",                       size_gb: 21 }
+    - { id: "nvidia/Qwen3.6-35B-A3B-NVFP4",                   size_gb: 22 }
+    - { id: "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4", size_gb: 75 }
+  # Unquantized, single-node. Add 'large' to model_sets to pull it. Gated on
+  # HF - needs hf_token.
   large:
-    - nvidia/Llama-3_3-Nemotron-Super-49B-v1           # 92.9 GB
+    - { id: "nvidia/Llama-3_3-Nemotron-Super-49B-v1",         size_gb: 93 }
   # Only usable across BOTH nodes with tensor parallelism. Do not add this to
   # model_sets before the interconnect is up.
   cluster:
-    - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16    # 230.3 GB
+    - { id: "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",  size_gb: 231 }
 
-# Refuse to start a download that would leave the box with less than this.
+# Refuse to start a download that would leave the box with less than this
+# AFTER everything in model_sets has landed.
 model_min_free_gb: 100
 
 # ---------------------------------------------------------------------------
@@ -173,19 +211,35 @@ ray_port: 6379
 grafana_port: 3000
 prometheus_port: 9090
 prometheus_retention: "30d"
-# Same localhost-by-default posture as the inference APIs.
+# Same localhost-by-default posture as the inference APIs. Applies to
+# node_exporter too - it defaults to 0.0.0.0 and is pinned to this instead.
 monitoring_bind: "127.0.0.1"
+node_exporter_port: 9100
+
+# Scrape DCGM if something is exporting it on :9400. Nothing in this repo
+# installs DCGM - support on GB10 is partial - and the job is harmless when the
+# target is down, so this stays on. Declared here rather than living only as a
+# `| default(true)` inside prometheus.yml.j2: a knob nobody can find by reading
+# group_vars is not a knob.
+enable_dcgm: true
 
 # ---------------------------------------------------------------------------
 # Toolchains
 # ---------------------------------------------------------------------------
+# Node is opt-in (optional.yml --tags node). Nothing in the ML path needs it.
 nvm_version: "v0.40.1"
 node_version: "22"
-npm_globals: [pnpm, typescript, tsx]
+npm_globals:
+  - "pnpm@10.20.0"
+  - "typescript@5.9.3"
+  - "tsx@4.20.6"
 
-rust_channel: stable
+# An explicit toolchain, not `stable`. `rustup update stable` on every run is
+# the opposite of two identical machines - it guarantees they diverge the
+# moment they are provisioned on different days.
+rust_toolchain: "1.97.1"
+
 default_shell: /usr/bin/zsh
-install_starship: true
 
 # ---------------------------------------------------------------------------
 # Remote access
@@ -197,8 +251,21 @@ install_starship: true
 ssh_port: 22
 ssh_permit_root_login: "no"
 
-# Example entry: "ssh-ed25519 AAAA... you@laptop"
-authorized_keys: []
+# Keys authorized for {{ primary_user }} on EVERY node.
+#
+# The first entry is a dedicated cluster admin key, generated once for this
+# cluster and nothing else. Deliberately not a reused personal key: it can be
+# revoked here, in one line, without touching any other machine you log in to.
+# Its private half does NOT belong on the nodes - see the runbook.
+#
+# This list is additive; the authorized_key module never removes what it did
+# not add, which is what keeps the per-node inter-node keys that trust.yml
+# cross-authorizes from being wiped on the next run.
+#
+# Add your laptop's key as a second entry:
+#   - "ssh-ed25519 AAAA... you@laptop"
+authorized_keys:
+  - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHFAIfywMPFEdHKyZxIXlX3pyw8u/sJyvspGrLWTSI6C gx10-cluster-admin"
 
 # Turning this on disables password SSH auth. Do it only after verifying, from
 # another terminal, that key login works - nothing on the node can prove that
@@ -206,14 +273,53 @@ authorized_keys: []
 # authorized_keys is non-empty before honouring it.
 ssh_disable_passwords: false
 
+# This is an ML compute node reached over SSH. X11 forwarding is one more
+# thing sshd will do on request, for a display nobody has.
+ssh_x11_forwarding: false
+
 enable_ufw: true
+# Deliberately just the LAN. 10.0.0.0/8 and 172.16.0.0/12 were breadth without
+# meaning - no traffic from those ranges can reach a box on 192.168.4.0/22 -
+# and 172.16/12 covers docker0's 172.17.0.0/16, which handed every container on
+# the host a route to the host's own sshd. The mesh VPN is allowed by
+# INTERFACE below, which survives its address range changing.
 ufw_ssh_sources:
   - 192.168.0.0/16
-  - 10.0.0.0/8
-  - 172.16.0.0/12
-  - 100.64.0.0/10   # Tailscale CGNAT range - the remote-access path
 
-install_tailscale: true
+# ---------------------------------------------------------------------------
+# Mesh VPN - the out-of-LAN path
+#
+# NordVPN Meshnet, not Tailscale. Values filled in by roles/remote.
+# nordvpn_token is a Nord Account access token; leave empty to install the
+# client and enable the daemon without logging in, then run `nordvpn login
+# --token ...` by hand. Vault it if you set it here.
+# ---------------------------------------------------------------------------
+install_nordvpn: true
+nordvpn_token: ""
+nordvpn_iface: "nordlynx"
+nordvpn_mesh_cidr: "100.64.0.0/10"
+
+# The client's OWN packet filter, separate from Meshnet. Turned off because
+# ufw is the authority on this box and two uncoordinated netfilter writers is
+# already one too many - Docker makes three. Note this does NOT remove
+# NordVPN's fwmark rules from the mangle table; those are policy routing and
+# there is no CLI switch for them.
+nordvpn_disable_firewall: true
+
+# nordvpnd-killswitch.service is enabled by the package's postinst and runs
+# `nordvpnd --killswitch-mode` at every boot, Before=network-pre.target.
+#
+# We never call `nordvpn connect` here - Meshnet does not need a VPN tunnel -
+# so a kill switch for a tunnel that is never established protects nothing,
+# while running a netfilter-manipulating unit before the network comes up on a
+# box whose entire inference story is Docker containers is real downside.
+# Docker's bridge networking depends on the FORWARD chain.
+#
+# Honest confidence note: that the kill switch sets a DROP policy on FORWARD is
+# community-reported, not vendor-documented, and the rules are built
+# programmatically so they cannot be read out of the binary. Disabled on the
+# grounds that it has no upside here, not on a confirmed diagnosis.
+nordvpn_disable_killswitch: true
 
 # ---------------------------------------------------------------------------
 # Cluster interconnect (2x GX10 over ConnectX-7 QSFP)
@@ -227,6 +333,24 @@ cluster_subnets:
   - "192.168.101"
 cluster_subnet_prefix: 24
 cluster_master_port: 29500
+
+# Rank 0: the torchrun master, the Ray head, the Slurm controller. Derived
+# from cluster_rank, never from inventory order - `groups['gx10'][0]` and
+# `cluster_rank == 0` were two sources of truth for the same fact, and
+# reordering inventory.yml made them disagree silently.
+cluster_controller: >-
+  {{ groups['gx10'] | map('extract', hostvars)
+     | selectattr('cluster_rank', 'eq', 0)
+     | map(attribute='inventory_hostname') | first }}
+cluster_master_ip: "{{ cluster_subnets[0] }}.{{ hostvars[cluster_controller].cluster_index }}"
+
+# Every OTHER node's management address. NCCL's bootstrap channel runs over
+# mgmt_iface on EPHEMERAL ports, so no port-scoped firewall rule can express
+# it - the peer is trusted by address or the collective hangs at init.
+cluster_peer_mgmt_addrs: >-
+  {{ groups['gx10'] | difference([inventory_hostname])
+     | map('extract', hostvars, 'ansible_host')
+     | select('defined') | list }}
 
 # MTU is deliberately NOT set. NVIDIA's own two-node playbook leaves it at the
 # default; the "mtu 1500" in their docs is `ip addr` output, not a directive.

@@ -17,9 +17,20 @@ verify_checks:
     cmd: "{{ cuda_home }}/bin/nvcc --version | grep -q 'release {{ cuda_major }}'"
     hint: "nvcc is missing or not CUDA {{ cuda_major }}. See docs/runbooks/upgrade-drivers.md"
 
+    # Every entry in driver_stack_holds that is INSTALLED must be held, and the
+    # check prints the ones that are not. The previous version counted
+    # `apt-mark showhold | wc -l`, which counts holds on ANY package: seven
+    # unrelated holds passed it with the driver stack wide open, and its `- 1`
+    # fudge fitted this box only because exactly one entry (nvidia-dkms-580)
+    # happens to be absent here.
+    #
+    # "installed" is the real qualifier, not a hedge: dpkg cannot select a
+    # package it never installed, so roles/base does not hold those either.
   - name: "driver held"
-    cmd: "[ \"$(apt-mark showhold | wc -l)\" -ge {{ driver_stack_holds | length - 1 }} ]"
-    hint: "The driver stack is not held; apt could skew it. Re-run: make apply TAGS=base"
+    cmd: "dpkg-query -W -f='${db:Status-Status} ${db:Status-Want} ${binary:Package}\\n'
+      {{ driver_stack_holds | join(' ') }} 2>/dev/null
+      | awk '$1 == \"installed\" && $2 != \"hold\" { print $3; unheld = 1 } END { exit unheld }'"
+    hint: "The packages listed are installed but not held; apt could skew them. Re-run: make apply TAGS=base"
 
     # Not required: passes only after a NEW login session picks up the docker
     # group, so it legitimately fails on the first verify after provisioning.
@@ -36,6 +47,22 @@ verify_checks:
   - name: "NCCL installed"
     cmd: "dpkg -s libnccl2 > /dev/null 2>&1"
     hint: "NCCL missing. Re-run: make apply TAGS=ml"
+
+    # The lockfile's whole claim is that two boxes provisioned months apart come
+    # up identical, and nothing else here would notice it going unapplied: a
+    # venv left at last quarter's resolution, or bumped by hand with `uv pip
+    # install -U`, still imports, still sees the GPU and still runs a kernel.
+    #
+    # Compared against the copy roles/ml leaves IN the venv, not against
+    # torch_version: that tests the artifact that was applied rather than
+    # restating a constant from group_vars. The pin carries the local version
+    # (torch==2.13.0+cu130), so the exact-line match also catches a wheel that
+    # came from PyPI instead of the cu130 index. Missing torch leaves "torch==",
+    # a missing lockfile makes grep exit 2; both fail.
+  - name: "lockfile applied"
+    cmd: "grep -qxF \"torch==$({{ ml_venv }}/bin/python -c 'import torch; print(torch.__version__)')\"
+      {{ ml_venv }}/requirements-ml.txt"
+    hint: "The venv does not match its lockfile. Re-run: make apply TAGS=ml. See docs/runbooks/troubleshoot.md"
 
   - name: "torch sees GB10"
     cmd: >-
@@ -62,6 +89,17 @@ verify_checks:
     required: false
     hint: "Run `sudo sshd -t` by hand. If it errors, fix before rebooting - see docs/runbooks/recover-ssh-lockout.md"
 
+    # The out-of-LAN path. Not required: it needs a Nord Account token, which
+    # a perfectly healthy LAN-only node does not have.
+    #
+    # An address on the interface, not `nordvpn` CLI output: the CLI exits 0
+    # even when the daemon socket is missing, so its status text is not a
+    # reliable signal. roles/remote reports Meshnet as up on exactly this basis.
+  - name: "mesh vpn"
+    cmd: "[ -n \"$(ip -4 -br addr show {{ nordvpn_iface }} 2>/dev/null | awk '{print $3}')\" ]"
+    required: false
+    hint: "No {{ nordvpn_iface }} address - Meshnet is off, so this node is LAN-only. See docs/runbooks/recover-ssh-lockout.md"
+
   - name: "swappiness"
     cmd: "[ \"$(sysctl -n vm.swappiness)\" = '1' ]"
     hint: "Swappiness is not 1; a large job can hit the swap cliff. Re-run: make apply TAGS=base"
@@ -69,6 +107,34 @@ verify_checks:
   - name: "shell env"
     cmd: "grep -q PYTORCH_CUDA_ALLOC_CONF $HOME/.gx10env.sh"
     hint: "Shell environment not installed. Re-run: make apply TAGS=shell"
+
+    # Required even though nothing on ONE node needs it: munge (Slurm) rejects
+    # credentials once the clocks differ, with errors that never mention time,
+    # and correlating two nodes' logs after a failed run needs it too.
+  - name: "clock synced"
+    cmd: "[ \"$(timedatectl show -p NTPSynchronized --value)\" = 'yes' ]"
+    hint: "Clock not NTP-synced - run `sudo timedatectl set-ntp true`. See docs/runbooks/run-distributed.md"
+
+    # torchrun and mpirun launch their remote workers over SSH, so this is a
+    # prerequisite for any distributed run, not a convenience. Deliberately by
+    # HOSTNAME - the same name the launchers are given - which resolves to the
+    # peer's MANAGEMENT address, not the interconnect. That is why this check
+    # is NOT in the cable-dependent block below: it exercises a path that is up
+    # whether or not the QSFP cable is seated.
+    #
+    # Not required all the same: the peer is allowed to be switched off, and a
+    # single-node run of `make verify` should not fail for that. Peers come
+    # from the inventory rather than the play, so --limit cannot quietly turn
+    # this into a no-op.
+  - name: "inter-node ssh"
+    cmd: "for h in {{ groups['gx10'] | difference([inventory_hostname]) | join(' ') }};
+      do ssh -o BatchMode=yes -o ConnectTimeout=5 \"$h\" true
+      || { echo \"$h is not reachable\"; exit 1; }; done"
+    required: false
+    hint: >-
+      No key-auth SSH to the peer - torchrun cannot launch there. Run the FULL
+      play (no --limit) so both nodes exchange keys.
+      See docs/runbooks/run-distributed.md
 
   # --- cable-dependent: reported, never fatal ------------------------------
   - name: "RDMA devices"
@@ -86,6 +152,7 @@ verify_checks:
     required: false
     hint: "Fewer than two partitions addressed - you are capped at half the 200 Gb/s. See docs/runbooks/connect-cluster.md"
 
+
   # --- serving and monitoring ----------------------------------------------
   - name: "vLLM image"
     cmd: "sudo -n docker image inspect {{ vllm_image }} > /dev/null 2>&1"
@@ -102,10 +169,14 @@ verify_checks:
 
     # The metrics stack is opt-in and deliberately absent by default - it costs
     # memory, which on this box is model capacity.
+    #
+    # The endpoint, not `systemctl is-active`: the unit stays active when the
+    # exporter is listening on the wrong address, and the address is the part
+    # that moved (0.0.0.0 -> monitoring_bind). Scraping it proves both.
   - name: "metrics exporter"
-    cmd: "systemctl is-active --quiet prometheus-node-exporter"
+    cmd: "curl -sf --max-time 3 http://{{ monitoring_bind }}:{{ node_exporter_port }}/metrics | grep -q '^node_'"
     required: false
-    hint: "Exporter not installed (opt-in). See docs/runbooks/monitoring.md"
+    hint: "No exporter on {{ monitoring_bind }}:{{ node_exporter_port }} (opt-in). See docs/runbooks/monitoring.md"
 
   - name: "models cached"
     cmd: "test -d $HOME/.cache/huggingface/hub && [ \"$(ls -1 $HOME/.cache/huggingface/hub 2>/dev/null | wc -l)\" -gt 0 ]"

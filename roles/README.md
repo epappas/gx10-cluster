@@ -1,7 +1,8 @@
 # Roles
 
-Run order is the order in `site.yml`. Each row's tag is what you pass to
-`make apply TAGS=…` or `make apply SKIP=…`.
+Eleven roles run in `site.yml`, in the order below; the other four are opt-in
+and run only from `optional.yml`. Each row's tag is what you pass to
+`make apply TAGS=…` / `SKIP=…`, or to `make optional TAGS=…`.
 
 ## Provisioning — run by `site.yml`
 
@@ -9,15 +10,14 @@ Run order is the order in `site.yml`. Each row's tag is what you pass to
 |---|---|---|
 | `base` | `base` | apt safety (driver holds), build toolchain, CLI tools, `gh`, git config, sysctl, memlock |
 | `docker` | `docker` | group membership, NVIDIA runtime, merged `daemon.json`. Verifies; never installs Docker |
-| `shell` | `shell` | zsh + starship, the shared env fragment both shells source, tmux |
+| `shell` | `shell` | the env fragment both shells source, tmux config, zsh as the login shell |
 | `dev_python` | `python`, `dev` | uv and standalone tools (ruff, ipython, pre-commit) |
-| `dev_rust` | `rust`, `dev` | rustup + CLI tools |
-| `dev_node` | `node`, `dev` | nvm + Node 22 |
-| `ml` | `ml` | NCCL, cuDNN, PyTorch cu130, ollama, llama.cpp built for sm_121 |
+| `dev_rust` | `rust`, `dev` | rustup pinned to `rust_toolchain`, plus `bat` / `fd-find` / `zoxide` from apt |
+| `ml` | `ml` | NCCL, cuDNN, the pinned venv from `requirements-ml.txt`, ollama, llama.cpp built for sm_121 |
 | `inference` | `inference`, `serving` | vLLM container, `vllm-serve`, templated systemd unit |
 | `monitoring` | `monitoring` | `gx10-status` — GPU, throttling, unified memory, swap. **No daemons** |
-| `remote` | `remote` | sshd, ufw, tailscale |
-| `cluster` | `cluster` | RDMA, interconnect addressing, inter-node SSH, `/etc/nccl.conf` |
+| `remote` | `remote` | sshd, ufw, NordVPN Meshnet |
+| `cluster` | `cluster` | RDMA, interconnect addressing, `/etc/hosts`, inter-node SSH, `/etc/nccl.conf` |
 | `models` | `models` | pre-loads open weights. **The long pole** — ~130 GB |
 
 ## Opt-in — run only by `optional.yml`
@@ -32,10 +32,17 @@ already runs 2-node jobs, and `gx10-status` already shows you the machine.
 | `slurm` | `slurm` | slurmctld/slurmd + munge. Real queueing; heavy for two nodes |
 | `observability` | `exporters` | node_exporter + GPU textfile collector, ~20 MB RSS, for an external scraper |
 | `observability` | `dashboards` | the above plus prometheus + grafana **on this box** — costs model capacity |
+| `dev_node` | `node` | nvm + Node 22. Nothing in the ML path needs it |
 
 ```bash
 make optional TAGS=ray
 ```
+
+`optional.yml` uses `include_role` **tasks**, not a `roles:` list, and
+`observability` is two task files rather than two tags. Both are the same fix
+for the same bug: role-level tags are additive with task tags, so `--tags
+exporters` used to install grafana ([why](../docs/decisions.md#optional-include-role)).
+`roles/observability/tasks/main.yml` therefore fails on purpose — pick a tier.
 
 ## Conventions
 
@@ -48,8 +55,9 @@ make optional TAGS=ray
   typo hides until a first-time provision.
 - **New template?** Nothing to do: `tests/render.yml` discovers `roles/**/*.j2`
   automatically. Add a case only if it has a conditional branch worth covering.
-- **New role?** Add it to `site.yml` with a tag, add a check to
-  `vars/verify_checks.yml`, and add a row above — `make docs` fails if you skip
+- **New role?** Add it to `site.yml` with a tag — or, if it is opt-in, to
+  `optional.yml` as an `include_role` task tagged `[<name>, never]`. Add a check
+  to `vars/verify_checks.yml`, and a row above — `make docs` fails if you skip
   the last one.
 
 Full checklist: [docs/contributing.md](../docs/contributing.md).

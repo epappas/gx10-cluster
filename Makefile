@@ -109,9 +109,41 @@ models:  ## Download the model sets (long; resumable)
 	ansible-playbook site.yml -K --tags models $(ANSIBLE_ARGS)
 
 .PHONY: optional
-optional:  ## Install an opt-in component: make optional TAGS=ray|slurm|exporters|dashboards
-	@[ -n "$(TAGS)" ] || { echo "pick one: make optional TAGS=ray|slurm|exporters|dashboards"; exit 1; }
+optional:  ## Install an opt-in component: make optional TAGS=ray|slurm|exporters|dashboards|node
+	@[ -n "$(TAGS)" ] || { echo "pick one: make optional TAGS=ray|slurm|exporters|dashboards|node"; exit 1; }
 	ansible-playbook optional.yml -K --tags $(TAGS) $(if $(LIMIT),--limit $(LIMIT),) $(EXTRA)
+
+# Resolve roles/ml/files/requirements-ml.in into a fully pinned .txt.
+#
+# MUST run on a GX10, not your laptop: the resolution is specific to aarch64
+# and to the cu130 index that carries the only sm_121 torch wheels. Resolving
+# it anywhere else produces a lockfile that installs the wrong torch.
+#
+# This only reads package metadata - it installs nothing. Commit the result;
+# that file is what makes two boxes provisioned months apart identical.
+.PHONY: lock
+lock:  ## Re-resolve the ML lockfile (run ON a GX10; commit the result)
+	@uname -m | grep -qx aarch64 || { echo "lock: must run on aarch64 - see the comment in the Makefile"; exit 1; }
+#
+# --index-strategy unsafe-best-match is LOAD-BEARING, not tuning. The cu130
+# index is not torch-only: it carries frozen copies of torch's runtime deps,
+# and as the priority index under uv's default `first-index` strategy it
+# shadows PyPI for every one of them. Without this flag the same .in resolves
+# certifi==2022.12.7, requests==2.28.1 and datasets==1.1.1 - a four-year-old CA
+# bundle and a datasets that cannot work with transformers 5.x - because the
+# resolver backtracks the whole stack down to what the shadowed pins allow, and
+# says nothing. Version floors do not fix it; first-index refuses to fall
+# through to PyPI at all.
+#
+# --emit-index-url copies the index directives into the .txt. Without them the
+# lockfile is uninstallable, but it fails loudly (+cu130 does not exist on
+# PyPI) rather than quietly resolving to the wrong wheels.
+	uv pip compile roles/ml/files/requirements-ml.in \
+		--output-file roles/ml/files/requirements-ml.txt \
+		--python-version $(shell sed -n 's/^ml_python: *"\(.*\)"/\1/p' group_vars/all.yml) \
+		--index-strategy unsafe-best-match \
+		--emit-index-url
+	@echo "lock: regenerated - review the diff before committing"
 
 # The canonical Ansible test: a correct playbook changes nothing on a second
 # run. NOTE it catches only one direction - a task that reports changed when it

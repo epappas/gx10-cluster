@@ -1,7 +1,7 @@
 ---
 # Things that are ready but NOT installed by site.yml.
 #
-# torchrun already runs a 2-node job across both boxes, so neither of these is
+# torchrun already runs a 2-node job across both boxes, so none of these is
 # needed to use the cluster. They are here, ready, for when the need appears:
 #
 #   ray         a cluster that outlives a single job, and the substrate
@@ -12,20 +12,59 @@
 #   dashboards  the above plus prometheus and grafana on this box. Costs real
 #               memory, which here is model capacity - prefer running them
 #               elsewhere and pointing at the exporter.
+#   node        Node.js via nvm. Nothing in the ML path needs it; it is here
+#               for JS tooling if you happen to want it.
 #
 #   ansible-playbook optional.yml --tags ray -K
 #   ansible-playbook optional.yml --tags exporters -K
 #
 # Nothing runs without a tag, so an accidental invocation is a no-op.
+#
+# ---------------------------------------------------------------------------
+# These are TASKS with include_role, not a `roles:` list, and that is the whole
+# point. Tags on a `roles:` entry are applied to every task inside the role,
+# and task-level tags are ADDITIVE, not restrictive - so the previous
+# `- { role: observability, tags: [exporters, dashboards, never] }` gave every
+# task in that role all three tags, and `--tags exporters` installed prometheus
+# and grafana too. Exactly what the role's own header promised it would not do.
+#
+# A dynamic include_role propagates only the tags on the include itself, so the
+# split is real and `--list-tasks --tags exporters` proves it.
+# ---------------------------------------------------------------------------
 
 - name: Install optional components
   hosts: gx10
   serial: 1
   any_errors_fatal: true
 
-  # The `never` tag means a bare `ansible-playbook optional.yml` does
-  # nothing at all. You have to ask for one by name.
-  roles:
-    - { role: ray,           tags: [ray, never] }
-    - { role: slurm,         tags: [slurm, never] }
-    - { role: observability, tags: [exporters, dashboards, never] }
+  # The `never` tag means a bare `ansible-playbook optional.yml` does nothing
+  # at all. You have to ask for one by name.
+  tasks:
+    - name: Ray cluster
+      ansible.builtin.include_role:
+        name: ray
+      tags: [ray, never]
+
+    - name: Slurm queueing
+      ansible.builtin.include_role:
+        name: slurm
+      tags: [slurm, never]
+
+    - name: Metrics exporters (the cheap half)
+      ansible.builtin.include_role:
+        name: observability
+        tasks_from: exporters
+      tags: [exporters, never]
+
+    # dashboards.yml pulls in exporters.yml itself - there is nothing to scrape
+    # without it.
+    - name: Prometheus and Grafana (the expensive half)
+      ansible.builtin.include_role:
+        name: observability
+        tasks_from: dashboards
+      tags: [dashboards, never]
+
+    - name: Node.js toolchain
+      ansible.builtin.include_role:
+        name: dev_node
+      tags: [node, never]

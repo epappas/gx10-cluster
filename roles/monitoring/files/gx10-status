@@ -63,8 +63,14 @@ report() {
 
     echo
     b "Top memory consumers"
-    ps -eo rss=,comm= --sort=-rss | head -5 \
-        | awk '{printf "  %6.1f GB  %s\n", $1/1048576, $2}'
+    # The row limit is awk's, not `head -5`'s, on purpose. head exits after
+    # five lines and ps then takes SIGPIPE; with `set -euo pipefail` that 141
+    # becomes the pipeline's status and aborts the whole script. It has never
+    # fired only because ps's output fits Linux's 64K pipe buffer, so ps is
+    # done writing before head goes away - a busier box loses the race and the
+    # status tool dies mid-report. awk reads to EOF, so there is no race.
+    ps -eo rss=,comm= --sort=-rss \
+        | awk 'NR <= 5 {printf "  %6.1f GB  %s\n", $1/1048576, $2}'
 
     echo
     b "Disk (weights + swap live here)"
@@ -79,8 +85,14 @@ report() {
     for s in ollama prometheus grafana-server ray; do
         systemctl is-active --quiet "$s" 2>/dev/null && svc+="  $s"$'\n'
     done
-    systemctl list-units --state=active 'vllm@*' --no-legend 2>/dev/null \
-        | awk '{print "  " $1}' | while read -r l; do svc+="$l"$'\n'; done
+    # Captured, not piped into `while read`. A while loop at the end of a
+    # pipeline runs in a subshell, so every `svc+=` landed in a copy that was
+    # discarded when the pipeline ended - vLLM was running and this block never
+    # said so.
+    local vllm_units
+    vllm_units=$(systemctl list-units --state=active 'vllm@*' --no-legend 2>/dev/null \
+        | awk '{print "  " $1}' || true)
+    [[ -n "$vllm_units" ]] && svc+="$vllm_units"$'\n'
     if [[ -n "$svc" ]]; then
         echo
         b "Serving"

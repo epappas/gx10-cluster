@@ -56,15 +56,36 @@ make optional TAGS=exporters      # node_exporter + GPU metrics, ~20 MB RSS
 make optional TAGS=dashboards     # the above + prometheus + grafana here
 ```
 
-**Prefer `exporters` and scrape from elsewhere.** Point a Prometheus on your
-laptop or the second node at `<node>:9100` and you get history without paying
-for it on the box doing the work. The GPU gauges arrive as `gx10_gpu_*` via
-node_exporter's textfile collector.
+**Prefer `exporters` and scrape from elsewhere.** You get history without
+paying for it on the box doing the work. The GPU gauges arrive as `gx10_gpu_*`
+via node_exporter's textfile collector.
 
-If you do install `dashboards`, both bind to localhost by design:
+One wrinkle: node_exporter binds `monitoring_bind` (`127.0.0.1:9100`), the same
+posture as every other service here, so a remote Prometheus **cannot** reach it
+directly. Pick one:
 
 ```bash
-ssh -L 3000:localhost:3000 -L 9090:localhost:9090 gx10-a
+# tunnel it (nothing to change on the node)
+ssh -L 9100:localhost:9100 odysseus
+
+# or reach it over the mesh VPN / LAN by widening the bind, deliberately
+make optional TAGS=exporters EXTRA='-e monitoring_bind=0.0.0.0'
+```
+
+Widening it puts an unauthenticated metrics endpoint on every interface the
+firewall lets through — `ufw` allows the mesh interface and the peer nodes, so
+that is a real exposure decision, not a formality. The tunnel is the default
+for a reason.
+
+The `dashboards` tier scrapes the *other* node too, and at the default bind
+that peer job will show **down** — its exporter is only answering on its own
+loopback. A peer reported down is honest; omitting it would hide half the
+cluster.
+
+If you do install `dashboards`, all three bind to localhost by design:
+
+```bash
+ssh -L 3000:localhost:3000 -L 9090:localhost:9090 odysseus
 ```
 
 Grafana on <http://localhost:3000> (admin/admin first login — change it),
@@ -92,7 +113,7 @@ node_memory_SwapTotal_bytes - node_memory_SwapFree_bytes
 | "GPU memory" panel blank | It does not exist here | Use host memory — see above |
 | `power.limit` missing from metrics | `nvidia-smi` reports `[N/A]` on GB10 | Expected; the collector skips `[N/A]` rather than emitting a fake 0 |
 | `gx10_gpu.prom` missing | Timer not running | `systemctl status gx10-gpu-metrics.timer` |
-| Prometheus target for node 2 down | Node 2 not provisioned with `exporters` | `make optional TAGS=exporters LIMIT=gx10-b` |
+| Prometheus target for node 2 down | Node 2 not provisioned with `exporters` | `make optional TAGS=exporters LIMIT=poseidon` |
 
 ## Reclaiming what you already spend
 

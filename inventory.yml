@@ -1,30 +1,49 @@
 ---
 # GX10 cluster inventory.
 #
-# To add the second node, add this block under `hosts:` and run the FULL play
-# (not --limit) so both nodes exchange interconnect SSH keys in the same run:
+# The inventory hostname IS the machine's hostname. `roles/base` sets the
+# system hostname from `node_hostname`, which defaults to the inventory name,
+# so `odysseus` in this file, `hostname` on the box, the entry in /etc/hosts,
+# the `Host` block in ~/.ssh/config, the Slurm NodeName and the Prometheus
+# instance label are all one string with one source. Rename a host here and
+# everything follows on the next run.
 #
-#     gx10-b:
-#       ansible_host: <node-2-lan-address>
-#       ansible_user: <your-user>
-#       cluster_index: 11
-#       cluster_rank: 1
+# The group stays `gx10` - that names the hardware, not the machines.
+#
+# BOTH nodes are addressed over SSH, including the one you happen to be sitting
+# at. An `ansible_connection: local` entry for the local box looks like a free
+# optimisation and is not: it makes the play runnable only FROM that box, the
+# same command then behaves differently depending on where you type it, and the
+# local host silently skips the SSH path every other host exercises - so the
+# path that breaks is the one you never test.
 #
 # cluster_index is the host octet on BOTH interconnect subnets, matching
 # NVIDIA's connect-two-sparks playbook: .10 and .11.
 #
-# `serial: 1` in site.yml still provisions them one at a time.
+# cluster_rank names rank 0 - the torchrun master, the Ray head and the Slurm
+# controller. Everything derives the controller from THIS field via
+# `cluster_controller` in group_vars/all.yml, never from inventory order, so
+# reordering this file cannot silently move the controller.
+#
+# `serial: 1` in site.yml provisions them one at a time.
 # See docs/runbooks/provision-node.md
 
 all:
   children:
     gx10:
       hosts:
-        gx10-a:
-          ansible_connection: local
+        odysseus:
+          ansible_host: 192.168.4.36
           cluster_index: 10
           cluster_rank: 0
 
+        poseidon:
+          ansible_host: 192.168.4.37
+          cluster_index: 11
+          cluster_rank: 1
+
       vars:
-        # Rendezvous host for torchrun. Node 0's address on the first subnet.
-        cluster_master_ip: "{{ cluster_subnets[0] }}.10"
+        # Both boxes run the same account. Until `sudo_passwordless` has been
+        # applied once, `become` needs -K - and ansible prompts once per RUN,
+        # not once per host, so both nodes must accept the same sudo password.
+        ansible_user: epappas

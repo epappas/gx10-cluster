@@ -7,6 +7,44 @@
 # merely to run something on both boxes, which torchrun already does.
 #
 #   ansible-playbook optional.yml --tags slurm -K
+#
+# "Who is the controller" is answered in exactly one place: cluster_controller,
+# derived from cluster_rank. This role used to ask it two ways - tasks tested
+# `cluster_rank | int == 0` while slurm.conf.j2 and the munge key distribution
+# took `groups['gx10'][0]` - so reordering inventory.yml pointed slurmd at one
+# node and slurmctld at the other, with nothing to say so.
+
+# --- The interconnect is a hard prerequisite --------------------------------
+# Same exposure as roles/ray, handled the same way: slurm.conf gives every node
+# a NodeAddr on the first interconnect subnet, and that address does not exist
+# until a QSFP cable links the boxes - the ConnectX-7 is not on the PCI bus
+# before then, it arrives via PCIe hotplug on link detect. Left ungated, the
+# install reports success and the cluster is simply unusable: nothing answers
+# on NodeAddr, so the controller marks the node down for reasons that never
+# mention cabling.
+#
+# Two conditions because neither alone is enough: cluster_link_present is set
+# by roles/cluster, which optional.yml does not run, so under `--tags slurm` it
+# is out of scope. The address test stands on its own - a cable with no
+# addressing configured still leaves NodeAddr pointing at nothing.
+- name: Require the interconnect before installing slurm
+  ansible.builtin.assert:
+    that:
+      - cluster_link_present | default(true) | bool
+      - slurm_node_addr in ansible_facts['all_ipv4_addresses']
+    fail_msg: >-
+      {{ inventory_hostname }} has no interconnect address
+      ({{ slurm_node_addr }} is not configured on it), which is what
+      slurm.conf uses for NodeAddr. On GX10 the ConnectX-7 appears via PCIe
+      hotplug only once a QSFP cable links the two boxes. Cable them, run
+      `make apply TAGS=cluster`, confirm with
+      `ip -4 addr show to {{ cluster_subnets[0] }}.0/{{ cluster_subnet_prefix }}`,
+      then re-run this. Slurm is not pointed at the management interface
+      instead, on purpose: jobs would run, over WiFi, and look correct. See
+      docs/runbooks/connect-cluster.md.
+    success_msg: "Interconnect address {{ slurm_node_addr }} is up."
+  vars:
+    slurm_node_addr: "{{ cluster_subnets[0] }}.{{ cluster_index }}"
 
 - name: Install slurm and munge
   ansible.builtin.apt:
@@ -17,31 +55,56 @@
   become: true
 
 # Every node must share one munge key or authentication fails with errors that
-# do not mention munge. Generated on rank 0 and copied, rather than generated
-# per node.
+# do not mention munge. Generated on the controller and copied, rather than
+# generated per node.
 - name: Generate the munge key on the controller
   ansible.builtin.command:
     cmd: /usr/sbin/mungekey --create --keyfile /etc/munge/munge.key
     creates: /etc/munge/munge.key
   become: true
-  when: cluster_rank | int == 0
+  when: inventory_hostname == cluster_controller
 
 - name: Fetch the munge key from the controller
   ansible.builtin.slurp:
     src: /etc/munge/munge.key
   become: true
   register: munge_key
-  when: cluster_rank | int == 0
+  when: inventory_hostname == cluster_controller
 
+# This used to be `when: hostvars[...].munge_key is defined` on the copy below,
+# which turned every way of missing the key into a silent skip - notably
+# `--limit poseidon`, which excludes the controller and so never registers the
+# key. What you get is a slurmd authenticating against a key no other node
+# has, and the failure surfaces as slurm being unable to talk to the
+# controller, not as anything naming munge. Fail here instead, while the cause
+# is still on screen.
+- name: Require the controller's munge key
+  ansible.builtin.assert:
+    that: hostvars[cluster_controller].munge_key is defined
+    fail_msg: >-
+      No munge key from the controller ({{ cluster_controller }}), so
+      {{ inventory_hostname }} would install slurm with an authentication key
+      no other node shares. The controller has to run this role before any
+      worker does. Either it was excluded by --limit - re-run without it, or
+      as `--limit {{ cluster_controller }},{{ inventory_hostname }}` - or it is
+      later in inventory.yml than this host and `serial: 1` has not reached it
+      yet, in which case run `--limit {{ cluster_controller }}` first.
+    success_msg: "Munge key available from {{ cluster_controller }}."
+
+# no_log because this is a shared cluster secret passed through `content:`, and
+# without it `make diff` prints the munge key to the terminal and into any log
+# scraping that run. The cost is real and worth stating: a failure here reports
+# only that it failed, not why, so if this task ever breaks, re-run it alone
+# with `-vvv` and no_log temporarily removed.
 - name: Distribute the munge key
   ansible.builtin.copy:
-    content: "{{ hostvars[groups['gx10'][0]].munge_key.content | b64decode }}"
+    content: "{{ hostvars[cluster_controller].munge_key.content | b64decode }}"
     dest: /etc/munge/munge.key
     owner: munge
     group: munge
     mode: "0400"
   become: true
-  when: hostvars[groups['gx10'][0]].munge_key is defined
+  no_log: true
   notify: Restart munge
 
 - name: Configure slurm
@@ -65,7 +128,7 @@
     enabled: true
     state: started
   become: true
-  when: cluster_rank | int == 0
+  when: inventory_hostname == cluster_controller
 
 - name: Enable the slurm daemon
   ansible.builtin.systemd:

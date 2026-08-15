@@ -1,0 +1,106 @@
+# The ML stack: TOP-LEVEL wants only. Everything else is a transitive
+# dependency and belongs in requirements-ml.txt, which is generated from this
+# file and is what the ml role actually installs.
+#
+# Regenerate on a GX10. `make lock` must run exactly this:
+#
+#   uv pip compile roles/ml/files/requirements-ml.in \
+#       --output-file roles/ml/files/requirements-ml.txt \
+#       --python-version 3.12 \
+#       --index-strategy unsafe-best-match \
+#       --emit-index-url
+#
+# Neither of those two flags is optional; see the two blocks below. It also
+# MUST be resolved on real aarch64 hardware - uv resolves for the platform it
+# runs on, so a lockfile produced on a laptop pins x86_64 wheels and an
+# nvidia-* stack this box cannot use.
+
+# ---------------------------------------------------------------------------
+# Why the flag order is not interchangeable
+#
+# In uv, indexes given with --extra-index-url take priority over --index-url.
+# So cu130 has to be the EXTRA index for the torch pin to win. Written the
+# other way round - which this repo did before the lockfile landed - PyPI
+# becomes authoritative, `torch==2.13.0` resolves to the generic PyPI wheel,
+# and the cu130 pin is inert: it imports fine and then dies at the first kernel
+# launch with "no kernel image is available for execution on the device".
+#
+# Verified with `uv pip compile --emit-index-annotation`: torch, torchvision,
+# triton, numpy and the whole nvidia-* stack all annotate as cu130.
+#
+# Keep these two in step with torch_index_url in group_vars/all.yml. uv reads
+# this file; the roles and the docs interpolate the variable.
+# ---------------------------------------------------------------------------
+--index-url https://pypi.org/simple
+--extra-index-url https://download.pytorch.org/whl/cu130
+
+# ---------------------------------------------------------------------------
+# Why --index-strategy unsafe-best-match, and why "unsafe" is the wrong word here
+#
+# uv's default is first-index: for a given package name, only the FIRST index
+# that has it is consulted at all. download.pytorch.org/whl/cu130 is not a
+# torch-only index - it carries frozen copies of torch's own runtime
+# dependencies, and being the priority index it shadows PyPI for every one of
+# them. Resolved with the default strategy this file produces, verified:
+#
+#   certifi==2022.12.7   requests==2.28.1   urllib3==1.26.13
+#   datasets==1.1.1      trl==0.11.4
+#
+# A four-year-old CA bundle, and a `datasets` from 2020 that cannot work with
+# transformers 5.x. Nothing warns you - the resolver simply backtracks the top
+# of the stack down to whatever the shadowed `requests` pin allows.
+#
+# Adding floors (requests>=2.32) does NOT fix it. first-index will not fall
+# through to a later index, so it fails outright with "only requests==2.28.1 is
+# available". uv's own hint on that failure is to use this flag.
+#
+# The name warns about dependency confusion: a public index shadowing a private
+# one. There is no private index here - both are pypi.org and
+# download.pytorch.org - and the resolution is reviewed once and then frozen in
+# requirements-ml.txt, so nothing floats. Under best-match the ordering above
+# still decides ties, and torch still resolves to cu130 because PEP 440 ranks
+# 2.13.0+cu130 above a bare 2.13.0.
+#
+# uv reads this from the command line, NOT from this file, so it is on the
+# `make lock` invocation above and on the install in roles/ml/tasks/main.yml.
+# `uv pip install -r requirements-ml.txt` without it fails loudly rather than
+# installing something wrong.
+# ---------------------------------------------------------------------------
+
+# Pinned to match torch_version in group_vars/all.yml. The whole repo is built
+# around this version: cu130 is the only index publishing aarch64 wheels with
+# sm_121 kernels, and llama.cpp is compiled for the same target.
+torch==2.13.0
+torchvision
+
+# torchaudio is deliberately absent. The cu130 index stops at torchaudio
+# 2.11.0, whose wheel declares no torch pin at all, so it resolves happily next
+# to torch 2.13.0 and then fails at import with an ABI error. Add it back only
+# pinned against a matching torch.
+
+# --- Training and inference ------------------------------------------------
+transformers
+accelerate
+datasets
+peft
+trl
+safetensors
+sentencepiece
+huggingface-hub
+bitsandbytes
+einops
+
+# --- Numerics and plotting -------------------------------------------------
+numpy
+pandas
+# Kept even though the box is headless: matplotlib writes PNGs perfectly well
+# without a display, and enough of the ecosystem imports it unconditionally
+# that dropping it costs more than it saves.
+matplotlib
+
+# --- Terminal --------------------------------------------------------------
+rich
+
+# jupyterlab was removed - this box is headless and reached over SSH, and
+# nobody runs a notebook server on it. Adding it back is this one line plus
+# `make lock`.

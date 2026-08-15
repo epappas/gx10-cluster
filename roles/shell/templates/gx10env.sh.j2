@@ -79,9 +79,14 @@ alias gpuw='watch -n1 nvidia-smi'
 # Ubuntu ships these binaries under different names to avoid collisions.
 command -v batcat  >/dev/null 2>&1 && alias bat='batcat' && alias cat='batcat --paging=never'
 command -v fdfind  >/dev/null 2>&1 && alias fd='fdfind'
-command -v eza     >/dev/null 2>&1 && alias ls='eza --group-directories-first' && alias ll='eza -lah --git --group-directories-first'
 
-# --- Prompt and shell integrations -----------------------------------------
+# There were eza aliases here. eza is no longer installed - it was one of three
+# Rust CLIs the dev_rust role compiled from source on every fresh box, to get a
+# nicer `ls`. The `command -v eza` guard meant the aliases silently did nothing
+# once that stopped, taking `ll` with them in zsh, which has no default for it.
+alias ll='ls -lah --group-directories-first'
+
+# --- Shell integrations ----------------------------------------------------
 if [ -n "$ZSH_VERSION" ]; then
     _gx10_shell=zsh
 elif [ -n "$BASH_VERSION" ]; then
@@ -91,7 +96,6 @@ else
 fi
 
 if [ -n "$_gx10_shell" ]; then
-    command -v starship >/dev/null 2>&1 && eval "$(starship init $_gx10_shell)"
     command -v zoxide   >/dev/null 2>&1 && eval "$(zoxide init $_gx10_shell)"
     [ -f "/usr/share/doc/fzf/examples/key-bindings.$_gx10_shell" ] \
         && . "/usr/share/doc/fzf/examples/key-bindings.$_gx10_shell"

@@ -10,7 +10,16 @@ sheet.
 | Memory | 128 GB **unified**, coherent between CPU and GPU |
 | Storage | 1 TB NVMe |
 | Interconnect | ConnectX-7, 2x QSFP ports (4 RoCE devices) |
-| OS | DGX OS 7.5 (Ubuntu 24.04), driver 580.173, CUDA 13.0 |
+| OS | DGX OS on Ubuntu 24.04.4, driver 580.173.02, CUDA 13.0 (`nvcc` 13.0.88) |
+
+`/etc/dgx-release` reports two versions and they are not the same number:
+`DGX_SWBUILD_VERSION="7.2.3"` is the installed build, `DGX_OTA_VERSION="7.5.0"`
+the OTA channel. Quote whichever you mean.
+
+```bash
+cat /etc/dgx-release
+nvidia-smi --query-gpu=name,driver_version,compute_cap --format=csv,noheader
+```
 
 ## Everything must be aarch64
 
@@ -60,13 +69,23 @@ barrier wait on them.
 
 ## The ConnectX-7 is not there until you cable it
 
-> **Confidence: NVIDIA docs.** This section is from NVIDIA's
-> `connect-two-sparks` playbook, not measured here — our NIC is not on the bus
-> because the box is not cabled. Upgrade this note once it is.
+> **Confidence: NVIDIA docs** for the bandwidth and subnet claims below — from
+> NVIDIA's `connect-two-sparks` playbook, not measured here, because our NIC is
+> not on the bus. Upgrade this note once the boxes are cabled.
 
+The hotplug mechanism itself *is* verified here:
 
-It arrives via PCIe hotplug (`dgx-spark-mlnx-hotplug`). Before cabling there is
-no `mlx5` device and `ibv_devices` is empty.
+```bash
+dpkg -S /lib/udev/rules.d/90-mtk-hotplug.rules
+# dgx-spark-mlnx-hotplug: /lib/udev/rules.d/90-mtk-hotplug.rules
+```
+
+That rule matches the `cx7-pcie-hotplug` platform driver on `MTKP0001:00` and
+runs `/opt/nvidia/dgx-spark-mlnx-hotplug/mtk-hotplug-handler.sh`. It is a **udev
+rule, not a systemd unit**, so there is nothing to `systemctl status` — the
+three names (`dgx-spark-mlnx-hotplug`, `90-mtk-hotplug.rules`,
+`cx7-pcie-hotplug`) all refer to this one path. Before cabling there is no
+`mlx5` device and `ibv_devices` is empty.
 
 Each QSFP port presents **two** logical interfaces (two PCIe x4 partitions,
 ~100 Gb/s each) which must be on **different subnets**. All four RoCE devices

@@ -5,14 +5,28 @@
 # runs first, and `hf download` is itself resumable and idempotent - it
 # verifies what is already local and fetches only what is missing.
 
+# Derived once. It is the HF_HOME the shell fragment exports, and the root of
+# every path below.
+- name: Locate the Hugging Face cache
+  ansible.builtin.set_fact:
+    models_hf_home: "{{ primary_home }}/.cache/huggingface"
+
+# Catalog entries are dicts - { id: "org/repo", size_gb: 21 } - because the
+# guard below needs the size as data. unique() is by id, so a model listed in
+# two sets is neither downloaded nor counted twice.
 - name: Resolve the models to download
   ansible.builtin.set_fact:
     wanted_models: >-
-      {{ model_sets | map('extract', model_catalog) | select('defined') | flatten | unique }}
+      {{ model_sets | map('extract', model_catalog) | select('defined')
+         | flatten | unique(attribute='id') }}
 
 - name: Report the download plan
   ansible.builtin.debug:
-    msg: "sets={{ model_sets | join(', ') }} -> {{ wanted_models | length }} model(s): {{ wanted_models | join(', ') }}"
+    msg: >-
+      sets={{ model_sets | join(', ') }} ->
+      {{ wanted_models | length }} model(s),
+      {{ wanted_models | map(attribute='size_gb') | sum }} GB:
+      {{ wanted_models | map(attribute='id') | join(', ') }}
 
 - name: Check free disk
   ansible.builtin.shell:
@@ -23,45 +37,133 @@
 
 # Weights are tens to hundreds of GB. Filling the root filesystem on a box
 # whose swap lives there too is a bad afternoon.
+#
+# The floor is checked against what is left AFTER the whole plan lands, not
+# against what is free now. A static floor checked once in front of a 134 GB
+# download is not a guard, it is a formality: it passes at 130 GB free and the
+# box still runs out somewhere around the third model.
 - name: Refuse to fill the disk
   ansible.builtin.assert:
-    that: free_gb.stdout | int > model_min_free_gb | int
+    that:
+      - (free_gb.stdout | int) - (wanted_models | map(attribute='size_gb') | sum) >= (model_min_free_gb | int)
     fail_msg: >-
-      Only {{ free_gb.stdout }} GB free, below the {{ model_min_free_gb }} GB
-      floor. Free space or lower model_min_free_gb deliberately.
+      {{ free_gb.stdout }} GB free minus
+      {{ wanted_models | map(attribute='size_gb') | sum }} GB of planned weights
+      ({{ wanted_models | length }} model(s) from sets
+      {{ model_sets | join(', ') }}) leaves
+      {{ (free_gb.stdout | int) - (wanted_models | map(attribute='size_gb') | sum) }}
+      GB, under the {{ model_min_free_gb }} GB floor. Drop a set from
+      model_sets, free space, or lower model_min_free_gb deliberately.
+    success_msg: >-
+      {{ free_gb.stdout }} GB free, {{ wanted_models | map(attribute='size_gb') | sum }}
+      GB planned,
+      {{ (free_gb.stdout | int) - (wanted_models | map(attribute='size_gb') | sum) }}
+      GB left over.
 
 - name: Ensure the HF cache directory exists
   ansible.builtin.file:
-    path: "{{ primary_home }}/.cache/huggingface"
+    path: "{{ models_hf_home }}"
     state: directory
     owner: "{{ primary_user }}"
     group: "{{ primary_user }}"
     mode: "0755"
   become: true
 
+# HF_TOKEN is only added when one is configured. Most of the default sets are
+# public; the 'large' set is gated and 401s without it, which is a miserable
+# thing to discover four hours into an async task.
+#
+# Built as a fact so the key is genuinely absent rather than present-and-empty,
+# and so exactly one place has to be no_log.
+- name: Build the Hugging Face download environment
+  ansible.builtin.set_fact:
+    models_hf_env: >-
+      {{ {'HF_HOME': models_hf_home}
+         | combine({'HF_TOKEN': hf_token} if (hf_token | default('') | length > 0) else {}) }}
+  no_log: true
+
+# Everything hf actually downloads lands as a regular file in the repo's
+# blobs/ directory - snapshots/ holds only symlinks into it. Measuring the
+# blobs before and after the call is what makes the changed_when below honest;
+# see the comment there.
+#
+# On a box with an empty cache this logs one "Skipped ... is not a directory"
+# warning per model. That is the module reporting a path that legitimately does
+# not exist yet, not a fault: it returns files=[] and the sum below is 0, which
+# is the right answer.
+- name: Measure each model's cached blobs before downloading
+  ansible.builtin.find:
+    paths: "{{ models_hf_home }}/hub/models--{{ item.id | replace('/', '--') }}/blobs"
+    file_type: file
+  loop: "{{ wanted_models }}"
+  loop_control:
+    label: "{{ item.id }}"
+  register: blobs_before
+
 # `hf` is the CLI shipped by huggingface-hub 1.x, already in the ML venv.
 # async because a 75 GB pull is far longer than any sane SSH timeout; the
 # download is resumable, so an interrupted run costs nothing but time.
+#
+# On the changed_when: `hf download` gives you nothing to test. VERIFIED on
+# this box - it prints the resolved snapshot path, `path=/home/.../snapshots/
+# <sha>`, identically on a fresh pull and on a fully cached one, and the word
+# "already" that this task used to grep for never appears at all. So the task
+# reported changed on every run and `make idempotence` could never pass.
+#
+# Bytes on disk are the signal that is actually true, so the command ends by
+# printing the blob total and changed_when compares it with the measurement
+# above. This also stays correct for a RESUMED partial download, which a
+# "did the snapshot directory already exist" test would wrongly call unchanged.
+#
+# hf's own output goes to stderr so that stdout is only the number.
 - name: Download models
-  ansible.builtin.command:
-    cmd: "{{ ml_venv }}/bin/hf download {{ item }}"
+  ansible.builtin.shell:
+    cmd: >-
+      set -eo pipefail;
+      "{{ ml_venv }}/bin/hf" download "{{ item.id }}" 1>&2;
+      find "{{ models_hf_home }}/hub/models--{{ item.id | replace('/', '--') }}/blobs"
+      -type f -printf '%s\n' | awk '{s += $1} END {print s + 0}'
+    executable: /bin/bash
   become_user: "{{ primary_user }}"
   become: true
-  environment:
-    HF_HOME: "{{ primary_home }}/.cache/huggingface"
+  environment: "{{ models_hf_env }}"
   loop: "{{ wanted_models }}"
+  loop_control:
+    extended: true
+    label: "{{ item.id }}"
   register: hf_dl
-  changed_when: "'already' not in (hf_dl.stdout | default('') | lower)"
+  changed_when: >-
+    (hf_dl.stdout | int)
+    != (blobs_before.results[ansible_loop.index0].files | map(attribute='size') | sum)
   async: 14400
   poll: 60
+  # The environment carries HF_TOKEN, and ansible logs a task's environment at
+  # -vvv. The cost is that a FAILURE here prints "censored" and nothing else -
+  # reproduce it by hand with `HF_HOME=... ~/venvs/ml/bin/hf download <repo>`.
+  # The task below replaces the per-model progress this hides.
+  no_log: true
+
+# no_log suppresses display, not the registered result, so the outcome can be
+# reported from data that never contained the token.
+- name: Report what each download did
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.item.id }}:
+      {{ 'fetched' if item.changed else 'already complete' }},
+      {{ (item.stdout | int / 1073741824) | round(1) }} GB on disk
+  loop: "{{ hf_dl.results }}"
+  loop_control:
+    label: "{{ item.item.id }}"
+  # --check skips the download, leaving nothing to report on.
+  when: not ansible_check_mode
 
 - name: Report cache size
   ansible.builtin.shell:
-    cmd: "set -o pipefail; du -sh {{ primary_home }}/.cache/huggingface 2>/dev/null | cut -f1"
+    cmd: "set -o pipefail; du -sh {{ models_hf_home }} 2>/dev/null | cut -f1"
     executable: /bin/bash
   register: cache_size
   changed_when: false
 
 - name: Show the cache
   ansible.builtin.debug:
-    msg: "HF cache: {{ cache_size.stdout }} at {{ primary_home }}/.cache/huggingface"
+    msg: "HF cache: {{ cache_size.stdout }} at {{ models_hf_home }}"

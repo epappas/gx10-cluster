@@ -17,12 +17,20 @@
   environment:
     UV_INSTALL_DIR: "{{ primary_home }}/.local/bin"
 
+# uv_tools carries pinned specs (ruff==0.14.4), not bare names. Unpinned, these
+# resolved to whatever was newest on the day each box was provisioned, and
+# `uv tool install ruff` also reported changed on every run once a newer ruff
+# appeared - so the drift was invisible in the one check that would have caught
+# it.
+#
 # No --quiet: it suppresses all output, including the "Installed" string that
-# changed_when tests for, which made these silently report ok forever.
+# changed_when tests for, which made these silently report ok forever. The
+# no-op message is "`ruff==0.14.4` is already installed", lowercase, so the
+# capital I distinguishes them.
 - name: Install standalone Python tools with uv
   ansible.builtin.command: "{{ uv_bin }} tool install {{ item }}"
   become_user: "{{ primary_user }}"
   become: true
-  loop: [ruff, ipython, pre-commit]
-  register: uv_tools
-  changed_when: "'Installed' in (uv_tools.stderr | default(''))"
+  loop: "{{ uv_tools }}"
+  register: uv_tool_install
+  changed_when: "'Installed' in (uv_tool_install.stderr | default(''))"

@@ -35,6 +35,15 @@ A list of checks. Each entry:
 - **Quote carefully.** Use a double-quoted scalar, not `>-`, for anything with
   backslashes: a folded scalar does not process escapes, so `\\.` stays two
   literal backslashes and the regex silently never matches. That shipped once.
+  A double-quoted scalar may still span lines — the newline folds to a space —
+  so a long one-liner does not have to fight the 160-column limit.
 
 `tests/render.yml` asserts every entry has `name`, `cmd` and `hint`, so a
 malformed check fails `make check` rather than failing at 2am.
+
+## What does not go here
+
+A check that has to compare two hosts. Every entry here is one shell command
+run on one node, and nothing in a shell on node A can see node B — so the
+cross-node version-drift assertion lives in `verify.yml` itself, as tasks. Put
+a new comparison there, next to it, not here.

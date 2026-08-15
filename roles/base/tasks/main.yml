@@ -1,4 +1,54 @@
 ---
+# ---------------------------------------------------------------------------
+# Node identity
+# ---------------------------------------------------------------------------
+- name: Set the system hostname
+  ansible.builtin.hostname:
+    name: "{{ node_hostname }}"
+  become: true
+
+# The hostname module does NOT touch /etc/hosts, and Ubuntu ships
+# `127.0.1.1 <hostname>`. Left alone after a rename that line names a machine
+# that no longer exists, and `sudo` spends a DNS timeout on every invocation
+# complaining it cannot resolve the host.
+#
+# It is replaced with the ROUTABLE address rather than repaired in place, and
+# that matters more than it looks. torchrun is launched as
+# `--master_addr {{ cluster_controller }}`, and on rank 0 that name is resolved
+# by rank 0 itself: pointing it at 127.0.1.1 makes the rendezvous socket bind
+# loopback, so the peer connects to a port nothing is listening on and the job
+# hangs at init with no error. The cluster role's block adds the same mapping,
+# but it is appended at EOF - this line comes first in the file, so it is the
+# one that wins.
+- name: Point this host's name at its routable address in /etc/hosts
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^127\.0\.1\.1\s'
+    line: "{{ ansible_host }}  {{ node_hostname }}"
+    # If Ubuntu's line was already replaced on a previous run there is nothing
+    # matching 127.0.1.1 left; put it back near the top rather than at EOF.
+    insertafter: '^127\.0\.0\.1\s'
+    firstmatch: true
+  become: true
+
+# See sudo_passwordless in group_vars/all.yml for why this is on. validate is
+# not optional: a malformed file in sudoers.d breaks sudo for EVERY user, and
+# on a box with no BMC and root login disabled that is unrecoverable without
+# physical access. visudo -cf checks the file before it is put in place.
+#
+# The filename deliberately has no dot or tilde - sudo silently ignores files
+# in sudoers.d whose names contain either.
+- name: Grant the primary user passwordless sudo
+  ansible.builtin.copy:
+    dest: "/etc/sudoers.d/90-gx10-{{ primary_user }}"
+    mode: "0440"
+    owner: root
+    group: root
+    content: "{{ primary_user }} ALL=(ALL) NOPASSWD:ALL\n"
+    validate: /usr/sbin/visudo -cf %s
+  become: true
+  when: sudo_passwordless | bool
+
 - name: Update apt cache
   ansible.builtin.apt:
     update_cache: true
@@ -18,13 +68,25 @@
 # DGX OS has its own sanctioned upgrade path (nvidia-spark-run-apt-upgrade-once
 # and dgx-spark-ota-update-meta) which applies an updated pin first. Prefer it.
 # ---------------------------------------------------------------------------
+# The holds are applied to the INSTALLED subset of driver_stack_holds, which is
+# why the package set is read first. dpkg cannot select a package it has never
+# installed and dpkg_selections fails hard when asked to ("Failed to find
+# package X"), and not every entry exists on every release - nvidia-dkms-580 is
+# absent on this one (verified with dpkg-query).
+#
+# This replaced `failed_when: false`, which tolerated that case by tolerating
+# EVERYTHING: a dpkg lock, a half-configured package or a typo'd name all
+# reported ok while the stack silently stayed unheld.
+- name: Read the installed package set
+  ansible.builtin.package_facts:
+    manager: apt
+
 - name: Hold the NVIDIA driver and kernel stack
   ansible.builtin.dpkg_selections:
     name: "{{ item }}"
     selection: hold
   become: true
-  loop: "{{ driver_stack_holds }}"
-  failed_when: false   # a package not installed on this release is fine
+  loop: "{{ driver_stack_holds | select('in', ansible_facts['packages']) | list }}"
 
 - name: Upgrade packages (opt-in only)
   ansible.builtin.apt:
@@ -78,8 +140,8 @@
 
 # From GitHub's own repo, not Ubuntu's. Noble ships gh 2.45 (early 2024)
 # against upstream's 2.97 - old enough to be missing subcommands you will
-# reach for. Same pattern as tailscale: signed, apt-managed, pinnable, and no
-# curl-pipe-shell.
+# reach for. Same pattern as the NordVPN client in roles/remote: signed,
+# apt-managed, pinnable, and no curl-pipe-shell.
 - name: Add the GitHub CLI apt key
   ansible.builtin.get_url:
     url: https://cli.github.com/packages/githubcli-archive-keyring.gpg
@@ -103,16 +165,33 @@
     update_cache: true
   become: true
 
+# `git lfs install` prints "Git LFS initialized." whether or not it had
+# anything to do, so its output cannot drive changed_when - and with
+# --skip-repo it writes no hooks either, only the global filter.lfs.* config.
+# That config is the state to test for.
+#
+# The previous version said it detected the hooks and instead hardcoded
+# `changed_when: false`, which is the one bug `make idempotence` structurally
+# cannot catch: a changed_when that never fires always looks clean.
+- name: Check whether git-lfs is already initialised
+  community.general.git_config_info:
+    name: filter.lfs.smudge
+    scope: global
+  become_user: "{{ primary_user }}"
+  become: true
+  register: lfs_filter
+
 - name: Initialise git-lfs for the primary user
   ansible.builtin.command: git lfs install --skip-repo
   become_user: "{{ primary_user }}"
   become: true
-  register: lfs_init
-  # `git lfs install` prints "Git LFS initialized." unconditionally - there is
-  # no "already initialized" output to test for. Detect the hooks instead.
-  changed_when: false
+  when: lfs_filter.config_value | length == 0
+  changed_when: true
 
-- name: Configure git identity and defaults
+# Identity only. init.defaultBranch and pull.rebase are opinions about this
+# repo's machines, not about who you are, so gating them on an email being
+# configured silently cost a node both of them.
+- name: Configure the git identity
   community.general.git_config:
     name: "{{ item.name }}"
     value: "{{ item.value }}"
@@ -120,11 +199,20 @@
   become_user: "{{ primary_user }}"
   become: true
   loop:
-    - { name: user.name,        value: "{{ git_user_name }}" }
-    - { name: user.email,       value: "{{ git_user_email }}" }
-    - { name: init.defaultBranch, value: main }
-    - { name: pull.rebase,      value: "true" }
+    - { name: user.name,  value: "{{ git_user_name }}" }
+    - { name: user.email, value: "{{ git_user_email }}" }
   when: git_user_email | length > 0
+
+- name: Configure git defaults
+  community.general.git_config:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    scope: global
+  become_user: "{{ primary_user }}"
+  become: true
+  loop:
+    - { name: init.defaultBranch, value: main }
+    - { name: pull.rebase,        value: "true" }
 
 # --- Unattended security updates ------------------------------------------
 - name: Install unattended-upgrades

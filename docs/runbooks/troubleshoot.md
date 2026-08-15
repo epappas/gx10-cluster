@@ -20,6 +20,35 @@ It imports fine and dies at the first kernel launch.
 make apply TAGS=ml
 ```
 
+### The venv does not match its lockfile
+
+`make verify`'s `lockfile applied` check greps the installed torch version as an
+exact line in the copy of `requirements-ml.txt` that `roles/ml` leaves inside the
+venv. It catches three things at once: a venv left at an older resolution, one
+bumped by hand with `uv pip install -U`, and a wheel that came from PyPI rather
+than cu130 (the pin carries the `+cu130` local version, so the line will not
+match).
+
+```bash
+# what moved. uv lives in ~/.local/bin, not in the venv, so point it at one
+diff <(~/.local/bin/uv pip freeze --python ~/venvs/ml/bin/python) \
+     <(grep -E '^[a-zA-Z0-9]' ~/venvs/ml/requirements-ml.txt)
+make apply TAGS=ml                                   # put it back
+```
+
+Note the role installs with `pip install -r`, deliberately **not** `pip sync` —
+sync would uninstall Ray on the next apply. So extra packages survive; missing
+or downgraded ones are restored.
+
+### `uv pip install` fails with `only requests==2.28.1 is available`
+
+You dropped `--index-strategy unsafe-best-match`. The cu130 index shadows PyPI
+for torch's transitive dependencies and uv's default `first-index` will not fall
+through ([the whole story](../decisions.md#ml-lockfile)). It is on `make lock`
+and on the install task; do not remove it from either. Failing loudly here is
+the good case — without the flag at **lock** time it resolves silently and
+wrongly.
+
 ### `import torchaudio` fails with an undefined symbol
 
 Deliberately not installed: the cu130 index stops at torchaudio 2.11.0, which
@@ -80,10 +109,17 @@ role writes beside it.
 links the boxes. If it *is* cabled:
 
 ```bash
-lspci | grep -i mellanox                  # did hotplug fire?
-journalctl -b | grep -i mtk-hotplug   # it's a udev rule, not a service
+lspci | grep -i mellanox                          # did hotplug fire?
+journalctl -b | grep -i mtk-hotplug               # a udev rule, not a service
 dmesg | grep -i mlx5 | tail
 ```
+
+The hotplug path is a udev rule, not a unit, which is why there is nothing to
+`systemctl status`. Verified on this box: the `dgx-spark-mlnx-hotplug` package
+ships `/lib/udev/rules.d/90-mtk-hotplug.rules`, matching the `cx7-pcie-hotplug`
+platform driver and running
+`/opt/nvidia/dgx-spark-mlnx-hotplug/mtk-hotplug-handler.sh`. All three names
+turn up in different places; they are the same mechanism.
 
 Reseat the cable; check link LEDs both ends. If the devices appeared and then
 vanished ~20 s after boot, see the firmware faults table in
@@ -94,6 +130,45 @@ vanished ~20 s after boot, see the firmware faults table in
 → [connect-cluster: reading the result](connect-cluster.md#reading-the-result),
 which distinguishes half-bandwidth (one subnet), the ~13 Gbps firmware
 throttle, and a TCP fallback. They have different fixes and look similar.
+
+### A collective hangs at init and the fabric looks fine
+
+Almost always ufw, not the cable. NCCL's bootstrap uses an ephemeral port on the
+management NIC, so there is no port rule that describes it and the peer has to
+be trusted by address.
+→ [run-distributed](run-distributed.md#hangs-before-the-first-step-in-detail)
+
+## Remote access
+
+### `nordvpn` says `Permission denied` accessing the socket
+
+`/run/nordvpn/nordvpnd.sock` is `root:nordvpn` 0660. The remote role adds you to
+the group, but a group added mid-play is not in your current session.
+
+```bash
+id -nG | grep nordvpn || make apply TAGS=remote
+# then log out and back in, or prefix with sudo
+```
+
+### Meshnet is off / the node is only reachable on the LAN
+
+```bash
+ip -4 -br addr show nordlynx     # an address here means Meshnet is up
+sudo nordvpn account             # "not logged in" is the usual answer
+```
+
+→ [recover-ssh-lockout](recover-ssh-lockout.md#f-get-in-over-meshnet), which
+also covers the positional-token and token-revoking-`logout` traps.
+
+### A Meshnet peer cannot reach a container here
+
+Meshnet treats `172.17.0.0/16` as a local network and drops peer traffic aimed
+at it, so vLLM in a container is invisible to peers by default. Documented
+behaviour, not a bug:
+
+```bash
+sudo nordvpn meshnet peer local allow all   # what the remote role runs
+```
 
 ## Ansible
 
@@ -120,10 +195,36 @@ make idempotence   # applies twice; the second run must be changed=0
 make render        # renders every template against real facts
 ```
 
+### `roles/observability has no default entry point`
+
+Working as intended. The role is two tiers and you have to pick one:
+`make optional TAGS=exporters` or `TAGS=dashboards`. A no-op `main.yml` would
+have read as a successful install
+([why](../decisions.md#optional-include-role)).
+
+### A tag installed more than I asked for
+
+Prove what a tag selects before running it:
+
+```bash
+ansible-playbook optional.yml --list-tasks --tags exporters
+```
+
+If a tag ever pulls in tasks you did not name, the cause is a `roles:` entry
+rather than an `include_role` task — role-level tags are additive with task
+tags. `optional.yml` is written as tasks for exactly this reason.
+
+### `make docs` fails
+
+A directory index went stale, or a link or `#anchor` does not resolve. Fix the
+doc; the check exists because a stale index confidently denies that a role or
+runbook exists.
+
 ## More detail
 
 ```bash
 ansible-playbook site.yml -K --check --diff --tags <role>
 ansible-playbook site.yml -K --tags <role> -vv
+ansible-playbook site.yml --list-tasks --tags <role>
 journalctl -u <service> -n50
 ```

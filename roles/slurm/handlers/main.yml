@@ -5,10 +5,14 @@
     state: restarted
   become: true
 
+# No `failed_when: false`. It was here, and contributing.md forbids it for
+# exactly this shape: the handler only fires because the config or the munge key
+# just changed, so a daemon that will not come back up afterwards is the single
+# most important thing the run can tell you - and swallowing it leaves a cluster
+# that looks provisioned and cannot schedule anything.
 - name: Restart slurm
   ansible.builtin.systemd:
     name: "{{ item }}"
     state: restarted
   become: true
-  loop: "{{ (['slurmctld'] if cluster_rank | int == 0 else []) + ['slurmd'] }}"
-  failed_when: false
+  loop: "{{ (['slurmctld'] if inventory_hostname == cluster_controller else []) + ['slurmd'] }}"
