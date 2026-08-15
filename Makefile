@@ -30,7 +30,7 @@ help:  ## Show this help
 # --- Checks that run anywhere (and in CI) ----------------------------------
 
 .PHONY: check
-check: lint syntax smoke render handlers docs shellcheck  ## Every offline check (what CI runs)
+check: lint syntax smoke render handlers docs lockfile shellcheck  ## Every offline check (what CI runs)
 
 .PHONY: deps
 deps:  ## Install the pinned collections
@@ -81,6 +81,15 @@ handlers:  ## Every notify: must name a handler that exists in the same role
 .PHONY: docs
 docs:  ## Directory indexes must list every role, runbook and vars file
 	@python3 tests/check_docs.py
+
+# The ML lockfile is one resolution and only means anything whole. Two ways it
+# silently stops being that: regenerated without --index-strategy (the cu130
+# index then shadows PyPI for torch's deps and you get 2022 versions), or a
+# Dependabot security update bumps one pin - which cannot be turned off per
+# manifest, so it will be attempted eventually.
+.PHONY: lockfile
+lockfile:  ## The ML lockfile must be a real resolution, not a hand-edit
+	@python3 tests/check_lockfile.py
 
 .PHONY: shellcheck
 shellcheck:  ## Lint the shell scripts (skipped if shellcheck is absent)
