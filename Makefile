@@ -17,6 +17,15 @@ SKIP  ?=
 # - make eats -e as --environment-overrides and the variable never reaches
 # ansible. Use: make apply EXTRA='-e allow_apt_upgrade=true'
 EXTRA ?=
+
+# `-K` (prompt for the sudo password) is on by default, because before the very
+# first apply there is no sudoers drop-in yet. Once `sudo_passwordless` has been
+# applied, drop it - the prompt is then pure friction, and it does not work at
+# all from a non-tty (getpass warns "Can not control echo on the terminal" and
+# the run dies with "Missing sudo password"):
+#
+#     make diff ASKPASS=
+ASKPASS ?= -K
 ANSIBLE_ARGS := $(if $(LIMIT),--limit $(LIMIT),) $(if $(TAGS),--tags $(TAGS),) \
                 $(if $(SKIP),--skip-tags $(SKIP),) $(EXTRA)
 
@@ -102,12 +111,12 @@ shellcheck:  ## Lint the shell scripts (skipped if shellcheck is absent)
 # --- Targets that need the real hardware -----------------------------------
 
 .PHONY: diff
-diff:  ## Dry run showing what would change (-K prompts for sudo)
-	ansible-playbook site.yml -K --check --diff $(ANSIBLE_ARGS)
+diff:  ## Dry run showing what would change (ASKPASS= once sudo is passwordless)
+	ansible-playbook site.yml $(ASKPASS) --check --diff $(ANSIBLE_ARGS)
 
 .PHONY: apply
-apply:  ## Provision (-K prompts for sudo). Run under tmux.
-	ansible-playbook site.yml -K $(ANSIBLE_ARGS)
+apply:  ## Provision. Run under tmux. (ASKPASS= once sudo is passwordless)
+	ansible-playbook site.yml $(ASKPASS) $(ANSIBLE_ARGS)
 
 .PHONY: verify
 verify:  ## Assert the node is in the expected state; fails loudly if not
@@ -115,12 +124,12 @@ verify:  ## Assert the node is in the expected state; fails loudly if not
 
 .PHONY: models
 models:  ## Download the model sets (long; resumable)
-	ansible-playbook site.yml -K --tags models $(ANSIBLE_ARGS)
+	ansible-playbook site.yml $(ASKPASS) --tags models $(ANSIBLE_ARGS)
 
 .PHONY: optional
 optional:  ## Install an opt-in component: make optional TAGS=ray|slurm|exporters|dashboards|node
 	@[ -n "$(TAGS)" ] || { echo "pick one: make optional TAGS=ray|slurm|exporters|dashboards|node"; exit 1; }
-	ansible-playbook optional.yml -K --tags $(TAGS) $(if $(LIMIT),--limit $(LIMIT),) $(EXTRA)
+	ansible-playbook optional.yml $(ASKPASS) --tags $(TAGS) $(if $(LIMIT),--limit $(LIMIT),) $(EXTRA)
 
 # Resolve roles/ml/files/requirements-ml.in into a fully pinned .txt.
 #
@@ -160,9 +169,9 @@ lock:  ## Re-resolve the ML lockfile (run ON a GX10; commit the result)
 .PHONY: idempotence
 idempotence:  ## Apply twice; the second run must report zero changes
 	@echo "==> first run"
-	@ansible-playbook site.yml -K $(ANSIBLE_ARGS) > /dev/null
+	@ansible-playbook site.yml $(ASKPASS) $(ANSIBLE_ARGS) > /dev/null
 	@echo "==> second run (must be changed=0)"
-	@ansible-playbook site.yml -K $(ANSIBLE_ARGS) | tee .idem.log | tail -20
+	@ansible-playbook site.yml $(ASKPASS) $(ANSIBLE_ARGS) | tee .idem.log | tail -20
 	@if grep -qE 'changed=[1-9]' .idem.log; then \
 		echo; echo "IDEMPOTENCE FAILED - tasks reported changed on a no-op run."; \
 		echo "Find them with: grep -B5 'changed:' .idem.log"; \

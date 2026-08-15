@@ -363,7 +363,11 @@ file in `sudoers.d` breaks `sudo` for every user, and on a box with no BMC and
 dot or tilde, because `sudo` silently ignores files in `sudoers.d` that have
 either.
 
-The first run still needs `-K` — the drop-in does not exist yet.
+The first run still needs `-K` — the drop-in does not exist yet. Afterwards
+`ASKPASS=` drops the prompt (`make diff ASKPASS=`), which is not only
+convenience: `-K` uses `getpass` and needs a tty, so from a non-interactive
+shell it fails with `Can not control echo on the terminal` followed by
+`Missing sudo password`.
 
 ## A dedicated cluster admin key, not a reused personal one
 
