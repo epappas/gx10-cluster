@@ -25,7 +25,17 @@ wherever you run it and no host skips the SSH path
 
 **The first run needs `-K`** and both boxes must accept the same sudo password,
 because `-K` prompts once per run rather than once per host. That run installs a
-sudoers drop-in (`sudo_passwordless`), so every run after it does not.
+sudoers drop-in (`sudo_passwordless`), so every run after it does not — drop the
+prompt with `ASKPASS=`:
+
+```bash
+make apply                 # first time: prompts for sudo
+make diff ASKPASS=         # afterwards: no prompt
+```
+
+`-K` also needs a real terminal. Over a non-tty it fails with
+`Can not control echo on the terminal` and then `Missing sudo password`, so
+either run it from a shell or use `ASKPASS=` once the drop-in is in place.
 
 Two things the play cannot do for you:
 

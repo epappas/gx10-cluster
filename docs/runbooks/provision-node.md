@@ -19,8 +19,11 @@ the `models` role run: ~130 GB of weights.
       (see [The cluster admin key](#the-cluster-admin-key))
 - [ ] **First run only:** every node accepts the **same** sudo password — `-K`
       prompts once per run, not once per host. After the first successful run
-      `sudo_passwordless` has installed a sudoers drop-in and `-K` is no longer
-      needed on either box
+      `sudo_passwordless` has installed a sudoers drop-in, and every later run
+      takes `ASKPASS=` to skip the prompt (`make diff ASKPASS=`)
+- [ ] You are on a real terminal. `-K` uses `getpass`, which needs a tty; from
+      anything else it warns `Can not control echo on the terminal` and the run
+      dies with `Missing sudo password`. Use `ASKPASS=` instead once you can
 - [ ] You are **not** running as root. `site.yml` refuses: everything lands in
       the connecting user's home, and under `sudo` that is `/root`
 
