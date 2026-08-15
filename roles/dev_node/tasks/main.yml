@@ -1,4 +1,8 @@
 ---
+# OPT-IN. Not in site.yml - reached only via `optional.yml --tags node`
+# (`make optional TAGS=node`). Nothing in the ML path needs Node; it is here
+# for JS tooling if you happen to want it.
+#
 # Node via nvm rather than apt or NodeSource: it keeps node in userland (no
 # sudo for global installs) and NodeSource's arm64 builds lag on this platform.
 
@@ -38,6 +42,12 @@
   register: npm_global
   # npm prints "changed 0 packages" on a no-op, so testing for the substring
   # "changed" matches every run. Count the actual number instead.
+  #
+  # This only holds because npm_globals carries pinned specs (pnpm@10.20.0).
+  # Bare names ask npm for "latest" every time, so the day upstream publishes a
+  # release the no-op becomes "changed 1 package" - correctly reported, but the
+  # box has just silently moved. Idempotence and reproducibility are the same
+  # fix here.
   changed_when: >-
     npm_global.stdout is search('added \d+ package')
     or npm_global.stdout is search('changed [1-9]\d* package')

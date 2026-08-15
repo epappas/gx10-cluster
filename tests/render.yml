@@ -30,6 +30,20 @@
     cluster_link_present: true
     cluster_ifaces: [enp1s0f1np1, enP2p1s0f1np1]
 
+    # These two derive from groups['gx10'] and hostvars in group_vars/all.yml.
+    # They do resolve here - ansible.cfg loads the inventory - but they resolve
+    # against LOCALHOST's view of it, which no real node ever has:
+    # cluster_peer_mgmt_addrs comes out as *every* node, because localhost is
+    # not one of them to subtract. Pin both, so this stays a test of the
+    # templates and not of the inventory.
+    #
+    # cluster_controller is also the head/worker switch in ray.service.j2, and
+    # it compares against inventory_hostname - so setting it to this host is
+    # what makes the main loop render the HEAD branch. The worker pass below
+    # points it elsewhere.
+    cluster_controller: "{{ inventory_hostname }}"
+    cluster_peer_mgmt_addrs: ["192.168.4.37"]
+
   tasks:
     - name: Ensure the output directory exists
       ansible.builtin.file:
@@ -88,15 +102,28 @@
         that: "'PasswordAuthentication no' in lookup('file', out ~ '/10-gx10-nopass.conf')"
         fail_msg: "ssh_disable_passwords=true did not disable password auth"
 
-    # The loop above renders ray.service as the HEAD (rank 0). The worker
-    # branch is the one that references cluster_master_ip, so it needs its own
-    # pass or a typo there only surfaces on node 2.
+    # The loop above renders ray.service as the HEAD, because cluster_controller
+    # is pinned to this host. Assert that, or a change to the switch could send
+    # both passes down the same branch and this file would still look green -
+    # which is what happened when the switch moved from cluster_rank to
+    # cluster_controller. --dashboard-host is only reachable through this
+    # branch, so it is also the only render of monitoring_bind anywhere.
+    - name: Assert the default branch renders the ray head
+      ansible.builtin.assert:
+        that:
+          - "'ray start --head' in lookup('file', out ~ '/ray.service')"
+          - "'--dashboard-host=127.0.0.1' in lookup('file', out ~ '/ray.service')"
+        fail_msg: "the ray unit did not render as the head node"
+
+    # The worker branch is the one that references cluster_master_ip, so it
+    # needs its own pass or a typo there only surfaces on node 2.
     - name: Render the ray unit as a worker
       ansible.builtin.template:
         src: "{{ repo_root }}/roles/ray/templates/ray.service.j2"
         dest: "{{ out }}/ray-worker.service"
         mode: "0644"
       vars:
+        cluster_controller: odysseus
         cluster_rank: 1
         cluster_index: 11
 

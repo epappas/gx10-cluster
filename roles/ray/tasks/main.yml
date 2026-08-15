@@ -7,6 +7,43 @@
 #
 #   ansible-playbook optional.yml --tags ray -K
 
+# --- The interconnect is a hard prerequisite --------------------------------
+# ray.service binds --node-ip-address to this node's address on the first
+# interconnect subnet, so Ray's object transfers use the 200G ConnectX-7 link.
+# That address does not exist on an uncabled box: the CX-7 is not even on the
+# PCI bus until a QSFP cable links the two machines - dgx-spark-mlnx-hotplug
+# brings it up on link detect. Binding a socket to an address the box does not
+# hold is EADDRNOTAVAIL, so without this gate `state: started` fails inside
+# `ray start` with a message about assigning an address and none about cabling.
+#
+# Falling back to the management interface is deliberately NOT offered. It
+# would put every object transfer on WiFi and still report success, so you
+# would learn about it from a training run's wall clock rather than from
+# ansible. Refusing to install is the cheaper failure.
+#
+# Two conditions because neither alone is enough. cluster_link_present is set
+# by roles/cluster, which optional.yml does not run - so under `--tags ray` it
+# is simply out of scope, hence the default. The address test stands on its
+# own and is what Ray actually needs: a cable with no addressing configured
+# still has nothing to bind to.
+- name: Require the interconnect before installing ray
+  ansible.builtin.assert:
+    that:
+      - cluster_link_present | default(true) | bool
+      - ray_node_ip in ansible_facts['all_ipv4_addresses']
+    fail_msg: >-
+      {{ inventory_hostname }} has no interconnect address ({{ ray_node_ip }}
+      is not configured on it), so Ray has nothing to bind --node-ip-address
+      to. On GX10 the ConnectX-7 appears via PCIe hotplug only once a QSFP
+      cable links the two boxes. Cable them, run `make apply TAGS=cluster`,
+      confirm with `ip -4 addr show to {{ cluster_subnets[0] }}.0/{{ cluster_subnet_prefix }}`,
+      then re-run this. Ray is not started on the management interface
+      instead, on purpose: that would put object transfers on WiFi and look
+      like it worked. See docs/runbooks/connect-cluster.md.
+    success_msg: "Interconnect address {{ ray_node_ip }} is up."
+  vars:
+    ray_node_ip: "{{ cluster_subnets[0] }}.{{ cluster_index }}"
+
 - name: Install ray
   ansible.builtin.command: >-
     {{ uv_bin }} pip install --python {{ ml_venv }}/bin/python
@@ -26,7 +63,7 @@
   become: true
   notify: Restart ray
 
-# Rank 0 is the head; everyone else joins it. Addresses come from the
+# The controller is the head; everyone else joins it. Addresses come from the
 # interconnect subnet so Ray's object transfers use the 200G link, not WiFi.
 - name: Enable ray
   ansible.builtin.systemd:
@@ -39,6 +76,6 @@
 - name: Explain the cluster
   ansible.builtin.debug:
     msg: >-
-      Ray {{ 'head' if cluster_rank | int == 0 else 'worker' }} on
+      Ray {{ 'head' if inventory_hostname == cluster_controller else 'worker' }} on
       {{ cluster_subnets[0] }}.{{ cluster_index }}. Check with
       `{{ ml_venv }}/bin/ray status`. Dashboard on the head at :8265.

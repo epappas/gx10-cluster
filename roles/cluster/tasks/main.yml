@@ -31,13 +31,32 @@
   become: true
 
 # --- Name resolution between the nodes -------------------------------------
+#
+# The bare node name resolves to the MANAGEMENT address, and `<node>.cluster`
+# to the interconnect. That split matters, and the reverse (which this file
+# had) is a trap:
+#
+#   - The ConnectX-7 is not on the PCI bus until a cable links the boxes, so
+#     with no cable the interconnect addresses exist nowhere. Pointing the node
+#     names at them means `ssh poseidon`, torchrun's rendezvous and every health
+#     check fail on an uncabled pair - which is most of the time you are
+#     setting one up.
+#   - It bought nothing. The rendezvous address does NOT decide the collective
+#     transport: NCCL picks that independently, RoCE over ibverbs for the data
+#     path and NCCL_SOCKET_IFNAME (the management NIC) for bootstrap. So
+#     control traffic was riding the interconnect and the fast path was
+#     unaffected either way.
+#
+# Control plane on the always-up link, data plane on the cable. Reach for
+# `<node>.cluster` when you explicitly want the 200G path.
 - name: Add cluster hosts to /etc/hosts
   ansible.builtin.blockinfile:
     path: /etc/hosts
     marker: "# {mark} ANSIBLE MANAGED - gx10 cluster"
     block: |
       {% for h in groups['gx10'] %}
-      {{ cluster_subnets[0] }}.{{ hostvars[h].cluster_index }}  {{ h }} {{ h }}.cluster
+      {{ hostvars[h].ansible_host }}  {{ h }}
+      {{ cluster_subnets[0] }}.{{ hostvars[h].cluster_index }}  {{ h }}.cluster
       {% endfor %}
   become: true
 
@@ -74,7 +93,13 @@
     mode: "0600"
     block: |
       {% for h in groups['gx10'] %}
-      Host {{ h }} {{ h }}.cluster
+      Host {{ h }}
+          HostName {{ hostvars[h].ansible_host }}
+          User {{ primary_user }}
+          IdentityFile ~/.ssh/id_gx10_cluster
+          StrictHostKeyChecking accept-new
+
+      Host {{ h }}.cluster
           HostName {{ cluster_subnets[0] }}.{{ hostvars[h].cluster_index }}
           User {{ primary_user }}
           IdentityFile ~/.ssh/id_gx10_cluster

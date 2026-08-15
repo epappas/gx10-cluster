@@ -1,0 +1,94 @@
+---
+# The cheap tier: node_exporter plus a GPU textfile collector, ~13 MB on disk
+# and ~20 MB RSS. Enough for something ELSE - your laptop, the other node - to
+# scrape. Nothing here starts a TSDB or a dashboard server.
+#
+#   ansible-playbook optional.yml --tags exporters -K
+#
+# No task in this file carries a `tags:` line, and that is load-bearing. Task
+# tags are ADDITIVE with the tags on the include that pulled the file in, so a
+# task tagged [exporters, dashboards] here would run under BOTH - which is
+# exactly how `--tags exporters` used to install grafana. The tier split is the
+# file boundary now, not a tag.
+
+- name: Install node exporter
+  ansible.builtin.apt:
+    name: prometheus-node-exporter
+    state: present
+  become: true
+
+- name: Install the GPU textfile collector
+  ansible.builtin.template:
+    src: gpu-metrics.sh.j2
+    dest: /usr/local/bin/gx10-gpu-metrics
+    mode: "0755"
+  become: true
+
+- name: Ensure the textfile collector directory exists
+  ansible.builtin.file:
+    path: /var/lib/prometheus/node-exporter
+    state: directory
+    owner: prometheus
+    group: prometheus
+    mode: "0755"
+  become: true
+
+- name: Install the GPU metrics timer
+  ansible.builtin.copy:
+    dest: "/etc/systemd/system/{{ item.name }}"
+    mode: "0644"
+    content: "{{ item.content }}"
+  become: true
+  loop:
+    - name: gx10-gpu-metrics.service
+      content: |
+        # Managed by gx10-cluster ansible.
+        [Unit]
+        Description=Export GB10 GPU metrics for node_exporter
+        [Service]
+        Type=oneshot
+        ExecStart=/usr/local/bin/gx10-gpu-metrics
+    - name: gx10-gpu-metrics.timer
+      content: |
+        # Managed by gx10-cluster ansible.
+        [Unit]
+        Description=Sample GB10 GPU metrics every 15s
+        [Timer]
+        OnBootSec=30s
+        OnUnitActiveSec=15s
+        AccuracySec=1s
+        [Install]
+        WantedBy=timers.target
+  loop_control:
+    label: "{{ item.name }}"
+  notify: Reload systemd
+
+# node_exporter is the only listener on this box that defaults to 0.0.0.0 -
+# ollama, vLLM, grafana and the ray dashboard are all pinned to
+# monitoring_bind. Pin it the same way, and accept the consequence: at the
+# 127.0.0.1 default a prometheus running ELSEWHERE can no longer scrape this
+# node directly. It has to come in over an SSH tunnel
+# (ssh -L 9100:localhost:9100 <node>) or over the mesh VPN address.
+# monitoring_bind is the single knob that changes that; set it to 0.0.0.0 only
+# if you accept an unauthenticated metrics endpoint on every interface,
+# including one ufw does not filter.
+- name: Configure the node exporter command line
+  ansible.builtin.copy:
+    dest: /etc/default/prometheus-node-exporter
+    mode: "0644"
+    content: |
+      # Managed by gx10-cluster ansible.
+      ARGS="--collector.textfile.directory=/var/lib/prometheus/node-exporter --web.listen-address={{ monitoring_bind }}:{{ node_exporter_port }}"
+  become: true
+  notify: Restart node exporter
+
+- name: Enable the exporters
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  become: true
+  loop:
+    - prometheus-node-exporter
+    - gx10-gpu-metrics.timer

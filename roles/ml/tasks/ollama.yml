@@ -1,0 +1,179 @@
+---
+# Ollama, from the pinned GitHub release tarball.
+#
+# NOT `curl -fsSL https://ollama.com/install.sh | sh` as root, which is what
+# this role did before. Two problems with that, either one disqualifying:
+#
+#   - it is unpinned. Whatever is newest the day you provision is what you get,
+#     so two boxes built a month apart run different servers.
+#   - its back half installs CUDA DRIVERS from apt - cuda-drivers, dkms,
+#     `modprobe nvidia`. On DGX OS that is the one thing that must never
+#     happen; the driver stack is held for a reason (see roles/base). It
+#     short-circuits when nvidia-smi answers, so it looks harmless right up
+#     until the run where it does not.
+#
+# What follows is the useful third of that script, done declaratively. The
+# jetpack5/jetpack6 assets are deliberately not used: the script picks those
+# only when /etc/nv_tegra_release exists, and GB10 under DGX OS is not Tegra -
+# that file is absent here. The plain arm64 tarball already bundles the CUDA
+# libraries it needs under lib/ollama/cuda_v12/.
+
+# The linux release assets are .tar.zst only. ansible.builtin.unarchive handles
+# that format, but only by shelling out to this binary
+# (--use-compress-program=zstd), and it is not part of a minimal Ubuntu.
+# Installed here rather than in roles/base because ollama is the only thing
+# that needs it and ollama is opt-in.
+- name: Install zstd for the ollama tarball
+  ansible.builtin.apt:
+    name: zstd
+    state: present
+  become: true
+
+# The version is in the stamp's FILENAME, so a plain stat answers "is this
+# exact version installed" with nothing to parse and no way to get a stale
+# answer. It sits inside lib/ollama so the clean-out below removes it along
+# with the release it describes.
+- name: Check whether the release is already unpacked
+  ansible.builtin.stat:
+    path: "/usr/local/lib/ollama/.gx10-installed-{{ ollama_version }}"
+  register: ollama_stamp
+
+- name: Ensure the download directory exists
+  ansible.builtin.file:
+    path: /var/cache/gx10
+    state: directory
+    mode: "0755"
+  become: true
+  when: not ollama_stamp.stat.exists
+
+# The checksum is fetched from the release's own sha256sum.txt rather than
+# pasted into this repo. get_url downloads that file and looks up the entry
+# whose name matches the URL's basename, so bumping ollama_version cannot leave
+# a stale digest behind to either fail confusingly or - worse - pass.
+#
+# Verified against ansible-core 2.21.3: ollama writes the GNU format with a
+# leading "./" on the path, and get_url's parse_digest_lines strips it.
+- name: Download the ollama release tarball for {{ ollama_version }}
+  ansible.builtin.get_url:
+    url: "https://github.com/ollama/ollama/releases/download/v{{ ollama_version }}/ollama-linux-arm64.tar.zst"
+    checksum: "sha256:https://github.com/ollama/ollama/releases/download/v{{ ollama_version }}/sha256sum.txt"
+    dest: "/var/cache/gx10/ollama-linux-arm64-{{ ollama_version }}.tar.zst"
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  when: not ollama_stamp.stat.exists
+
+# Unpacking over the top would leave the previous release's shared objects in
+# place, and ollama loads whatever it finds in lib/ollama. The upstream script
+# removes this directory for the same reason.
+- name: Remove the previous ollama libraries
+  ansible.builtin.file:
+    path: /usr/local/lib/ollama
+    state: absent
+  become: true
+  when: not ollama_stamp.stat.exists
+
+# The archive is rooted at bin/ and lib/, so /usr/local is the extraction point
+# that produces /usr/local/bin/ollama.
+- name: Unpack ollama into /usr/local
+  ansible.builtin.unarchive:
+    src: "/var/cache/gx10/ollama-linux-arm64-{{ ollama_version }}.tar.zst"
+    dest: /usr/local
+    remote_src: true
+    owner: root
+    group: root
+  become: true
+  when: not ollama_stamp.stat.exists
+
+- name: Record the installed ollama version
+  ansible.builtin.copy:
+    dest: "/usr/local/lib/ollama/.gx10-installed-{{ ollama_version }}"
+    content: |
+      Written by gx10-cluster ansible (roles/ml/tasks/ollama.yml).
+      Its presence is how the role knows this release is already unpacked.
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+
+# 1.5 GB, and useful only during the install that just happened. A version bump
+# fetches it again.
+- name: Remove the downloaded tarball
+  ansible.builtin.file:
+    path: "/var/cache/gx10/ollama-linux-arm64-{{ ollama_version }}.tar.zst"
+    state: absent
+  become: true
+
+- name: Create the ollama system group
+  ansible.builtin.group:
+    name: ollama
+    system: true
+  become: true
+
+# Models land in ~ollama/.ollama, which is why the home directory is real and
+# not /nonexistent.
+#
+# Deliberately NOT added to the render and video groups, which is what the
+# upstream script does. Verified on this box: /dev/nvidia0, /dev/nvidiactl and
+# /dev/nvidia-uvm are all crw-rw-rw- root:root, so those memberships grant
+# nothing. They exist upstream for ROCm and for distros that ship 0660 device
+# nodes. If a driver update ever tightens the mode - check with
+# `ls -l /dev/nvidia*` - add `groups: video` here.
+- name: Create the ollama system user
+  ansible.builtin.user:
+    name: ollama
+    group: ollama
+    system: true
+    shell: /bin/false
+    home: /usr/share/ollama
+    create_home: true
+  become: true
+
+- name: Install the ollama systemd unit
+  ansible.builtin.copy:
+    src: ollama.service
+    dest: /etc/systemd/system/ollama.service
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  notify: Restart ollama
+
+# A separate drop-in, not folded into the unit above, so that rewriting the
+# unit on a version bump cannot quietly drop the operational settings.
+- name: Ensure the ollama override directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/system/ollama.service.d
+    state: directory
+    mode: "0755"
+  become: true
+
+- name: Configure ollama
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/ollama.service.d/override.conf
+    mode: "0644"
+    content: |
+      # Managed by gx10-cluster ansible.
+      [Service]
+      Environment="OLLAMA_HOST={{ ollama_host }}"
+      Environment="OLLAMA_KEEP_ALIVE=30m"
+      # Deliberately 1. On unified memory nvidia-smi reports no framebuffer,
+      # so ollama's size estimation works against a pool the OS and page
+      # cache also live in. Two large models resident is how you reach the
+      # swap cliff. Raise only after measuring.
+      Environment="OLLAMA_MAX_LOADED_MODELS=1"
+      Environment="OLLAMA_FLASH_ATTENTION=1"
+  become: true
+  notify: Restart ollama
+
+# daemon_reload here and not only in the handler: handlers run at the END of
+# the play, so on a first provision the unit file would still be unknown to
+# systemd when this task tried to start it.
+- name: Enable and start ollama
+  ansible.builtin.systemd:
+    name: ollama
+    enabled: true
+    state: started
+    daemon_reload: true
+  become: true

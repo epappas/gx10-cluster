@@ -1,0 +1,194 @@
+---
+# ===========================================================================
+# NordVPN Meshnet - the out-of-LAN access path.
+#
+# MESHNET ONLY. This box never calls `nordvpn connect`: it is not a VPN client
+# needing an exit node, it is a compute node you need to reach. Meshnet is
+# peer-to-peer WireGuard (libtelio) between your own devices and needs no
+# tunnel to a NordVPN server.
+#
+# Installed from NordVPN's own apt repo rather than their install script, for
+# the same reason as gh in roles/base: signed, apt-managed, pinnable, and no
+# piping a live URL into root's shell.
+#
+# Everything below runs as root rather than as the primary user. The CLI talks
+# to /run/nordvpn/nordvpnd.sock, which is root:nordvpn 0660 - the primary user
+# is added to that group here, but a group added mid-play is not in the current
+# session, so a become_user run would fail with "Permission denied accessing
+# /run/nordvpn/nordvpnd.sock". Login state lives in the daemon, not per-user,
+# so root doing it is the same as anyone doing it.
+# ===========================================================================
+
+- name: Add the NordVPN apt key
+  ansible.builtin.get_url:
+    url: https://repo.nordvpn.com/gpg/nordvpn_public.asc
+    dest: /usr/share/keyrings/nordvpn-archive-keyring.asc
+    mode: "0644"
+    # apt has taken ASCII-armored keys via signed-by since 2.4, so no dearmor
+    # step. The checksum is deliberate: a mismatch means the signing key
+    # changed, which is not automatically an attack but is not something to
+    # accept silently either. Verify the new key against NordVPN's published
+    # fingerprint - the current one is rsa4096, created 2018-08-02,
+    # BC54 80EF EC5C 081C E5BC  FBE2 6B21 9E53 5C96 4CA1 - before bumping this.
+    checksum: "sha256:cc9bff9344b005df90f5a13a18a9729ebacb078052c60742bdf85803efc2f940"
+  become: true
+
+# Note the suite is literally `stable`, not the distro codename - NordVPN
+# publishes one distro-agnostic suite, unlike tailscale's per-release ones.
+# arm64 is published there; verified against the repo's own Packages index.
+- name: Add the NordVPN apt repository
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [arch={{ apt_arch }} signed-by=/usr/share/keyrings/nordvpn-archive-keyring.asc]
+      https://repo.nordvpn.com/deb/nordvpn/debian stable main
+    filename: nordvpn
+    state: present
+  become: true
+
+- name: Install the NordVPN client
+  ansible.builtin.apt:
+    name: nordvpn
+    state: present
+    update_cache: true
+  become: true
+
+# The package's preinst runs `gpasswd -M "" nordvpn` on a FRESH install, which
+# empties the group, and then adds exactly one user it guesses from $SUDO_USER,
+# else `logname`, else uid 1000. Under Ansible that guess is unreliable - with
+# pipelining there is no SUDO_USER and logname fails on a non-tty - and a later
+# reinstall silently drops whoever was in there. So set membership ourselves,
+# after the package, on every run.
+- name: Add the primary user to the nordvpn group
+  ansible.builtin.user:
+    name: "{{ primary_user }}"
+    groups: nordvpn
+    append: true
+  become: true
+  register: nordvpn_group
+
+- name: Note that a re-login is needed for nordvpn group membership
+  ansible.builtin.debug:
+    msg: >-
+      {{ primary_user }} was added to the nordvpn group. Log out and back in
+      before `nordvpn` works without sudo.
+  when: nordvpn_group.changed
+
+- name: Enable the NordVPN daemon
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  become: true
+  loop:
+    - nordvpnd.socket
+    - nordvpnd.service
+
+# See the reasoning on nordvpn_disable_killswitch in group_vars/all.yml: a kill
+# switch for a tunnel this box never establishes protects nothing, and the unit
+# manipulates netfilter before the network is up on a host whose inference
+# stack is entirely Docker containers.
+- name: Disable the NordVPN kill switch unit
+  ansible.builtin.systemd:
+    name: nordvpnd-killswitch.service
+    enabled: false
+    state: stopped
+  become: true
+  when: nordvpn_disable_killswitch | bool
+
+# --- Login -----------------------------------------------------------------
+- name: Check whether NordVPN is already logged in
+  ansible.builtin.command: nordvpn account
+  become: true
+  register: nordvpn_account_pre
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# `--token` is a BOOLEAN flag and the token is a POSITIONAL argument. The
+# obvious `--token=<t>` fails with
+#   Incorrect Usage: invalid boolean value "<t>" for -token: parse error
+# argv form so the token is never handed to a shell.
+- name: Log in to NordVPN
+  ansible.builtin.command:
+    argv: ["nordvpn", "login", "--token", "{{ nordvpn_token }}"]
+  become: true
+  no_log: true
+  changed_when: true
+  when:
+    - nordvpn_token | length > 0
+    - "'not logged in' in (nordvpn_account_pre.stdout | default(''))"
+
+- name: Re-read the NordVPN login state
+  ansible.builtin.command: nordvpn account
+  become: true
+  register: nordvpn_account
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Record whether NordVPN is usable
+  ansible.builtin.set_fact:
+    nordvpn_ready: "{{ 'not logged in' not in (nordvpn_account.stdout | default('not logged in')) }}"
+
+- name: Explain that NordVPN is installed but not logged in
+  ansible.builtin.debug:
+    msg: >-
+      NordVPN is installed and running but NOT logged in, so Meshnet is off and
+      this node is reachable on the LAN only. Generate a token in Nord Account
+      -> NordVPN -> Advanced settings -> Get access token, then either set
+      nordvpn_token in a vault file and re-run `--tags remote`, or run
+      `sudo nordvpn login --token <token>` here. Note that plain
+      `nordvpn logout` REVOKES the token - use `--persist-token` if you want to
+      reuse it.
+  when: not (nordvpn_ready | bool)
+
+# --- Settings, once logged in ----------------------------------------------
+# The client ships its own packet filter, separate from Meshnet. ufw is the
+# authority on this box and two uncoordinated netfilter writers is already one
+# too many with Docker in the picture. This does NOT remove NordVPN's fwmark
+# rules from the mangle table - those are policy routing and have no CLI
+# switch - so nordvpn remains a partial third writer regardless.
+- name: Turn off NordVPN's own firewall
+  ansible.builtin.command: nordvpn set firewall off
+  become: true
+  register: nordvpn_fw
+  # "<setting> is already set to '<value>'." is the client's own no-op message.
+  changed_when: "'already set to' not in nordvpn_fw.stdout"
+  when:
+    - nordvpn_ready | bool
+    - nordvpn_disable_firewall | bool
+
+- name: Enable Meshnet
+  ansible.builtin.command: nordvpn set meshnet on
+  become: true
+  register: nordvpn_mesh
+  changed_when: "'already enabled' not in nordvpn_mesh.stdout"
+  when: nordvpn_ready | bool
+
+# Meshnet treats 172.17.0.0/16 as a local network and drops peer traffic aimed
+# at it, so without this a peer cannot reach anything in a container on this
+# box - which includes vLLM. Documented behaviour, not a workaround.
+- name: Allow peers to reach local (docker) networks
+  ansible.builtin.command: nordvpn meshnet peer local allow all
+  become: true
+  register: nordvpn_local
+  changed_when: "'already' not in nordvpn_local.stdout"
+  failed_when: false
+  when: nordvpn_ready | bool
+
+- name: Report the Meshnet address
+  ansible.builtin.shell:
+    cmd: "set -o pipefail; ip -4 -br addr show {{ nordvpn_iface }} 2>/dev/null | awk '{print $3}'"
+    executable: /bin/bash
+  register: nordvpn_addr
+  changed_when: false
+  failed_when: false
+  when: nordvpn_ready | bool
+
+- name: Show the Meshnet address
+  ansible.builtin.debug:
+    msg: >-
+      Meshnet up on {{ nordvpn_iface }}
+      {{ nordvpn_addr.stdout | default('(no address yet)') | trim }}.
+      Peers: `nordvpn meshnet peer list`.
+  when: nordvpn_ready | bool

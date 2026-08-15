@@ -25,17 +25,25 @@ fixes it. Otherwise:
 | Symptom | Go to |
 |---|---|
 | `no kernel image is available for execution` | [troubleshoot](troubleshoot.md#pytorch--cuda) |
+| The venv drifted from its lockfile | [troubleshoot](troubleshoot.md#the-venv-does-not-match-its-lockfile) |
+| `only requests==2.28.1 is available` from uv | [troubleshoot](troubleshoot.md#uv-pip-install-fails-with-only-requests2281-is-available) |
 | `Failed to initialize NVML` / no `/dev/nvidia*` | [upgrade-drivers](upgrade-drivers.md#if-you-already-broke-it) |
+| The two nodes disagree on driver, kernel or torch | [upgrade-drivers](upgrade-drivers.md#after-any-driver-or-kernel-change) |
 | `Permission denied (publickey)`, or SSH closes instantly | [recover-ssh-lockout](recover-ssh-lockout.md) |
+| Reachable on the LAN, not from anywhere else | [recover-ssh-lockout](recover-ssh-lockout.md#f-get-in-over-meshnet) |
 | `permission denied` on the docker socket | [troubleshoot](troubleshoot.md#docker) |
+| `permission denied` on the nordvpn socket | [troubleshoot](troubleshoot.md#remote-access) |
 | `ibv_devices` empty | [connect-cluster](connect-cluster.md) — expected before cabling |
 | Interconnect at ~13 Gbps instead of 200 | [connect-cluster](connect-cluster.md#the-13-gbps-trap) |
 | Interconnect at half speed | [connect-cluster](connect-cluster.md#reading-the-result) |
 | Model OOMs or the box crawls | [serve-models](serve-models.md#when-it-fails) |
 | `No space left on device` pulling weights | [manage-models](manage-models.md#failure-modes) |
+| The models role aborts before downloading anything | [manage-models](manage-models.md#the-disk-guard-projects-it-does-not-check-a-floor) |
 | 401/403 downloading a model | [manage-models](manage-models.md#gated-models) |
-| A distributed job hangs before step 1 | [run-distributed](run-distributed.md#failure-modes) |
+| A distributed job hangs before step 1 | [run-distributed](run-distributed.md#hangs-before-the-first-step-in-detail) |
 | Grafana panels blank, or GPU memory missing | [monitoring](monitoring.md) |
+| A remote Prometheus cannot scrape this node | [monitoring](monitoring.md#if-you-want-metrics-over-time) |
+| `roles/observability has no default entry point` | [troubleshoot](troubleshoot.md#ansible) |
 | A task reports `changed` every run | [troubleshoot](troubleshoot.md#ansible) |
 
 ## Writing one

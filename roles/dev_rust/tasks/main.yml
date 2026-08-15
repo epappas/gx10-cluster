@@ -1,39 +1,61 @@
 ---
+# An explicit toolchain version, never `stable`, and never `rustup update`.
+#
+# This role used to run `rustup update stable` on every apply. That actively
+# mutates the toolchain on a schedule set by upstream releases, which is the
+# exact opposite of what this repo is for: two boxes provisioned six weeks
+# apart would compile with different rustc, and neither would match what the
+# other had yesterday.
+
 - name: Install rustup
   ansible.builtin.shell:
     cmd: >-
       set -o pipefail &&
       curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs
-      | sh -s -- -y --no-modify-path --default-toolchain {{ rust_channel }}
+      | sh -s -- -y --no-modify-path --default-toolchain {{ rust_toolchain }}
       --component rustfmt,clippy,rust-src,rust-analyzer
     executable: /bin/bash
     creates: "{{ primary_home }}/.cargo/bin/rustup"
   become_user: "{{ primary_user }}"
   become: true
 
-- name: Update the rust toolchain
-  ansible.builtin.command: "{{ primary_home }}/.cargo/bin/rustup update {{ rust_channel }}"
+# rustup names a toolchain directory <version>-<target>, so this path is the
+# cheapest honest "is the pinned version installed" test there is - no output
+# to parse, and it moves on its own when rust_toolchain moves.
+- name: Locate the pinned toolchain
+  ansible.builtin.set_fact:
+    rust_toolchain_dir: "{{ primary_home }}/.rustup/toolchains/{{ rust_toolchain }}-{{ ansible_facts['architecture'] }}-unknown-linux-gnu"
+
+# `rustup default X` installs X if it is missing and then selects it, so this
+# one command covers both a fresh box and a bump of rust_toolchain, and the
+# creates guard fires it exactly once per version.
+- name: Select the default toolchain, rust {{ rust_toolchain }}
+  ansible.builtin.command: "{{ primary_home }}/.cargo/bin/rustup default {{ rust_toolchain }}"
+  args:
+    creates: "{{ rust_toolchain_dir }}"
   become_user: "{{ primary_user }}"
   become: true
-  register: rustup_update
-  changed_when: "'updated' in (rustup_update.stdout | default(''))"
 
-# apt where a build exists, cargo for the rest. This split IS the config -
-# there is no variable for it, because which tool has a Debian package is a
-# fact about Ubuntu, not a preference. Note apt names the binaries batcat and
-# fdfind; the shell role aliases those back.
+# rustup's default profile carries rustfmt and clippy but NOT these two, so a
+# version bump would otherwise land a toolchain with no rust-analyzer and leave
+# every editor silently degraded.
+- name: Add the editor components to rust {{ rust_toolchain }}
+  ansible.builtin.command: >-
+    {{ primary_home }}/.cargo/bin/rustup component add
+    --toolchain {{ rust_toolchain }} rust-src rust-analyzer
+  args:
+    creates: "{{ rust_toolchain_dir }}/bin/rust-analyzer"
+  become_user: "{{ primary_user }}"
+  become: true
+
+# apt only. There used to be a `cargo install --locked eza tokei hyperfine`
+# here, which compiled three Rust CLIs from source on aarch64 - minutes of
+# every provision, and a build toolchain in the dependency path of a fresh box
+# - to get a prettier `ls`. These three have Debian packages and are the ones
+# actually worth having. Note apt names the binaries batcat and fdfind; the
+# shell role aliases those back.
 - name: Install rust CLI tools available from apt
   ansible.builtin.apt:
     name: [bat, fd-find, zoxide]
     state: present
   become: true
-
-- name: Install remaining rust CLI tools with cargo
-  ansible.builtin.command: "{{ primary_home }}/.cargo/bin/cargo install --locked {{ item }}"
-  args:
-    creates: "{{ primary_home }}/.cargo/bin/{{ item }}"
-  become_user: "{{ primary_user }}"
-  become: true
-  loop: [eza, tokei, hyperfine]
-  async: 1800
-  poll: 30

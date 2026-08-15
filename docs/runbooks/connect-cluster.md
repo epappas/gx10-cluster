@@ -18,6 +18,12 @@ Three platform facts explain every step below.
    is ibverbs — which is why `NCCL_SOCKET_IFNAME` is not involved
    ([why](../decisions.md#nccl-socket-ifname)).
 
+Following from (1) and (3): the node names `odysseus` / `poseidon` resolve to the
+**management** addresses, not to this cable, and `odysseus.cluster` is the
+interconnect. Nothing below breaks before you have cabled, and nothing below
+goes slower because you rendezvous on a management name
+([the control/data split](../decisions.md#hosts-split)).
+
 ## How
 
 **0. Check the management interface first.** NCCL bootstraps over it, and a
@@ -83,11 +89,11 @@ torch lives in the shared venv, so use its `torchrun` (or run `ml` first):
 ```bash
 # on node A
 ~/venvs/ml/bin/torchrun --nnodes 2 --nproc_per_node 1 --node_rank 0 \
-  --master_addr gx10-a --master_port 29500 ~/cluster/allreduce_test.py
+  --master_addr odysseus --master_port 29500 ~/cluster/allreduce_test.py
 
 # on node B -- identical except --node_rank 1
 ~/venvs/ml/bin/torchrun --nnodes 2 --nproc_per_node 1 --node_rank 1 \
-  --master_addr gx10-a --master_port 29500 ~/cluster/allreduce_test.py
+  --master_addr odysseus --master_port 29500 ~/cluster/allreduce_test.py
 ```
 
 ## Reading the result
@@ -111,7 +117,7 @@ go chasing the gap — the fault worth hunting is the 13 Gbps one below.
 | ~5 GB/s | One partition addressed | Step 4 |
 | **~1.6 GB/s (13 Gbps)** | **CX-7 firmware power throttle** | [below](#the-13-gbps-trap) |
 | < 1 GB/s | Fell back to TCP | [below](#tcp-fallback) |
-| Hangs at startup | Bootstrap cannot connect | check `mgmt_iface` reachable both ways |
+| Hangs at startup | Bootstrap cannot connect — usually ufw, not the cable | [run-distributed](run-distributed.md#hangs-before-the-first-step-in-detail) |
 
 ### The 13 Gbps trap
 
@@ -167,8 +173,12 @@ selects the bootstrap channel, not the data path
 ## Verify
 
 ```bash
-make verify   # the three cable-dependent checks should now pass
+make verify   # the cable-dependent checks should now pass
 ```
+
+Those are the non-required ones: `RDMA devices`, `interconnect addressed` and
+`both interconnect partitions`. They are reported, never fatal, because an
+uncabled node is a legitimately healthy node.
 
 Sources: [NVIDIA forums — 13 Gbps / PCIe power throttling](https://forums.developer.nvidia.com/t/connectx-7-inter-spark-link-capped-at-13-gbps-expected-200-gbps-pcie-power-throttling-27w/363461)
 · [CX-7 cards disappear after update](https://forums.developer.nvidia.com/t/connectx-7-network-cards-disappear-after-dgx-spark-system-update-due-to-cx7-pcie-hotplug-driver-issue/374275)

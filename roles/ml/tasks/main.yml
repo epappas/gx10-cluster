@@ -31,41 +31,41 @@
   become_user: "{{ primary_user }}"
   become: true
 
-# torch must come from the cu130 index: it is the only one publishing aarch64
-# wheels with sm_121 kernels. Installing from PyPI gives you a wheel that
-# imports fine and then fails at the first kernel launch with
-# "no kernel image is available for execution on the device".
-- name: Install PyTorch aarch64 wheels for CUDA {{ cuda_major }}
-  ansible.builtin.command: >-
-    {{ uv_bin }} pip install
-    --python {{ ml_venv }}/bin/python
-    --index-url {{ torch_index_url }}
-    torch=={{ torch_version }} torchvision
-  become_user: "{{ primary_user }}"
+# The lockfile, not a package list. Everything the venv gets - torch included -
+# is resolved once by `make lock` on real aarch64 hardware and committed, so a
+# node provisioned today and a node provisioned in six months get byte-identical
+# versions. It lives inside the venv because that is exactly what it describes,
+# and it goes away with it.
+- name: Install the ML lockfile
+  ansible.builtin.copy:
+    src: requirements-ml.txt
+    dest: "{{ ml_venv }}/requirements-ml.txt"
+    owner: "{{ primary_user }}"
+    group: "{{ primary_user }}"
+    mode: "0644"
   become: true
-  register: torch_install
-  changed_when: "'Installed' in (torch_install.stderr | default(''))"
 
-# Most of these come from PyPI, but several (peft, trl, bitsandbytes) depend on
-# torch, and a resolver free to pick torch would pull the PyPI build over the
-# cu130 one installed above.
+# `pip install -r`, deliberately NOT `pip sync`. The optional Ray role installs
+# into this same venv, and sync's whole job is to make the environment match the
+# file exactly - it would uninstall ray on the next `make apply`, silently, on a
+# run nobody was watching.
 #
-# Note the flag order is NOT arbitrary: in uv, indexes given with
-# --extra-index-url take priority over --index-url. So cu130 must be the EXTRA
-# index to win. The reverse (which this file had) makes PyPI authoritative and
-# the cu130 pin inert. torch is also named explicitly so the resolver is
-# constrained rather than merely nudged.
-- name: Install the rest of the ML stack
+# --index-strategy is on the command line because uv accepts it nowhere else;
+# the two index URLs come from the lockfile itself. requirements-ml.in explains
+# why both are needed - the short version is that the cu130 index shadows PyPI
+# for torch's own dependencies, and without best-match the pinned modern
+# certifi/requests/datasets in the lockfile cannot be found at all.
+- name: Install the ML stack from the lockfile
   ansible.builtin.command: >-
     {{ uv_bin }} pip install
     --python {{ ml_venv }}/bin/python
-    --index-url https://pypi.org/simple
-    --extra-index-url {{ torch_index_url }}
-    torch=={{ torch_version }}
-    {{ ml_packages | join(' ') }}
+    --index-strategy unsafe-best-match
+    -r {{ ml_venv }}/requirements-ml.txt
   become_user: "{{ primary_user }}"
   become: true
   register: ml_install
+  # uv prints "Installed N packages" on a change and "Audited N packages" on a
+  # no-op, both to stderr.
   changed_when: "'Installed' in (ml_install.stderr | default(''))"
 
 - name: Verify PyTorch sees the GB10
@@ -92,42 +92,11 @@
   when: not ansible_check_mode
 
 # ---------------------------------------------------------------------------
-# Ollama
+# Ollama. Its own file - it is a dozen tasks and this one was long enough.
 # ---------------------------------------------------------------------------
 - name: Install ollama
-  ansible.builtin.shell:
-    cmd: set -o pipefail && curl -fsSL https://ollama.com/install.sh | sh
-    executable: /bin/bash
-    creates: /usr/local/bin/ollama
-  become: true
+  ansible.builtin.include_tasks: ollama.yml
   when: install_ollama | bool
-
-- name: Ensure the ollama override directory exists
-  ansible.builtin.file:
-    path: /etc/systemd/system/ollama.service.d
-    state: directory
-    mode: "0755"
-  become: true
-  when: install_ollama | bool
-
-- name: Configure ollama
-  ansible.builtin.copy:
-    dest: /etc/systemd/system/ollama.service.d/override.conf
-    mode: "0644"
-    content: |
-      # Managed by gx10-cluster ansible.
-      [Service]
-      Environment="OLLAMA_HOST={{ ollama_host }}"
-      Environment="OLLAMA_KEEP_ALIVE=30m"
-      # Deliberately 1. On unified memory nvidia-smi reports no framebuffer,
-      # so ollama's size estimation works against a pool the OS and page
-      # cache also live in. Two large models resident is how you reach the
-      # swap cliff. Raise only after measuring.
-      Environment="OLLAMA_MAX_LOADED_MODELS=1"
-      Environment="OLLAMA_FLASH_ATTENTION=1"
-  become: true
-  when: install_ollama | bool
-  notify: Restart ollama
 
 # ---------------------------------------------------------------------------
 # llama.cpp, built for sm_121

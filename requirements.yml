@@ -8,7 +8,7 @@
 #
 #   ansible-galaxy collection install -r requirements.yml
 collections:
-  - name: community.general      # ufw, nmcli, git_config
+  - name: community.general      # ufw, nmcli, git_config, git_config_info
     version: ">=13.0.0,<14.0.0"
   - name: ansible.posix          # authorized_key, sysctl
     version: ">=2.0.0,<3.0.0"

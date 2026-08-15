@@ -1,0 +1,105 @@
+---
+# The expensive tier: prometheus and grafana ON THIS BOX, on top of the
+# exporters. Measured from apt, prometheus is 105 MB on disk plus a TSDB in
+# RAM and grafana a Go server on top - on a machine where host memory IS GPU
+# memory, that is model capacity spent watching the box instead of using it.
+#
+#   ansible-playbook optional.yml --tags dashboards -K
+#
+# Prefer running prometheus and grafana on your laptop or the other node and
+# pointing them at this one's exporter. See docs/runbooks/monitoring.md.
+#
+# As in exporters.yml, no task here carries a `tags:` line - the tier split is
+# the file boundary. See the note there for why.
+
+# A prometheus with nothing to scrape is not a monitoring stack, so this tier
+# is strictly a superset. Included rather than left to the caller: `--tags
+# dashboards` alone has to produce a working box.
+- name: Install the exporters this tier scrapes
+  ansible.builtin.include_tasks: exporters.yml
+
+- name: Install prometheus
+  ansible.builtin.apt:
+    name: prometheus
+    state: present
+  become: true
+
+- name: Add the Grafana apt key
+  ansible.builtin.get_url:
+    url: https://apt.grafana.com/gpg.key
+    dest: /usr/share/keyrings/grafana.asc
+    mode: "0644"
+  become: true
+
+- name: Add the Grafana apt repository
+  ansible.builtin.apt_repository:
+    repo: "deb [arch={{ apt_arch }} signed-by=/usr/share/keyrings/grafana.asc] https://apt.grafana.com stable main"
+    filename: grafana
+    state: present
+  become: true
+
+- name: Install grafana
+  ansible.builtin.apt:
+    name: grafana
+    state: present
+    update_cache: true
+  become: true
+
+- name: Configure prometheus
+  ansible.builtin.template:
+    src: prometheus.yml.j2
+    dest: /etc/prometheus/prometheus.yml
+    mode: "0644"
+    validate: "promtool check config %s"
+  become: true
+  notify: Restart prometheus
+
+# prometheus_retention and prometheus_port were presented in group_vars as
+# working knobs and were not: retention was read by nothing at all, and the
+# port only ever reached the self-scrape target, so changing it broke the
+# self-scrape instead of moving the server. Prometheus also bound 0.0.0.0 while
+# grafana right beside it was pinned to monitoring_bind.
+#
+# All three are the same task, because Ubuntu's unit is
+# `EnvironmentFile=/etc/default/prometheus` + `ExecStart=/usr/bin/prometheus
+# $ARGS` (read out of the 2.45.3+ds-2ubuntu0.3 package, not assumed). The file
+# ships with the package containing `ARGS=""`, so it is safe to own.
+- name: Configure the prometheus command line
+  ansible.builtin.copy:
+    dest: /etc/default/prometheus
+    mode: "0644"
+    # Only the two flags we are actually changing. Ubuntu patches the binary's
+    # own defaults to the right paths for its layout (--config.file
+    # /etc/prometheus/prometheus.yml, --storage.tsdb.path
+    # /var/lib/prometheus/metrics2/, verified with `prometheus --help` from the
+    # package), so restating them here would add nothing and silently go stale
+    # if that layout ever moves.
+    content: |
+      # Managed by gx10-cluster ansible.
+      ARGS="--storage.tsdb.retention.time={{ prometheus_retention }} --web.listen-address={{ monitoring_bind }}:{{ prometheus_port }}"
+  become: true
+  notify: Restart prometheus
+
+- name: Bind grafana to the chosen address
+  ansible.builtin.copy:
+    dest: /etc/grafana/grafana.ini
+    mode: "0640"
+    backup: true
+    content: |
+      # Managed by gx10-cluster ansible.
+      [server]
+      http_addr = {{ monitoring_bind }}
+      http_port = {{ grafana_port }}
+      [analytics]
+      reporting_enabled = false
+      check_for_updates = false
+  become: true
+  notify: Restart grafana
+
+- name: Enable prometheus and grafana
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  become: true
+  loop: [prometheus, grafana-server]

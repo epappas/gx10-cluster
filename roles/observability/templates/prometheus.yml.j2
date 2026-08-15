@@ -1,4 +1,4 @@
-# Managed by gx10-cluster ansible (roles/monitoring). Local edits overwritten.
+# Managed by gx10-cluster ansible (roles/observability). Local edits overwritten.
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
@@ -10,10 +10,19 @@ scrape_configs:
 
   # Host metrics, which on a unified-memory box are also the GPU memory
   # metrics, plus the GB10 GPU gauges from the textfile collector.
+  #
+  # Honest caveat about the peer target: node_exporter is bound to
+  # monitoring_bind, which defaults to 127.0.0.1, so the OTHER node's exporter
+  # answers only on its own loopback and this job will show it as down. The
+  # target stays in deliberately - a peer reported down is a fact you can act
+  # on, whereas omitting it would hide half the cluster. To make it scrape,
+  # either widen monitoring_bind on the peer - an unauthenticated endpoint on
+  # every interface, and ufw does not filter docker-published ports - or hold
+  # open `ssh -L {{ node_exporter_port }}:localhost:{{ node_exporter_port }} <peer>` and point this job at localhost.
   - job_name: node
     static_configs:
 {% for h in groups['gx10'] %}
-      - targets: ["{{ 'localhost' if h == inventory_hostname else h }}:9100"]
+      - targets: ["{{ 'localhost' if h == inventory_hostname else h }}:{{ node_exporter_port }}"]
         labels: { instance: "{{ h }}" }
 {% endfor %}
 

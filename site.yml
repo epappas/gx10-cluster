@@ -9,6 +9,17 @@
   any_errors_fatal: true
 
   pre_tasks:
+    # primary_home is this connection's HOME. Under `sudo ansible-playbook`
+    # that is /root, so every venv, cache, toolchain, model and SSH key would
+    # land in root's home - and `become: true` would then be a no-op that hides
+    # it. The run would succeed and provision the wrong account.
+    - name: Refuse to run as root
+      ansible.builtin.assert:
+        that: ansible_facts['user_id'] != 'root'
+        fail_msg: >-
+          Connected as root. Run as your normal user and let -K escalate;
+          everything here is installed into the connecting user's home.
+
     - name: Assert this is an aarch64 GX10-class machine
       ansible.builtin.assert:
         that:
@@ -43,7 +54,6 @@
     - { role: shell,      tags: [shell] }
     - { role: dev_python, tags: [python, dev] }
     - { role: dev_rust,   tags: [rust, dev] }
-    - { role: dev_node,   tags: [node, dev] }
     - { role: ml,         tags: [ml] }
     - { role: inference,  tags: [inference, serving] }
     - { role: monitoring, tags: [monitoring] }

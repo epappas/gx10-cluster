@@ -1,11 +1,8 @@
 ---
-- name: Install starship prompt
-  ansible.builtin.shell:
-    cmd: set -o pipefail && curl -fsSL https://starship.rs/install.sh | sh -s -- --yes --bin-dir /usr/local/bin
-    executable: /bin/bash
-    creates: /usr/local/bin/starship
-  become: true
-  when: install_starship | bool
+# Starship was removed rather than pinned. It was `curl | sh` into root's
+# shell, unpinned, from a third-party domain - the same pattern this repo
+# refuses everywhere else - and what it bought was a prompt theme. zoxide and
+# fzf still get wired up in gx10env.sh; the prompt is left to the shell.
 
 - name: Ensure user bin directory exists
   ansible.builtin.file:
