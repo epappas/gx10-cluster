@@ -319,6 +319,14 @@ nordvpn_token: ""
 # Off because nothing here needs it, and this is the same posture as
 # nordvpn_disable_firewall below.
 nordvpn_analytics: false
+# This node's name inside Meshnet, addressable as `<nickname>.nord` alongside
+# the random one Nord generates (epappas-atlas.nord and friends, which identify
+# nothing). Derived from inventory_hostname so it follows a rename, and
+# prefixed because the Meshnet namespace is the whole ACCOUNT rather than this
+# cluster - a bare `odysseus` would collide with anything else you name that.
+# Set to "" to keep Nord's generated name.
+nordvpn_nickname: "gx10-{{ inventory_hostname }}"
+
 nordvpn_iface: "nordlynx"
 nordvpn_mesh_cidr: "100.64.0.0/10"
 

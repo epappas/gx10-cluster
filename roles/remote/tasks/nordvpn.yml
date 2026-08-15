@@ -87,10 +87,17 @@
 # switch for a tunnel this box never establishes protects nothing, and the unit
 # manipulates netfilter before the network is up on a host whose inference
 # stack is entirely Docker containers.
+# masked, not `enabled: false`. The unit is STATIC (verified:
+# `systemctl show nordvpnd-killswitch.service -p UnitFileState` -> static), and
+# a static unit has no [Install] section, so it can be neither enabled nor
+# disabled. Asking systemd to disable it is a no-op that never converges, which
+# is why this task reported "changed" on every single run forever. Masking is
+# the mechanism that actually prevents a static unit from being pulled in by
+# something else's dependency, which is how this one gets started.
 - name: Disable the NordVPN kill switch unit
   ansible.builtin.systemd:
     name: nordvpnd-killswitch.service
-    enabled: false
+    masked: true
     state: stopped
   become: true
   when: nordvpn_disable_killswitch | bool
@@ -140,7 +147,10 @@
   ansible.builtin.command:
     argv: ["nordvpn", "set", "analytics", "{{ 'on' if nordvpn_analytics | bool else 'off' }}"]
   become: true
-  changed_when: true
+  register: nordvpn_analytics_set
+  # "Analytics is already set to 'disabled'." is the client's own no-op message,
+  # same shape as the firewall task below.
+  changed_when: "'already set to' not in nordvpn_analytics_set.stdout"
 
 # `--token` is a BOOLEAN flag and the token is a POSITIONAL argument. The
 # obvious `--token=<t>` fails with
@@ -210,12 +220,95 @@
     - nordvpn_ready | bool
     - nordvpn_disable_firewall | bool
 
+# rc from this command is unreliable in BOTH directions, so it decides nothing:
+#
+#   - "Meshnet is already enabled." exits rc=1. That is the no-op case, and
+#     without the failed_when below it made a second `--tags remote` run fail
+#     on an already-working node.
+#   - "maximum device count reached" has been seen exiting rc=0. The account
+#     caps Meshnet at 10 devices; the 11th is refused, the CLI reports the
+#     misleading "We're having trouble reaching our servers", and the run
+#     carries on as though it worked.
+#
+# So: treat the no-op text as success, and confirm the actual state afterwards
+# rather than believing either the exit code or the message.
 - name: Enable Meshnet
   ansible.builtin.command: nordvpn set meshnet on
   become: true
   register: nordvpn_mesh
-  changed_when: "'already enabled' not in nordvpn_mesh.stdout"
+  # Changed only when it actually turned Meshnet ON. rc=0 does not mean that
+  # (see above), and neither does "not already enabled" on its own - on a node
+  # the account has no room for, stdout is an error and every run would report
+  # a change that never happened.
+  changed_when:
+    - nordvpn_mesh.rc == 0
+    - "'already enabled' not in nordvpn_mesh.stdout"
+  # Never fatal, and the state read-back below is what makes that safe. A node
+  # that cannot join Meshnet is LAN-only, which the README already describes as
+  # a legitimate state - the same reasoning that makes the cable-dependent
+  # checks in verify.yml reported rather than fatal. Failing here instead means
+  # one full account blocks `--tags remote` on BOTH boxes, because site.yml is
+  # any_errors_fatal with serial: 1: poseidon's account limit would abort a run
+  # that had nothing to do with it.
+  failed_when: false
   when: nordvpn_ready | bool
+
+- name: Read back whether Meshnet is actually on
+  ansible.builtin.command: nordvpn settings
+  become: true
+  register: nordvpn_settings
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: nordvpn_ready | bool
+
+- name: Record the Meshnet state
+  ansible.builtin.set_fact:
+    nordvpn_mesh_on: >-
+      {{ 'meshnet: enabled' in (nordvpn_settings.stdout | default('') | lower) }}
+  when: nordvpn_ready | bool
+
+# Reported, not fatal - an unregistered node is still a healthy node, in the
+# same way an uncabled one is. But it is reported LOUDLY, because the CLI's own
+# message points at the network and the real cause is an account limit.
+- name: Explain that Meshnet did not come up
+  ansible.builtin.debug:
+    msg: >-
+      Meshnet is still OFF on {{ inventory_hostname }} despite a successful
+      login. The usual cause is the account's 10-device Meshnet cap, which the
+      CLI misreports as "We're having trouble reaching our servers" - check
+      `sudo journalctl -u nordvpnd | grep "maximum device count"`. Free a slot
+      in Nord Account -> Meshnet, or with
+      `nordvpn meshnet peer remove <hostname>`, then re-run.
+  when:
+    - nordvpn_ready | bool
+    - not (nordvpn_mesh_on | default(false) | bool)
+
+# Nord assigns every device a random two-word name (epappas-atlas.nord,
+# epappas-himalayas.nord), which tells you nothing about which machine it is -
+# on an account with ten devices, three of them Linux, that is a guessing game
+# every time you want to ssh somewhere. The nickname is addressable as
+# `<nickname>.nord` alongside the generated name, so this makes the cluster
+# reachable by the same identity it uses everywhere else in this repo.
+#
+# Derived from inventory_hostname, like node_hostname and the Slurm NodeName,
+# so renaming a box in inventory.yml renames it here too. The gx10- prefix is
+# because the Meshnet namespace is the whole ACCOUNT, not this cluster: bare
+# `odysseus` would collide with any other machine you ever name that.
+#
+# Requires Meshnet to be ON, so it must come after the task above. A device
+# that failed to register (the account's 10-device cap is a real ceiling) has
+# nothing to name, hence the failed_when: false rather than a hard error.
+- name: Set this node's Meshnet nickname
+  ansible.builtin.command: nordvpn meshnet set nickname {{ nordvpn_nickname }}
+  become: true
+  register: nordvpn_nick
+  changed_when: "'is now set to' in nordvpn_nick.stdout"
+  failed_when: false
+  when:
+    - nordvpn_ready | bool
+    - nordvpn_mesh_on | default(false) | bool
+    - nordvpn_nickname | length > 0
 
 # Meshnet treats 172.17.0.0/16 as a local network and drops peer traffic aimed
 # at it, so without this a peer cannot reach anything in a container on this
