@@ -86,6 +86,8 @@ Task-oriented. Start here.
   DGX OS already manages so you don't re-tune it
 - [decisions.md](docs/decisions.md) — why things are the way they are, one
   short entry per decision
+- [SECURITY.md](SECURITY.md) — how to report a vulnerability, which parts of the
+  posture are deliberate, and the risks this repo accepts on purpose
 
 ## Layout
 
