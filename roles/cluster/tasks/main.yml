@@ -123,7 +123,7 @@
 #
 # The .nord alias maps to the Meshnet NICKNAME rather than the name Nord
 # generates, because the generated one is random and gets recycled: poseidon
-# registered as epappas-everest.nord, a name that belonged to a Windows box an
+# registered as <account>-everest.nord, a name that belonged to a Windows box an
 # hour earlier. Pinning ssh config to that would break the first time a device
 # is removed and re-added. Skipped entirely when nordvpn_nickname is empty.
 - name: Configure SSH to use the cluster key between nodes

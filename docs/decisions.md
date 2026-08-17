@@ -551,9 +551,10 @@ sudo ethtool -m <iface> | grep 'Vendor SN'
 
 `phys_port_name` is the decisive one: the two live netdevs are two partitions of
 the **same physical cage**, `p0`. The `f1` pair is the second QSFP port, `p1`,
-which is empty. And both nodes read the *same* module serial
-(`01130300258K0747`, Amphenol NJAAKK-AU06 1 m DAC) — one cable, seen from each
-end, not two cables that happen to be the same model.
+which is empty. And both nodes read the *same*
+module serial off an Amphenol NJAAKK-AU06 1 m DAC — one cable, seen from each
+end, not two cables that happen to be the same model. (Compare the serials
+yourself; the equality is the evidence, so this repo does not print the value.)
 
 The PCIe root split is real but is a packaging detail: the cage's lanes are
 presented as two x4 functions. They must still be on **different subnets**, or

@@ -50,8 +50,12 @@ Two things the play cannot do for you:
 > **Status: applied end-to-end on both nodes.** `odysseus` and `poseidon` are
 > provisioned; `make verify` passes on both, a full `make diff` reports zero
 > changes, and a two-node NCCL all-reduce runs at 22.7 GB/s busbw over the
-> interconnect (~91% of the 200 Gb/s cable, with jumbo frames). The only optional check still red is the metrics exporter,
-> which is opt-in and deliberately not installed.
+> interconnect (~91% of the 200 Gb/s cable, with jumbo frames).
+>
+> Two optional checks are red by design: the metrics exporter, which is opt-in,
+> and the history sampler, whose timer is not started on these nodes. Both are
+> `required: false`. The benchmark suite installs but has
+> [not been proven by a run](docs/runbooks/benchmark.md).
 
 ## Runbooks
 

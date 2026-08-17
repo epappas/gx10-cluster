@@ -388,7 +388,7 @@ hr() { printf '  \033[2m%s\033[0m\n' "$(printf '%.0s-' $(seq 1 $((21 + W * ${#no
 pad() { printf '%*s' $((W - BW - 7)) ''; }
 nth() { sed -n "${2}p" <<< "${1:-}"; }
 # Truncating the head loses exactly the part that distinguishes container names
-# like latent-cloud-d16 from latent-cloud-d64, so elide the middle instead.
+# like infer-pool-d16 from infer-pool-d64, so elide the middle instead.
 shorten() {
     local t=$1 m=$2 keep
     if (( ${#t} <= m )); then RET=$t; return; fi

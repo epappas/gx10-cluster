@@ -95,8 +95,8 @@ q  or  Ctrl-C        # quit
         clock                        2249 MHz                2405 MHz
         throttle                         none                    none
         pwr-capped                   1146 min                1059 min
-        on-GPU       41642M @ar-fleet-9a43381f  431M @latent-cloud-d64
-                                415M @gputest  507M @latent-cloud-d16
+        on-GPU         41642M @train-7f2a91c4  431M @infer-pool-d64
+                              415M @gputest  507M @infer-pool-d16
   ---------------------------------------------------------------------
   CPU   total               [#---------]  11%       [----------]   1%
         P-cores             [##--------]  21%       [----------]   1%
@@ -135,7 +135,7 @@ red, because a busy GPU is the goal here, not an alarm.
 The `on-GPU` rows answer this, and nothing else on the box does:
 
 ```
-on-GPU   41642M @ar-fleet-9a43381f     <- @ prefix = container
+on-GPU   41642M @train-7f2a91c4        <- @ prefix = container
               415M @gputest
               767M python              <- no @ = host process
 ```

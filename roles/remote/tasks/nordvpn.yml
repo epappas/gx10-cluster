@@ -284,8 +284,8 @@
     - nordvpn_ready | bool
     - not (nordvpn_mesh_on | default(false) | bool)
 
-# Nord assigns every device a random two-word name (epappas-atlas.nord,
-# epappas-himalayas.nord), which tells you nothing about which machine it is -
+# Nord assigns every device a random two-word name (<account>-atlas.nord,
+# <account>-himalayas.nord), which tells you nothing about which machine it is -
 # on an account with ten devices, three of them Linux, that is a guessing game
 # every time you want to ssh somewhere. The nickname is addressable as
 # `<nickname>.nord` alongside the generated name, so this makes the cluster
