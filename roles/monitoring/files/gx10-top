@@ -93,11 +93,26 @@ awk '/^MemTotal:/{print "mem_total_kb="$2} /^MemAvailable:/{print "mem_avail_kb=
 
 df -B1 --output=avail,pcent / 2>/dev/null | tail -1 \
     | awk '{gsub(/%/,"",$2); print "disk_avail="$1; print "disk_pct="$2}'
+# Every hwmon in one pass, keeping the MAX per family. The ConnectX-7 ASIC runs
+# hottest of anything here (measured 54 C at idle, above GPU and NVMe), and it
+# was missing from this view entirely while gx10-sample already recorded it.
+# acpitz exposes seven SoC zones; only the hottest is worth a column.
 for h in /sys/class/hwmon/hwmon*; do
-    case "$(cat "$h/name" 2>/dev/null)" in
-        nvme) t=$(cat "$h/temp1_input" 2>/dev/null) && p nvme_temp $(( t / 1000 )); break ;;
-    esac
+    nm=$(cat "$h/name" 2>/dev/null) || continue
+    case "$nm" in nvme|mlx5|acpitz) ;; *) continue ;; esac
+    for t in "$h"/temp*_input; do
+        [[ -e $t ]] || continue
+        v=$(( $(cat "$t" 2>/dev/null || echo 0) / 1000 ))
+        case "$nm" in
+            nvme)   (( v > ${mx_nvme:-0} )) && mx_nvme=$v ;;
+            mlx5)   (( v > ${mx_nic:-0} ))  && mx_nic=$v ;;
+            acpitz) (( v > ${mx_soc:-0} ))  && mx_soc=$v ;;
+        esac
+    done
 done
+[[ -n ${mx_nvme:-} ]] && p nvme_temp "$mx_nvme"
+[[ -n ${mx_nic:-} ]]  && p nic_temp  "$mx_nic"
+[[ -n ${mx_soc:-} ]]  && p soc_temp  "$mx_soc"
 
 # --- Docker id -> name, built once and reused to attribute GPU processes.
 dmap=""
@@ -538,9 +553,18 @@ render() {
         bar "${D["$h|disk_pct"]:-}" cap; raw+=("$(pad)$RET")
     done; rowraw DISK used "${raw[@]}"
     vals=(); for h in "${nodes[@]}"; do
-        n=${D["$h|nvme_temp"]:-}
-        vals+=("$(hum "${D["$h|disk_avail"]:-0}") free  ${n:+${n}C}")
-    done; row "" free/nvme "${vals[@]}"
+        vals+=("$(hum "${D["$h|disk_avail"]:-0}") free")
+    done; row "" free "${vals[@]}"
+
+    # The NIC first, because it is the hottest part and the least expected one.
+    vals=(); for h in "${nodes[@]}"; do
+        local nt=${D["$h|nic_temp"]:-} st=${D["$h|soc_temp"]:-} vt=${D["$h|nvme_temp"]:-} hot=0 c2=2
+        for x in "$nt" "$st" "$vt"; do [[ $x =~ ^[0-9]+$ ]] && (( x > hot )) && hot=$x; done
+        if   (( hot >= 85 )); then c2=31
+        elif (( hot >= 70 )); then c2=33
+        elif (( hot > 0 ));  then c2=32; fi
+        vals+=("$c2|nic ${nt:--} soc ${st:--} ssd ${vt:--}")
+    done; row THERM "hottest C" "${vals[@]}"
     hr
 
     # ---- network

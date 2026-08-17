@@ -110,7 +110,8 @@ q  or  Ctrl-C        # quit
         unified                   55 / 121 GB             13 / 121 GB
         swap                           636 kB                   11 MB
   DISK  used                [###-------]  32%       [###-------]  31%
-        free/nvme            599.4G free  45C        600.8G free  45C
+        free                      599.4G free             600.8G free
+  THERM hottest C        nic 54 soc 49 ssd 45    nic 54 soc 52 ssd 47
   ---------------------------------------------------------------------
   NET   wan enP7s7               v8.8K ^24.3K             v7.0K ^5.7K
         vpn nordlynx              v1.3K ^2.7K             v1.5K ^3.7K
@@ -167,6 +168,51 @@ handshake per node per frame would cost more than all the collection.
 
 A node that is off or unreachable degrades to one red column; it does not take
 the view down, and its numbers are cleared rather than left stale.
+
+### <a name="temperatures"></a>Reading temperatures
+
+Four independent sensor families, and the one you would reach for first is the
+least informative:
+
+```bash
+nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader   # GPU die
+sensors                                                        # if lm-sensors is installed
+# or straight from sysfs, which always works:
+for h in /sys/class/hwmon/hwmon*; do
+    n=$(cat "$h/name"); for t in "$h"/temp*_input; do
+        echo "$n $(( $(cat "$t") / 1000 ))C"; done
+done
+```
+
+Measured at idle on this pair:
+
+| Sensor | odysseus | poseidon | What it is |
+|---|---|---|---|
+| `mlx5` asic ×4 | **54 C** | **54 C** | ConnectX-7 — **the hottest part of the box** |
+| `mt7925_phy0` | 50 C | 52 C | WiFi radio |
+| `acpitz` ×7 | 46–48 C | 52 C | SoC zones; only the hottest is worth watching |
+| GPU die | 46 C | 50 C | via `nvidia-smi` |
+| `nvme` | 45 C | 47 C | weights and swap live here |
+
+Two traps.
+
+**`temperature.memory` returns `N/A`**, like every other GPU-memory query on
+GB10 — there is no framebuffer to instrument. Host sensors are the whole story.
+
+**The DAC reports `Module temperature: 0.00 degrees C`.** That is a *passive*
+cable with no digital diagnostics, not a cable at freezing point:
+
+```bash
+sudo ethtool -m enp1s0f0np0 | grep -i "module temperature"
+#   Module temperature : 0.00 degrees C / 32.00 degrees F
+```
+
+`Module voltage: 0.0000 V` beside it confirms the sensor is absent rather than
+reading zero. Ignore both. The `mlx5` ASIC temperature is the real thermal
+signal for the interconnect.
+
+`gx10-top`'s `THERM` row reports the hottest of nic/soc/ssd per node, coloured
+green/amber/red at 70 and 85 C.
 
 ### <a name="roce-counters"></a>Why the RoCE rows are not netdev counters
 
