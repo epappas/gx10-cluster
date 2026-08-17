@@ -34,12 +34,28 @@ report() {
     # shared CPU/GPU power budget - a compile can steal headroom from a job.
     # NB: test for exactly "Active". Matching /Active/ also matches "Not
     # Active", which reports every reason as firing, always.
-    local active
+    local active faults
     active=$(nvidia-smi -q -d PERFORMANCE 2>/dev/null \
         | awk '/Clocks Event Reasons/,/Counters/' \
         | awk -F': *' '$2 == "Active" {gsub(/^ +| +$/,"",$1); print $1}' || true)
-    if [[ -n "$active" ]]; then
-        warn "  throttled: $(echo "$active" | paste -sd', ')"
+    # SW Power Cap is excluded from the warning. MEASURED on this hardware, at
+    # complete idle (0% util, ~5.3 W, 208 MHz, no compute process): Active in 7
+    # of 15 consecutive one-second samples, and 46% of uptime by its own
+    # counter (26149 s of 55870 s). It flaps second to second - it is ordinary
+    # DVFS on this SoC, not a fault.
+    #
+    # So warning on it fired on roughly every other invocation, at random and
+    # unrelated to anything being wrong. A coin-flip alarm is worse than a
+    # constant one: you stop reading it, and it buries the genuine thermal
+    # slowdown printed on the same line.
+    #
+    # The rate is still meaningful even though the state is not, which is what
+    # the power-capped-since-boot line below reports.
+    faults=$(grep -v '^SW Power Cap$' <<< "$active" || true)
+    if [[ -n "$faults" ]]; then
+        warn "  throttled: $(echo "$faults" | paste -sd', ')"
+    elif [[ -n "$active" ]]; then
+        printf '  throttling: none (SW power cap active — normal DVFS here)\n'
     else
         printf '  throttling: none active\n'
     fi

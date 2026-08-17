@@ -1,0 +1,18 @@
+# Managed by gx10-cluster ansible (roles/cluster). Local edits are overwritten.
+#
+# Peer addresses on the interconnect, one line per peer per subnet:
+#
+#     <peer-name> <address>
+#
+# Read by gx10-interconnect so the tool needs no inventory of its own. No
+# subnet index column: the tool matches each address to the local interface on
+# the same /24, which stays right if the subnets are ever reordered.
+#
+# The peer NAME is the management name, deliberately: gx10-interconnect --peer
+# starts its RDMA server over SSH, and SSH must not depend on the very link
+# the probe is trying to test.
+{% for h in groups['gx10'] if h != inventory_hostname %}
+{% for s in cluster_subnets %}
+{{ h }} {{ s }}.{{ hostvars[h].cluster_index }}
+{% endfor %}
+{% endfor %}

@@ -39,7 +39,7 @@ help:  ## Show this help
 # --- Checks that run anywhere (and in CI) ----------------------------------
 
 .PHONY: check
-check: lint syntax smoke render handlers docs lockfile shellcheck  ## Every offline check (what CI runs)
+check: lint syntax smoke render handlers optional-tags docs lockfile shellcheck  ## Every offline check (what CI runs)
 
 .PHONY: deps
 deps:  ## Install the pinned collections
@@ -53,6 +53,8 @@ lint:  ## ansible-lint at the production profile
 syntax:  ## Parse the playbooks
 	ansible-playbook site.yml --syntax-check
 	ansible-playbook verify.yml --syntax-check
+	ansible-playbook optional.yml --syntax-check
+	ansible-playbook benchmark.yml --syntax-check
 
 # --syntax-check does NOT load stdout callbacks, so it passes on a config that
 # aborts every real run - exactly the bug that shipped once. Execute a trivial
@@ -85,6 +87,14 @@ render:  ## Render every template against real facts
 handlers:  ## Every notify: must name a handler that exists in the same role
 	@python3 tests/check_handlers.py
 
+# Tags on a dynamic include select the include, not the tasks inside it. Without
+# `apply:`, `make optional TAGS=ray` includes the role, runs zero tasks and
+# reports success. Nothing else offline sees it - --syntax-check passes and
+# --list-tasks does not expand dynamic includes.
+.PHONY: optional-tags
+optional-tags:  ## Every optional include_role must push its tag onto the role's tasks
+	@python3 tests/check_optional_tags.py
+
 # A stale index is worse than no index - it denies the existence of a role or
 # runbook, confidently. This checks coverage only, not prose quality.
 .PHONY: docs
@@ -103,7 +113,8 @@ lockfile:  ## The ML lockfile must be a real resolution, not a hand-edit
 .PHONY: shellcheck
 shellcheck:  ## Lint the shell scripts (skipped if shellcheck is absent)
 	@if command -v shellcheck > /dev/null; then \
-		shellcheck bootstrap.sh && echo "shellcheck: clean"; \
+		files="bootstrap.sh $$(grep -rl '^#!.*bash' roles/*/files/ 2>/dev/null | sort || true)"; \
+		shellcheck $$files && echo "shellcheck: clean ($$(echo $$files | wc -w) files)"; \
 	else \
 		echo "shellcheck: not installed locally - CI runs it"; \
 	fi
@@ -122,13 +133,19 @@ apply:  ## Provision. Run under tmux. (ASKPASS= once sudo is passwordless)
 verify:  ## Assert the node is in the expected state; fails loudly if not
 	ansible-playbook verify.yml $(ANSIBLE_ARGS)
 
+# Deliberately not part of `verify`. Verify is seconds, read-only and safe on a
+# busy box; this loads the GPUs, the fabric and the disk for minutes.
+.PHONY: bench
+bench:  ## Benchmark the cluster (needs: make optional TAGS=bench)
+	ansible-playbook benchmark.yml $(ANSIBLE_ARGS)
+
 .PHONY: models
 models:  ## Download the model sets (long; resumable)
 	ansible-playbook site.yml $(ASKPASS) --tags models $(ANSIBLE_ARGS)
 
 .PHONY: optional
-optional:  ## Install an opt-in component: make optional TAGS=ray|slurm|exporters|dashboards|node
-	@[ -n "$(TAGS)" ] || { echo "pick one: make optional TAGS=ray|slurm|exporters|dashboards|node"; exit 1; }
+optional:  ## Install an opt-in component: make optional TAGS=ray|slurm|exporters|dashboards|node|bench
+	@[ -n "$(TAGS)" ] || { echo "pick one: make optional TAGS=ray|slurm|exporters|dashboards|node|bench"; exit 1; }
 	ansible-playbook optional.yml $(ASKPASS) --tags $(TAGS) $(if $(LIMIT),--limit $(LIMIT),) $(EXTRA)
 
 # Resolve roles/ml/files/requirements-ml.in into a fully pinned .txt.

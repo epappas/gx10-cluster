@@ -1,6 +1,6 @@
 # Roles
 
-Eleven roles run in `site.yml`, in the order below; the other four are opt-in
+Eleven roles run in `site.yml`, in the order below; the other five are opt-in
 and run only from `optional.yml`. Each row's tag is what you pass to
 `make apply TAGS=…` / `SKIP=…`, or to `make optional TAGS=…`.
 
@@ -15,9 +15,9 @@ and run only from `optional.yml`. Each row's tag is what you pass to
 | `dev_rust` | `rust`, `dev` | rustup pinned to `rust_toolchain`, plus `bat` / `fd-find` / `zoxide` from apt |
 | `ml` | `ml` | NCCL, cuDNN, the pinned venv from `requirements-ml.txt`, ollama, llama.cpp built for sm_121 |
 | `inference` | `inference`, `serving` | vLLM container, `vllm-serve`, templated systemd unit |
-| `monitoring` | `monitoring` | `gx10-status` — GPU, throttling, unified memory, swap. **No daemons** |
+| `monitoring` | `monitoring` | `gx10-status` (live) and `gx10-sample` (history, systemd timer). **No daemons, nothing resident** |
 | `remote` | `remote` | sshd, ufw, NordVPN Meshnet |
-| `cluster` | `cluster` | RDMA, interconnect addressing, `/etc/hosts`, inter-node SSH, `/etc/nccl.conf` |
+| `cluster` | `cluster` | RoCE, interconnect addressing, `/etc/hosts`, inter-node SSH, `/etc/nccl.conf`, `gx10-interconnect` |
 | `models` | `models` | pre-loads open weights. **The long pole** — ~130 GB |
 
 ## Opt-in — run only by `optional.yml`
@@ -33,6 +33,7 @@ already runs 2-node jobs, and `gx10-status` already shows you the machine.
 | `observability` | `exporters` | node_exporter + GPU textfile collector, ~20 MB RSS, for an external scraper |
 | `observability` | `dashboards` | the above plus prometheus + grafana **on this box** — costs model capacity |
 | `dev_node` | `node` | nvm + Node 22. Nothing in the ML path needs it |
+| `benchmark` | `bench` | perftest, fio, OpenMPI, DCGM and a pinned `nccl-tests` build. Installs only — `make bench` runs them |
 
 ```bash
 make optional TAGS=ray

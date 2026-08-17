@@ -47,9 +47,11 @@ Two things the play cannot do for you:
   ([how](docs/runbooks/provision-node.md#join-the-meshnet)). Until then the
   nodes are reachable on the LAN only.
 
-> **Status: applied end-to-end on zero machines so far.** The hardware facts in
-> [hardware.md](docs/hardware.md) are verified on a live GX10; the playbook's
-> own behaviour is reviewed and statically checked, not yet proven by a run.
+> **Status: applied end-to-end on both nodes.** `odysseus` and `poseidon` are
+> provisioned; `make verify` passes on both, a full `make diff` reports zero
+> changes, and a two-node NCCL all-reduce runs at 22.7 GB/s busbw over the
+> interconnect (~91% of the 200 Gb/s cable, with jumbo frames). The only optional check still red is the metrics exporter,
+> which is opt-in and deliberately not installed.
 
 ## Runbooks
 
@@ -59,11 +61,14 @@ Task-oriented. Start here.
 |---|---|
 | Set up a brand-new GX10 | [provision-node](docs/runbooks/provision-node.md) |
 | Cable two boxes together and verify 200 Gb/s | [connect-cluster](docs/runbooks/connect-cluster.md) |
+| Work out what the fabric is and whether it works | [diagnose-interconnect](docs/runbooks/diagnose-interconnect.md) |
+| Tune host network settings for the interconnect | [tune-network](docs/runbooks/tune-network.md) |
 | Get back in after an SSH lockout | [recover-ssh-lockout](docs/runbooks/recover-ssh-lockout.md) |
 | Update packages without breaking CUDA | [upgrade-drivers](docs/runbooks/upgrade-drivers.md) |
 | Run or serve a model | [serve-models](docs/runbooks/serve-models.md) |
 | Download or clean up model weights | [manage-models](docs/runbooks/manage-models.md) |
 | Run a job across both nodes | [run-distributed](docs/runbooks/run-distributed.md) |
+| Measure the cluster and prove it performs | [benchmark](docs/runbooks/benchmark.md) |
 | See what the machine is doing | [monitoring](docs/runbooks/monitoring.md) |
 | Fix something that's broken | [troubleshoot](docs/runbooks/troubleshoot.md) |
 | Change this repo safely | [contributing](docs/contributing.md) |
@@ -89,7 +94,7 @@ group_vars/all.yml  every tunable
 vars/               playbook-scoped data           -> vars/README.md
 tests/              render, handler and docs checks
 optional.yml        opt-in components, never run by site.yml
-roles/              15 roles, 11 of them in site.yml -> roles/README.md
+roles/              16 roles, 11 of them in site.yml -> roles/README.md
 docs/               runbooks and reference          -> docs/README.md
 ```
 
@@ -99,11 +104,11 @@ pass anything else with `EXTRA='-e allow_apt_upgrade=true'`. (Not `make apply
 Ansible.) The models role is the long pole at ~130 GB; `make apply SKIP=models`
 now and `make models` later.
 
-The four roles `site.yml` does not run are opt-in — `ray`, `slurm`,
-`observability` (two tiers, two tags) and `dev_node`:
+The five roles `site.yml` does not run are opt-in — `ray`, `slurm`,
+`observability` (two tiers, two tags), `dev_node` and `benchmark`:
 
 ```bash
-make optional TAGS=ray|slurm|exporters|dashboards|node
+make optional TAGS=ray|slurm|exporters|dashboards|node|bench
 ```
 
 Nothing in `optional.yml` runs without a tag, so a bare invocation is a no-op.

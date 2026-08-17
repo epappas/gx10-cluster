@@ -1,0 +1,491 @@
+---
+# Performance benchmarks, and the assertions that make them mean something.
+#
+# The split against verify.yml is deliberate and worth stating: `make verify`
+# answers "is this node configured the way the repo says", `make bench` answers
+# "does this cluster actually perform, and is it fit to run HPC work". Verify
+# is fast, read-only and safe to run any time. Bench loads the GPUs, the fabric
+# and the disk, takes minutes, and should not be run against a box that is
+# serving traffic.
+#
+# EVERY NUMBER REPORTED HERE COMES OUT OF AN OFFICIAL UPSTREAM BENCHMARK:
+#
+#   nccl-tests   NVIDIA's own collective benchmark. algbw / busbw in GB/s -
+#                the metrics every NCCL number you will ever compare against
+#                is quoted in.
+#   perftest     linux-rdma's verbs benchmarks. ib_write_bw reports BW average
+#                in Gb/sec; ib_write_lat reports t_typical and t_99% in usec.
+#   iperf3       ESnet. Gbits/sec and TCP retransmits.
+#   fio          The block-storage standard. Bandwidth in MB/s, 4K random IOPS.
+#   DCGM         NVIDIA's own GPU diagnostic. Pass/fail per test, from the tool.
+#
+# Nothing here computes a metric of its own invention, and no threshold appears
+# without a `provenance` string saying where it came from. See the header of
+# vars/benchmark_checks.yml - that rule is the point of the whole file.
+#
+#   make bench                    # everything
+#   make bench LIMIT=odysseus     # single-node parts only; pairwise ones skip
+#
+# Needs the tooling: make optional TAGS=bench
+
+- name: Benchmark the GX10 cluster
+  hosts: gx10
+  gather_facts: true
+
+  # Explicit, like verify.yml: this data belongs to this playbook, and a
+  # group_vars file would have to be named after a real inventory group.
+  vars_files:
+    - vars/benchmark_checks.yml
+
+  vars:
+    # DCGM diagnostic tier. 1 = deployment checks, seconds. 2 and 3 stress the
+    # GPU for minutes; 4 is the full EUD suite. Raise deliberately:
+    #   make bench EXTRA='-e bench_dcgm_level=3'
+    bench_dcgm_level: 1
+
+    # fio writes real files. Small by default so `make bench` stays a
+    # minutes-long operation, and direct=1 means the size does not need to
+    # exceed RAM to be honest.
+    bench_fio_dir: "{{ primary_home }}/.cache/gx10-bench"
+    bench_fio_size: "2G"
+
+    # perftest and iperf3 run durations, in seconds.
+    bench_rdma_seconds: 10
+    bench_tcp_seconds: 10
+
+    # The other node. Pairwise work runs from the controller and delegates the
+    # server half here.
+    bench_peer: "{{ groups['gx10'] | difference([inventory_hostname]) | first | default('') }}"
+
+    # True on exactly one host, and only when the peer is actually in this run.
+    # `--limit odysseus` therefore skips every pairwise test rather than
+    # hanging against a host ansible was told not to touch.
+    bench_is_controller: >-
+      {{ inventory_hostname == (ansible_play_hosts | first)
+         and (ansible_play_hosts | length) > 1 }}
+
+    # Base port for the perftest servers. One per partition, so they do not
+    # collide when both run at once.
+    bench_rdma_port: 18515
+    bench_tcp_port: 5201
+
+    # ---------------------------------------------------------------------
+    # Floors for the cross-node metrics, with their provenance.
+    #
+    # These are deliberately an order of magnitude below what this hardware
+    # measures, and they are set that way on purpose. Their job is to catch the
+    # two failure modes docs/runbooks/connect-cluster.md documents - a fall
+    # back to TCP (<1 GB/s) and the reported ConnectX-7 firmware power throttle
+    # (~1.6 GB/s / 13 Gbps) - both of which look like a working cluster and
+    # quietly cost you an order of magnitude. A floor set just under the
+    # measured value would instead fail on ordinary run-to-run variance, which
+    # trains you to ignore it.
+    #
+    # Track drift by comparing successive result files, not by tightening
+    # these. See docs/runbooks/benchmark.md#recording-a-baseline.
+    # ---------------------------------------------------------------------
+    bench_nccl_busbw_floor_gbytes: 5.0
+    bench_rdma_bw_floor_gbits: 20.0
+    bench_provenance_floor: >-
+      Catches the two documented interconnect failures (TCP fallback below
+      1 GB/s; the reported 13 Gbps firmware throttle at ~1.6 GB/s), set well
+      under the measured value so normal variance cannot trip it.
+
+  tasks:
+    # =====================================================================
+    # Per-node: gates and gauges from vars/benchmark_checks.yml
+    # =====================================================================
+    - name: Ensure the fio scratch directory exists
+      ansible.builtin.file:
+        path: "{{ bench_fio_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Run the per-node checks
+      ansible.builtin.shell:
+        cmd: "{{ item.cmd }}"
+        executable: /bin/bash
+      loop: "{{ benchmark_checks }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: node_checks
+      changed_when: false
+      failed_when: false
+
+    - name: Report the per-node gates
+      ansible.builtin.debug:
+        msg: >-
+          {{ '%-28s' | format(item.item.name) }}
+          {{ 'ok' if item.rc == 0 else 'FAILED' }}
+      loop: "{{ node_checks.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      when: item.item.kind == 'gate'
+
+    - name: Report the per-node gauges
+      ansible.builtin.debug:
+        msg: >-
+          {{ '%-28s' | format(item.item.name) }}
+          {{ item.stdout | trim | default('(no reading)', true) }} {{ item.item.unit }}
+          ({{ item.item.metric }})
+      loop: "{{ node_checks.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      when:
+        - item.item.kind == 'gauge'
+        - item.rc == 0
+
+    - name: Note the checks that could not be taken
+      ansible.builtin.debug:
+        msg: "{{ item.item.name }}: {{ item.item.hint }}"
+      loop: "{{ node_checks.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      when:
+        - item.rc != 0
+        - not (item.item.required | default(true))
+
+    - name: Assert every required per-node check passed
+      ansible.builtin.assert:
+        that: item.rc == 0
+        fail_msg: >-
+          {{ item.item.name }} FAILED (rc={{ item.rc }}):
+          {{ (item.stdout | default('') or item.stderr | default('')) | trim }}
+          -- {{ item.item.hint }}
+      loop: "{{ node_checks.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      when: item.item.required | default(true)
+
+    # =====================================================================
+    # Pairwise: RDMA fabric, one measurement per partition.
+    #
+    # Runs from one host with the server half delegated to the peer, because a
+    # client/server benchmark cannot be expressed as one command on one node.
+    # =====================================================================
+    - name: Start an RDMA bandwidth server per partition on the peer
+      ansible.builtin.command:
+        argv:
+          - timeout
+          - "120"
+          - ib_write_bw
+          - "-R"                      # rdma_cm: picks the device and GID from
+          - "-F"                      # the address, so no GID index guessing
+          - "--report_gbits"
+          - "-D"
+          - "{{ bench_rdma_seconds }}"
+          - "-p"
+          - "{{ bench_rdma_port + idx }}"
+      delegate_to: "{{ bench_peer }}"
+      loop: "{{ cluster_subnets }}"
+      loop_control:
+        index_var: idx
+        label: "partition {{ idx }} port {{ bench_rdma_port + idx }}"
+      async: 120
+      poll: 0
+      changed_when: false
+      when: bench_is_controller | bool
+
+    - name: Wait for the RDMA servers to listen
+      ansible.builtin.wait_for:
+        host: "{{ item }}.{{ hostvars[bench_peer].cluster_index }}"
+        port: "{{ bench_rdma_port + idx }}"
+        timeout: 20
+      loop: "{{ cluster_subnets }}"
+      loop_control:
+        index_var: idx
+        label: "partition {{ idx }}"
+      when: bench_is_controller | bool
+
+    # BW average[Gb/sec] is field 4 of perftest's data row - the row whose
+    # first field is the message size. Gb/sec because --report_gbits is what
+    # fabric numbers are quoted in; perftest defaults to MB/sec, which invites
+    # a factor-of-eight mistake when comparing against a link rate.
+    - name: Measure RDMA write bandwidth per partition
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail;
+          ib_write_bw -R -F --report_gbits -D {{ bench_rdma_seconds }}
+          -p {{ bench_rdma_port + idx }}
+          {{ item }}.{{ hostvars[bench_peer].cluster_index }}
+          | awk '$1 ~ /^[0-9]+$/ { print $4 }' | tail -1
+        executable: /bin/bash
+      loop: "{{ cluster_subnets }}"
+      loop_control:
+        index_var: idx
+        label: "partition {{ idx }} ({{ item }}.x)"
+      register: bench_rdma_bw
+      changed_when: false
+      failed_when: false
+      when: bench_is_controller | bool
+
+    - name: Start an RDMA latency server on the peer
+      ansible.builtin.command:
+        argv:
+          - timeout
+          - "120"
+          - ib_write_lat
+          - "-R"
+          - "-F"
+          - "-s"
+          - "2"
+          - "-n"
+          - "5000"
+          - "-p"
+          - "{{ bench_rdma_port + 10 }}"
+      delegate_to: "{{ bench_peer }}"
+      async: 120
+      poll: 0
+      changed_when: false
+      when: bench_is_controller | bool
+
+    - name: Wait for the latency server to listen
+      ansible.builtin.wait_for:
+        host: "{{ cluster_subnets[0] }}.{{ hostvars[bench_peer].cluster_index }}"
+        port: "{{ bench_rdma_port + 10 }}"
+        timeout: 20
+      when: bench_is_controller | bool
+
+    # t_typical[usec] is field 5 and t_99%[usec] is field 6 of the data row.
+    # Half-round-trip write latency on a 2-byte payload is the conventional
+    # fabric latency figure - big enough payloads measure bandwidth instead.
+    - name: Measure RDMA write latency
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail;
+          ib_write_lat -R -F -s 2 -n 5000 -p {{ bench_rdma_port + 10 }}
+          {{ cluster_subnets[0] }}.{{ hostvars[bench_peer].cluster_index }}
+          | awk '$1 ~ /^[0-9]+$/ { print $5 " " $6 }' | tail -1
+        executable: /bin/bash
+      register: bench_rdma_lat
+      changed_when: false
+      failed_when: false
+      when: bench_is_controller | bool
+
+    # =====================================================================
+    # Pairwise: TCP on the management path.
+    #
+    # Not the fast path and not meant to be - but it is what NCCL bootstraps
+    # over and what torchrun rendezvous uses, so a sick management link shows
+    # up as a collective that hangs at init rather than as a slow network.
+    # =====================================================================
+    - name: Start the iperf3 server on the peer
+      ansible.builtin.command:
+        argv: [timeout, "60", iperf3, "-s", "-1", "-p", "{{ bench_tcp_port }}"]
+      delegate_to: "{{ bench_peer }}"
+      async: 60
+      poll: 0
+      changed_when: false
+      when: bench_is_controller | bool
+
+    - name: Wait for the iperf3 server to listen
+      ansible.builtin.wait_for:
+        host: "{{ hostvars[bench_peer].ansible_host }}"
+        port: "{{ bench_tcp_port }}"
+        timeout: 20
+      when: bench_is_controller | bool
+
+    - name: Measure TCP throughput on the management path
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail;
+          iperf3 -c {{ hostvars[bench_peer].ansible_host }} -p {{ bench_tcp_port }}
+          -t {{ bench_tcp_seconds }} -J
+          | python3 -c "import json,sys; d=json.load(sys.stdin)['end'];
+          print(round(d['sum_received']['bits_per_second']/1e9, 2),
+          d['sum_sent'].get('retransmits', 0))"
+        executable: /bin/bash
+      register: bench_tcp
+      changed_when: false
+      failed_when: false
+      when: bench_is_controller | bool
+
+    # =====================================================================
+    # Cluster-wide: NCCL collectives, the number that actually predicts
+    # distributed training throughput.
+    # =====================================================================
+
+    # -b 8 -e 8G -f 2 sweeps 8 bytes to 8 GiB doubling each step, which is the
+    # canonical nccl-tests sweep: small sizes expose latency, large ones the
+    # link. -g 1 is one GPU per rank, and there is one GPU per box.
+    #
+    # Launched over the MANAGEMENT names on purpose. MPI only starts the ranks;
+    # NCCL then picks the RoCE path for the data itself via ibverbs. Pointing
+    # the launcher at the interconnect is the mistake group_vars/all.yml warns
+    # about in the NCCL_SOCKET_IFNAME comment.
+    - name: Run the NCCL all-reduce sweep across both nodes
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail;
+          mpirun -np 2 -H {{ inventory_hostname }}:1,{{ bench_peer }}:1
+          --mca plm_rsh_agent "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+          -x PATH -x LD_LIBRARY_PATH -x NCCL_DEBUG=WARN
+          {{ primary_home }}/.local/bin/all_reduce_perf -b 8 -e 8G -f 2 -g 1
+          > {{ bench_fio_dir }}/nccl-tests.out 2>&1;
+          rc=$?;
+          awk '/Avg bus bandwidth/ { bw = $NF }
+               $1 ~ /^[0-9]+$/ && $NF ~ /^[0-9]+$/ { wrong += $NF }
+               END { printf "%s %d\n", (bw == "" ? "na" : bw), wrong + 0 }'
+          {{ bench_fio_dir }}/nccl-tests.out;
+          exit $rc
+        executable: /bin/bash
+      register: bench_nccl
+      changed_when: false
+      failed_when: false
+      when: bench_is_controller | bool
+      async: 900
+      poll: 15
+
+    # Two numbers out of awk rather than a fixed-width table parsed in Jinja.
+    # all_reduce_perf prints ~35 columns across two column groups; picking
+    # fields out of that in a filter chain is how you end up silently reading
+    # the in-place column after an upstream layout change. The full output is
+    # left in bench_fio_dir for when a number needs explaining.
+    #
+    # bw is the tool's own "Avg bus bandwidth" summary line - the figure
+    # nccl-tests itself considers the headline, so the one to quote. wrong is
+    # the sum of its #wrong column, which is a correctness signal, not a
+    # performance one.
+    - name: Extract the NCCL results
+      ansible.builtin.set_fact:
+        bench_nccl_busbw: "{{ bench_nccl.stdout | default('') | trim | split(' ') | first | default('', true) }}"
+        bench_nccl_wrong: "{{ bench_nccl.stdout | default('na 0') | trim | split(' ') | last | default('0', true) }}"
+      when: bench_is_controller | bool
+
+    # =====================================================================
+    # Report
+    # =====================================================================
+    - name: Report the cross-node results
+      ansible.builtin.debug:
+        msg: >-
+          {{ [
+            'fabric and collectives, ' ~ inventory_hostname ~ ' <-> ' ~ bench_peer,
+            '  RDMA write bandwidth  ' ~ (bench_rdma_bw.results | default([])
+               | map(attribute='stdout') | map('trim') | join(' + ')) ~ ' Gb/s  (perftest ib_write_bw, BW average, per partition)',
+            '  RDMA write latency    ' ~ (bench_rdma_lat.stdout | default('') | trim)
+               ~ ' us  (perftest ib_write_lat, t_typical and t_99%)',
+            '  TCP mgmt throughput   ' ~ (bench_tcp.stdout | default('') | trim)
+               ~ '  (iperf3, Gbit/s and retransmits)',
+            '  NCCL all-reduce       ' ~ (bench_nccl_busbw | default('n/a', true))
+               ~ ' GB/s busbw  (nccl-tests all_reduce_perf, 8B-8GiB sweep average)',
+          ] | join('\n') }}
+      when: bench_is_controller | bool
+
+    - name: Note when the cross-node benchmarks were skipped
+      ansible.builtin.debug:
+        msg: >-
+          Only {{ ansible_play_hosts | join(', ') }} took part, so the fabric
+          and collective benchmarks did NOT run - those need both nodes. Run
+          `make bench` with no --limit before trusting the cluster for
+          distributed work.
+      when:
+        - inventory_hostname == ansible_play_hosts | first
+        - (ansible_play_hosts | length) < 2
+
+    # A missing number is not a passing benchmark. Without this the assertions
+    # below simply skip and the run ends green having measured nothing, which
+    # is the single most dangerous way for a test suite to behave.
+    - name: Fail if the NCCL benchmark produced no result
+      ansible.builtin.fail:
+        msg: >-
+          all_reduce_perf produced no bus-bandwidth figure, so the collective
+          benchmark measured NOTHING - this is not a pass. Usual causes: the
+          tooling is not installed (`make optional TAGS=bench`), or mpirun
+          could not reach {{ bench_peer }}. Full output is in
+          {{ bench_fio_dir }}/nccl-tests.out on {{ inventory_hostname }}.
+      when:
+        - bench_is_controller | bool
+        - bench_nccl_busbw | default('', true) is not match('^[0-9]+(\.[0-9]+)?$')
+
+    # =====================================================================
+    # Assert
+    # =====================================================================
+    - name: Assert the NCCL collective returned correct data
+      ansible.builtin.assert:
+        that: (bench_nccl_wrong | int) == 0
+        fail_msg: >-
+          nccl-tests reported {{ bench_nccl_wrong }} size(s) with a non-zero
+          #wrong column - the all-reduce returned WRONG DATA, which is a
+          correctness failure and not a performance one. Stop and investigate
+          before running any distributed job.
+      # Numeric, not merely non-empty: a run that never produced a summary line
+      # yields "na", and `| float` on that is 0.0 - which would report a
+      # cluster-wide bandwidth failure when the real fault was that the
+      # benchmark did not run at all. Those need different fixes.
+      when:
+        - bench_is_controller | bool
+        - bench_nccl_busbw | default('', true) is match('^[0-9]+(\.[0-9]+)?$')
+
+    - name: Assert the interconnect is not silently degraded
+      ansible.builtin.assert:
+        that: (bench_nccl_busbw | float) >= (bench_nccl_busbw_floor_gbytes | float)
+        fail_msg: >-
+          NCCL bus bandwidth is {{ bench_nccl_busbw }} GB/s, under the
+          {{ bench_nccl_busbw_floor_gbytes }} GB/s floor.
+          {{ bench_provenance_floor }}
+          Check whether the collective fell back to TCP - re-run with
+          NCCL_DEBUG=INFO and look for NET/IB versus NET/Socket. See
+          docs/runbooks/connect-cluster.md#reading-the-result
+      # Numeric, not merely non-empty: a run that never produced a summary line
+      # yields "na", and `| float` on that is 0.0 - which would report a
+      # cluster-wide bandwidth failure when the real fault was that the
+      # benchmark did not run at all. Those need different fixes.
+      when:
+        - bench_is_controller | bool
+        - bench_nccl_busbw | default('', true) is match('^[0-9]+(\.[0-9]+)?$')
+
+    - name: Assert every interconnect partition carries traffic
+      ansible.builtin.assert:
+        that: (item.stdout | default(0) | float) >= (bench_rdma_bw_floor_gbits | float)
+        fail_msg: >-
+          Partition {{ item.item }}.x measured
+          {{ item.stdout | default('nothing', true) }} Gb/s, under the
+          {{ bench_rdma_bw_floor_gbits }} Gb/s floor.
+          {{ bench_provenance_floor }}
+          One slow partition halves the fabric and nothing else reports it.
+          See docs/runbooks/connect-cluster.md
+      loop: "{{ bench_rdma_bw.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item | default('') }}.x"
+      when:
+        - bench_is_controller | bool
+        - item.stdout | default('') | trim | length > 0
+
+    # =====================================================================
+    # Keep the numbers. A benchmark you cannot compare against last month is
+    # a number, not a measurement.
+    # =====================================================================
+    - name: Record the results
+      ansible.builtin.copy:
+        dest: "{{ bench_fio_dir }}/results-{{ ansible_date_time.iso8601_basic_short }}.json"
+        mode: "0644"
+        content: |
+          {{ {
+               'timestamp': ansible_date_time.iso8601,
+               'host': inventory_hostname,
+               'peer': bench_peer if bench_is_controller | bool else none,
+               'nccl_tests_version': bench_nccl_tests_version | default('not installed'),
+               'gauges': node_checks.results | selectattr('item.kind', 'eq', 'gauge')
+                         | map(attribute='stdout') | map('trim') | list,
+               'gauge_names': benchmark_checks | selectattr('kind', 'eq', 'gauge')
+                              | map(attribute='name') | list,
+               'rdma_bw_gbits': bench_rdma_bw.results | default([]) | map(attribute='stdout')
+                                | map('trim') | list,
+               'rdma_lat_usec': bench_rdma_lat.stdout | default('') | trim,
+               'tcp_mgmt': bench_tcp.stdout | default('') | trim,
+               'nccl_busbw_gbytes': bench_nccl_busbw | default('', true),
+             } | to_nice_json }}
+
+    - name: Say where the results went
+      ansible.builtin.debug:
+        msg: >-
+          Results written to
+          {{ bench_fio_dir }}/results-{{ ansible_date_time.iso8601_basic_short }}.json
+          on {{ inventory_hostname }}. Diff successive files to spot drift -
+          see docs/runbooks/benchmark.md#recording-a-baseline
+
+    - name: Remove the fio scratch files
+      ansible.builtin.shell:
+        cmd: "rm -f {{ bench_fio_dir }}/seqread.* {{ bench_fio_dir }}/randread.*"
+        executable: /bin/bash
+      changed_when: false

@@ -8,10 +8,28 @@
 #    dgx-spark-mlnx-hotplug brings it up on link detect. On an uncabled
 #    machine there is no mlx5 device and nothing to address.
 #
-# 2. Each QSFP port presents TWO logical interfaces (two PCIe x4 partitions,
-#    ~100 Gb/s each), which must be on DIFFERENT subnets. Configuring only
-#    one caps the link at half its bandwidth, silently. Addresses follow
-#    NVIDIA's connect-two-sparks playbook.
+# 2. ONE cabled QSFP port presents TWO logical interfaces, on two PCIe x4
+#    partitions, which must be on DIFFERENT subnets. Configuring only one caps
+#    the link at half its bandwidth, silently. Addresses follow NVIDIA's
+#    connect-two-sparks playbook.
+#
+#    MEASURED, because this is easy to misread as two cabled ports: all four
+#    netdevs share one phys_switch_id (94cedc00039fada0 - a single ConnectX-7
+#    ASIC), and enp1s0f0np0 / enP2p1s0f0np0 both report phys_port_name=p0, ie
+#    the SAME physical cage. They differ only in PCIe root complex
+#    (0000:01:00.0 and 0002:01:00.0). One Amphenol NJAAKK-AU06 1 m DAC is
+#    plugged into p0; both nodes read the same module serial off it, which is
+#    how you know it is one cable and not two. Port p1 is uncabled and its two
+#    netdevs (enp1s0f1np1, enP2p1s0f1np1) are correctly DOWN.
+#
+#    The ceiling is the CABLE, not the bus: two Gen5 x4 partitions total
+#    ~252 Gb/s of PCIe behind a single 200 Gb/s port, so the wire binds first.
+#
+# 3. The link layer is ETHERNET and the fabric is RoCE v2. There is no
+#    InfiniBand subnet, no subnet manager and no LIDs, so ibhosts, iblinkinfo
+#    and ibnetdiscover all fail with "can't open UMAD port" on a perfectly
+#    healthy cluster. That indistinguishability - a working fabric and a
+#    missing one looking identical - is why gx10-interconnect exists below.
 #
 # Addressing uses nmcli, NOT netplan. This host is NetworkManager-rendered,
 # and `netplan apply` unconditionally runs `nmcli device disconnect` on every
@@ -20,6 +38,12 @@
 # over SSH - that severs the connection the play is running over.
 # ===========================================================================
 
+# infiniband-diags is installed for ibstat / ibstatus / ibdev2netdev, which do
+# work here. Its FABRIC tools (ibhosts, ibnodes, iblinkinfo, ibnetdiscover) do
+# not and cannot: they send InfiniBand SMPs to a subnet manager over /dev/
+# infiniband/umad*, and a RoCE port has no SM to answer. Their failure is not a
+# symptom - see fact 3 above. opensm is deliberately NOT installed; a subnet
+# manager on an Ethernet link layer manages nothing.
 - name: Install RDMA and InfiniBand tooling
   ansible.builtin.apt:
     name:
@@ -186,8 +210,8 @@
   ansible.builtin.debug:
     msg: >-
       Only {{ cluster_ifaces | length }} ConnectX interface(s) have carrier:
-      {{ cluster_ifaces | join(', ') }}. Each QSFP port presents two ~100 Gb/s
-      partitions and both are needed for the full 200 Gb/s. Check the cable.
+      {{ cluster_ifaces | join(', ') }}. The cabled QSFP port presents two PCIe
+      partitions and both are needed for full bandwidth. Check the cable.
   when:
     - cluster_link_present | bool
     - cluster_ifaces | length < 2
@@ -208,6 +232,10 @@
     autoconnect: true
     state: present
   become: true
+  # NM does not push a profile change onto an already-active connection, so an
+  # MTU edit lands in the profile and not on the wire without this. See the
+  # handler for the measurement.
+  notify: Reactivate the interconnect partitions
   loop: "{{ cluster_ifaces[: cluster_subnets | length] }}"
   loop_control:
     index_var: idx
@@ -241,6 +269,49 @@
     dest: "{{ primary_home }}/cluster/allreduce_test.py"
     owner: "{{ primary_user }}"
     group: "{{ primary_user }}"
+    mode: "0755"
+  become: true
+
+# --- Making the fabric legible ---------------------------------------------
+#
+# The whole reason this exists: on RoCE, every InfiniBand-native way of asking
+# "are the boxes connected?" returns nothing, and nothing reads as "no". A
+# reader who trusts ibhosts concludes the cluster is unlinked while 21.6 GB/s
+# of NCCL traffic is crossing it. gx10-interconnect answers the question about
+# the fabric that is actually present, and exits non-zero when it is not.
+#
+# Installed unconditionally, including on an uncabled node - that is exactly
+# when someone needs it to say "no NIC yet, this is expected" rather than
+# leaving them to interpret an empty ibv_devices.
+- name: Ensure the cluster tool config directory exists
+  ansible.builtin.file:
+    path: /etc/gx10
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+- name: Write the interconnect peer list
+  ansible.builtin.template:
+    src: interconnect.peers.j2
+    dest: /etc/gx10/interconnect.peers
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+
+# /usr/local/bin, not ~/.local/bin where gx10-status lives. The deciding case
+# is `ssh <node> gx10-interconnect`: that is a NON-login shell, which never
+# sources the profile snippet that puts ~/.local/bin on PATH. A diagnostic
+# whose job is to be found by whatever is asking - a script, an agent, a
+# one-shot SSH - has to be somewhere the default PATH already looks.
+- name: Install the interconnect diagnostic
+  ansible.builtin.copy:
+    src: gx10-interconnect
+    dest: /usr/local/bin/gx10-interconnect
+    owner: root
+    group: root
     mode: "0755"
   become: true
 

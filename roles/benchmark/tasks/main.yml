@@ -1,0 +1,168 @@
+---
+# Installs the benchmark tooling. Running the benchmarks is benchmark.yml's
+# job - this role only puts the official binaries on the box.
+#
+# Opt-in, behind optional.yml's `never` tag, for the same reason ray and slurm
+# are: none of it is needed to USE the cluster, and DCGM plus a source build of
+# nccl-tests is not something to install on a node that never asked for it.
+
+# ---------------------------------------------------------------------------
+# From apt. perftest, iperf3 and ibverbs-utils are listed even though
+# roles/cluster already installs them: this role must be able to stand up the
+# tooling on its own, and `state: present` on something already present is a
+# no-op that documents the dependency.
+# ---------------------------------------------------------------------------
+- name: Install the packaged benchmark tools
+  ansible.builtin.apt:
+    name:
+      # linux-rdma/perftest. ib_write_bw and ib_write_lat are THE verbs-level
+      # fabric benchmarks - what you run before blaming a collective.
+      - perftest
+      # ibstat, ibv_devinfo, ibv_devices. Reads what the HCA reports.
+      - ibverbs-utils
+      # esnet/iperf3. TCP throughput on the management path.
+      - iperf3
+    state: present
+  become: true
+
+- name: Install fio
+  ansible.builtin.apt:
+    name: fio
+    state: present
+  become: true
+  when: bench_install_fio | bool
+
+# OpenMPI from Ubuntu, not NVIDIA HPC-X. HPC-X is faster on Mellanox fabrics
+# and is the right answer for a production HPC stack, but it is a large
+# out-of-band tarball; Ubuntu's OpenMPI is signed, apt-managed, and builds
+# against the same UCX. Revisit if you start running real MPI codes.
+- name: Install OpenMPI
+  ansible.builtin.apt:
+    name:
+      - openmpi-bin
+      - libopenmpi-dev
+    state: present
+  become: true
+  when: bench_install_mpi | bool
+
+# NVIDIA Data Center GPU Manager. `dcgmi diag` is the vendor's own readiness
+# diagnostic - ECC, PCIe, SM stress, thermals - and reports pass/fail per test
+# rather than a number we would have to interpret.
+#
+# No new apt source: DGX OS already trusts the repo this comes from. The
+# -cuda13 build is the one that matches the held driver stack; installing the
+# cuda12 flavour next to CUDA 13 is how you get a diag that will not start.
+- name: Install NVIDIA DCGM
+  ansible.builtin.apt:
+    name: datacenter-gpu-manager-4-cuda13
+    state: present
+  become: true
+  when: bench_install_dcgm | bool
+
+# The service is deliberately NOT enabled. nv-hostengine is a resident daemon
+# and memory here is model capacity - the same call roles/observability makes.
+# benchmark.yml starts it for the length of a diag and stops it again.
+- name: Make sure the DCGM host engine is not left running as a service
+  ansible.builtin.systemd:
+    name: nvidia-dcgm.service
+    enabled: false
+    state: stopped
+  become: true
+  when: bench_install_dcgm | bool
+  failed_when: false
+
+# ---------------------------------------------------------------------------
+# nccl-tests, built from the pinned tag.
+#
+# This is the one thing here that is not a package, and it is worth it:
+# all_reduce_perf is the reference implementation of the collective benchmark
+# every NCCL bug report and every vendor number is quoted in. Its algbw/busbw
+# are the metrics, not our approximation of them.
+# ---------------------------------------------------------------------------
+- name: Clone nccl-tests
+  ansible.builtin.git:
+    repo: https://github.com/NVIDIA/nccl-tests.git
+    dest: "{{ bench_src_dir }}"
+    version: "{{ bench_nccl_tests_version }}"
+    depth: 1
+  become_user: "{{ primary_user }}"
+  become: true
+  when: bench_install_nccl_tests | bool
+
+# Ubuntu puts OpenMPI's headers and libs under a multiarch subdirectory rather
+# than a self-contained prefix, and nccl-tests wants MPI_HOME to be a directory
+# with include/ and lib/ in it. Discovered rather than hardcoded, because
+# getting it wrong does not fail the build - the Makefile silently drops MPI
+# support and you get binaries that cannot run multi-node.
+- name: Locate the OpenMPI prefix
+  ansible.builtin.shell:
+    cmd: "set -o pipefail; dirname \"$(dirname \"$(find /usr/lib -name mpi.h -path '*openmpi*' | head -1)\")\""
+    executable: /bin/bash
+  register: bench_mpi_home
+  changed_when: false
+  when:
+    - bench_install_nccl_tests | bool
+    - bench_install_mpi | bool
+
+- name: Assert the OpenMPI headers were found
+  ansible.builtin.assert:
+    that: bench_mpi_home.stdout | default('') | length > 1
+    fail_msg: >-
+      Could not find mpi.h under /usr/lib. nccl-tests would build without MPI
+      and its binaries would then be single-node only. Install libopenmpi-dev.
+  when:
+    - bench_install_nccl_tests | bool
+    - bench_install_mpi | bool
+
+# MPI=1 is what makes the binaries multi-node; without it all_reduce_perf can
+# only see the GPUs in one box, which on a two-node cluster measures nothing
+# you came here to measure.
+- name: Build nccl-tests
+  ansible.builtin.command:
+    argv:
+      - make
+      - "-j{{ ansible_facts['processor_vcpus'] | default(20) }}"
+      - MPI=1
+      - "MPI_HOME={{ bench_mpi_home.stdout | trim }}"
+      - "CUDA_HOME={{ cuda_home }}"
+      # One argv element, so the space inside never reaches a shell to be
+      # re-split - which is exactly the bug the quotes would paper over.
+      - "NVCC_GENCODE=-gencode=arch=compute_{{ bench_cuda_arch }},code=sm_{{ bench_cuda_arch }}"
+    chdir: "{{ bench_src_dir }}"
+    creates: "{{ bench_src_dir }}/build/all_reduce_perf"
+  become_user: "{{ primary_user }}"
+  become: true
+  environment:
+    PATH: "{{ cuda_home }}/bin:{{ ansible_facts['env']['PATH'] }}"
+  when:
+    - bench_install_nccl_tests | bool
+    - bench_install_mpi | bool
+  async: 1800
+  poll: 30
+
+- name: Link the nccl-tests binaries onto PATH
+  ansible.builtin.file:
+    src: "{{ bench_src_dir }}/build/{{ item }}"
+    dest: "{{ primary_home }}/.local/bin/{{ item }}"
+    state: link
+    force: true
+  become_user: "{{ primary_user }}"
+  become: true
+  loop:
+    - all_reduce_perf
+    - all_gather_perf
+    - reduce_scatter_perf
+    - alltoall_perf
+  when:
+    - bench_install_nccl_tests | bool
+    - bench_install_mpi | bool
+
+- name: Report the installed tooling
+  ansible.builtin.debug:
+    msg: >-
+      Benchmark tooling ready on {{ inventory_hostname }}:
+      perftest, iperf3{{ ', fio' if bench_install_fio | bool else '' }}{{
+      ', OpenMPI' if bench_install_mpi | bool else '' }}{{
+      ', DCGM' if bench_install_dcgm | bool else '' }}{{
+      ', nccl-tests ' ~ bench_nccl_tests_version if bench_install_nccl_tests | bool else '' }}.
+      Run them with `make bench`.

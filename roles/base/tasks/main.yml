@@ -368,13 +368,35 @@
     # Stock is ~45 MB of reserve on a 121 GiB machine, which is far too little
     # headroom to service allocations while reclaiming.
     - { key: vm.min_free_kbytes, value: "1048576" }
-    # Socket buffer ceilings for large TCP transfers (checkpoint copies, model
-    # downloads). NOT for NCCL - that runs over RDMA and bypasses the socket
-    # layer entirely. Deliberately only the ceilings: overriding tcp_rmem /
-    # tcp_wmem autotuning works against DGX's fq_codel bufferbloat defaults.
-    - { key: net.core.rmem_max, value: "134217728" }
-    - { key: net.core.wmem_max, value: "134217728" }
     - { key: fs.inotify.max_user_watches, value: "524288" }
+  become: true
+
+# net.core.rmem_max and net.core.wmem_max used to be set here, to 134217728.
+# They are removed rather than merely deleted from the loop above, because a
+# deleted loop entry leaves the line sitting in 90-gx10.conf on every box that
+# was ever provisioned - still claiming a value that nothing applies.
+#
+# nordvpnd sets both to 7500000 itself, every time it starts. VERIFIED by
+# restarting the daemon and watching the live value flip back within seconds.
+# It is Type=simple with Restart=always, so no ordering reliably wins:
+# ExecStartPost fires when the daemon forks, well before it has finished
+# initialising and set these. The old value was therefore never actually in
+# effect on a booted node - and, being written to the file all the same, it
+# made `make idempotence` fail permanently with nothing to point at.
+#
+# Conceding costs little. These are ceilings for large TCP transfers
+# (checkpoint copies, model downloads) and NOT for NCCL, which runs over RDMA
+# and bypasses the socket layer entirely; nordvpn's 7500000 is already ~35x the
+# 212992 kernel default. If you ever drop the VPN, revisit this.
+- name: Drop the socket buffer ceilings that nordvpnd overrides
+  ansible.posix.sysctl:
+    name: "{{ item }}"
+    sysctl_file: /etc/sysctl.d/90-gx10.conf
+    reload: true
+    state: absent
+  loop:
+    - net.core.rmem_max
+    - net.core.wmem_max
   become: true
 
 # memlock is the one limit that genuinely matters here: RDMA pins pages for the

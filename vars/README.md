@@ -5,6 +5,7 @@ Playbook-scoped data — loaded explicitly with `vars_files`, not automatically.
 | File | Loaded by | Contains |
 |---|---|---|
 | `verify_checks.yml` | `verify.yml` | The health checks `make verify` runs |
+| `benchmark_checks.yml` | `benchmark.yml` | The single-node benchmark gates and gauges `make bench` runs |
 
 ## Why not `group_vars/`
 
@@ -40,6 +41,25 @@ A list of checks. Each entry:
 
 `tests/render.yml` asserts every entry has `name`, `cmd` and `hint`, so a
 malformed check fails `make check` rather than failing at 2am.
+
+## benchmark_checks.yml
+
+Same shape, two differences. Each entry declares a `kind`:
+
+- **`gate`** — the command exits 0 or non-zero. Asserts setup, not speed.
+- **`gauge`** — the command prints exactly one number on stdout. Always
+  reported; asserted only if the entry carries a `floor`.
+
+And `provenance` is **mandatory on every entry**, saying where the threshold
+came from — a hardware register, a vendor tool, or a documented failure mode.
+Where no defensible source exists the entry says `RECORD ONLY` and takes the
+measurement without asserting on it. A threshold with no stated basis is
+indistinguishable from one invented to make the suite pass, so it is a bug.
+
+Cross-node benchmarks are not here, for the same reason the drift check is not:
+`ib_write_bw` and `iperf3` are client/server and `all_reduce_perf` is
+MPI-launched, none of which is one command on one node. Those live in
+`benchmark.yml`.
 
 ## What does not go here
 

@@ -1,0 +1,274 @@
+#!/usr/bin/env bash
+# Managed by gx10-cluster ansible (roles/cluster). Local edits overwritten.
+#
+# Answers one question without ambiguity: are the two GX10s connected, and over
+# what fabric?
+#
+# It exists because every InfiniBand-native way of asking that question returns
+# NOTHING on this hardware, and "nothing" is indistinguishable from "the boxes
+# are not connected". The ConnectX-7 here runs an ETHERNET link layer and
+# carries RDMA as RoCE v2, so:
+#
+#   ibhosts, ibnodes, iblinkinfo, ibnetdiscover
+#       all fail with "can't open UMAD port". They speak InfiniBand SMP/MAD to
+#       a subnet manager. There is no subnet manager because RoCE has none.
+#   base lid / sm lid
+#       always 0x0. LIDs are handed out by a subnet manager; see above.
+#   /sys/class/infiniband/mlx5_*
+#       does not exist. The devices are named roce* on this platform.
+#   opensm
+#       is not installed, and installing it would be cargo cult. A subnet
+#       manager on an Ethernet link layer manages nothing.
+#
+# Every one of those is CORRECT behaviour on a healthy cluster. This tool
+# reports the fabric that is actually there instead of the one that is not.
+#
+#   gx10-interconnect          report - passive, generates no traffic
+#   gx10-interconnect --peer   also prove the RDMA path with a real round trip
+#
+# Exit status is meant to be gated on:
+#   0  healthy    - every cabled link ACTIVE, every peer address reachable
+#   1  degraded   - something is wrong, and the report says which line
+#   2  no interconnect hardware present (uncabled node - legitimately healthy)
+set -euo pipefail
+
+# Written by the same role, so the tool needs no inventory of its own. Absent
+# on a node provisioned before this file existed; peer checks then skip rather
+# than the whole report failing.
+PEERS_FILE=${GX10_PEERS_FILE:-/etc/gx10/interconnect.peers}
+
+do_peer=false
+[[ "${1:-}" == "--peer" ]] && do_peer=true
+
+b()    { printf '\033[1m%s\033[0m\n' "$1"; }
+good() { printf '\033[32m%s\033[0m\n' "$1"; }
+warn() { printf '\033[33m%s\033[0m\n' "$1"; }
+bad()  { printf '\033[31m%s\033[0m\n' "$1"; }
+
+status=0
+
+# ---------------------------------------------------------------------------
+# Is there a NIC at all?
+# ---------------------------------------------------------------------------
+shopt -s nullglob
+devs=(/sys/class/infiniband/*)
+shopt -u nullglob
+
+if (( ${#devs[@]} == 0 )); then
+    b "Interconnect"
+    warn "  No RDMA devices on this node."
+    printf '%s\n' \
+        "  On GX10 the ConnectX-7 reaches the PCI bus by hotplug only once a QSFP" \
+        "  cable links two boxes (dgx-spark-mlnx-hotplug). An uncabled node showing" \
+        "  nothing here is healthy, not faulty." \
+        "  See docs/runbooks/connect-cluster.md"
+    exit 2
+fi
+
+# ---------------------------------------------------------------------------
+# Fabric type - the headline, because it is the thing people get wrong.
+# ---------------------------------------------------------------------------
+layers=$(cat /sys/class/infiniband/*/ports/1/link_layer 2>/dev/null | sort -u | paste -sd'/' -)
+hca=$(cat "${devs[0]}/hca_type" 2>/dev/null || echo unknown)
+fw=$(cat "${devs[0]}/fw_ver" 2>/dev/null || echo unknown)
+
+b "Fabric"
+case "$layers" in
+    Ethernet)
+        good "  RoCE v2 over Ethernet - there is NO InfiniBand subnet here, by design."
+        printf '%s\n' \
+            "  ibhosts / iblinkinfo / ibnetdiscover will fail with \"can't open UMAD" \
+            "  port\", and lid/sm_lid are 0. That is correct: those need a subnet" \
+            "  manager, which RoCE does not have. Use this tool, ibstat, or rdma link."
+        ;;
+    InfiniBand)
+        warn "  InfiniBand link layer - NOT what this repo provisions for."
+        printf '%s\n' \
+            "  roles/cluster addresses these ports as IP subnets, which assumes an" \
+            "  Ethernet link layer. A card flipped to IB mode needs a subnet manager" \
+            "  and different addressing. See docs/runbooks/connect-cluster.md"
+        status=1
+        ;;
+    *)
+        warn "  Mixed link layers: $layers"
+        status=1
+        ;;
+esac
+printf '  %s, firmware %s\n' "$hca" "$fw"
+
+# ---------------------------------------------------------------------------
+# Per-port detail.
+#
+# The PCIe ceiling is printed because a single partition cannot carry the
+# port: each ConnectX-7 function sits on a Gen5 x4 link worth ~126 Gb/s, so
+# ONE partition addressed leaves most of a 200 Gb/s cable unreachable. Both
+# partitions together are ~252 Gb/s of bus behind a 200 Gb/s wire, which is
+# why the cable - not PCIe - is the ceiling once they are both up.
+# ---------------------------------------------------------------------------
+pcie_ceiling() {  # $1 = pci address -> "5.0 x4, ~126 Gb/s"
+    local p=$1 spd wid gts
+    spd=$(cat "/sys/bus/pci/devices/$p/current_link_speed" 2>/dev/null) || return 0
+    wid=$(cat "/sys/bus/pci/devices/$p/current_link_width" 2>/dev/null) || return 0
+    gts=${spd%% *}
+    # 8 GT/s and faster use 128b/130b; Gen1/Gen2 use 8b/10b. Getting this wrong
+    # overstates Gen5 by 2.5%, which is enough to make a healthy link look
+    # short of a round number someone then goes hunting for.
+    awk -v g="$gts" -v w="$wid" 'BEGIN {
+        gen = (g >= 64) ? "6.0" : (g >= 32) ? "5.0" : (g >= 16) ? "4.0" :
+              (g >= 8) ? "3.0" : (g >= 5) ? "2.0" : "1.0"
+        enc = (g >= 8) ? 128/130 : 8/10
+        printf "PCIe %s x%d, ~%.0f Gb/s ceiling", gen, w, g * w * enc
+    }'
+}
+
+echo
+b "Links"
+active_count=0
+declare -A subnet_seen=()
+
+for d in "${devs[@]}"; do
+    dev=$(basename "$d")
+    port="$d/ports/1"
+    state=$(cat "$port/state" 2>/dev/null || echo "?"); state=${state#*: }
+    phys=$(cat "$port/phys_state" 2>/dev/null || echo "?"); phys=${phys#*: }
+    rate=$(cat "$port/rate" 2>/dev/null || echo "?"); rate=${rate%% (*}
+
+    netdev=""
+    if [[ -d "$d/device/net" ]]; then
+        for n in "$d/device/net"/*; do netdev=$(basename "$n"); break; done
+    fi
+
+    pci=$(basename "$(readlink -f "$d/device")" 2>/dev/null || echo "")
+
+    if [[ "$state" != "ACTIVE" ]]; then
+        # A DOWN partition is only news if a cable is in it. This box has a
+        # SECOND physical QSFP port (phys_port_name=p1) that is normally
+        # uncabled, and it contributes two more DOWN netdevs - reporting those
+        # as faults would cry wolf on every run.
+        carrier=$(cat "/sys/class/net/$netdev/carrier" 2>/dev/null || echo 0)
+        if [[ "$carrier" == "1" ]]; then
+            bad "  $dev  $netdev  $state/$phys - CABLE PRESENT BUT LINK NOT ACTIVE"
+            status=1
+        else
+            printf '  %-14s %-16s %s (no cable - expected)\n' "$dev" "$netdev" "$state"
+        fi
+        continue
+    fi
+
+    active_count=$((active_count + 1))
+    addr=$(ip -o -4 addr show dev "$netdev" 2>/dev/null | awk '{print $4; exit}')
+    mtu=$(cat "/sys/class/net/$netdev/mtu" 2>/dev/null || echo "?")
+    # The RoCE MTU is quantised to powers of two at or below the netdev MTU, so
+    # a 1500-byte netdev yields 1024 on the wire, not 1500. Printing both stops
+    # the gap being read as a fault.
+    # Whitespace fields, not -F': *': the value is tab-indented and carries an
+    # enum suffix ("active_mtu:\t\t1024 (3)"), so a colon split keeps both.
+    romtu=$(ibv_devinfo -d "$dev" 2>/dev/null | awk '/active_mtu/ {print $2; exit}')
+
+    printf '  %-14s %-16s ACTIVE  %s\n' "$dev" "$netdev" "$rate"
+    printf '  %-14s %-16s addr %s  mtu %s (RoCE %s)\n' "" "" "${addr:-none}" "$mtu" "${romtu:-?}"
+    [[ -n "$pci" ]] && printf '  %-14s %-16s %s\n' "" "" "$(pcie_ceiling "$pci")"
+
+    if [[ -z "$addr" ]]; then
+        bad "  $dev is ACTIVE but has no IPv4 address - run: make apply TAGS=cluster"
+        status=1
+    else
+        subnet_seen[${addr%.*}]=1
+    fi
+done
+
+# Both partitions on ONE subnet is the failure this catches: it looks fine in
+# every per-partition view above, and silently halves the bandwidth because the
+# routing table sends both flows out of the same interface.
+if (( active_count >= 2 && ${#subnet_seen[@]} < 2 )); then
+    bad "  $active_count active partitions share ${#subnet_seen[@]} subnet - half the bandwidth is unreachable."
+    status=1
+elif (( active_count == 1 )); then
+    warn "  Only one partition is active. A cabled QSFP port presents two, and one"
+    warn "  x4 partition cannot carry the port on its own (~126 Gb/s of ~200)."
+elif (( active_count == 0 )); then
+    bad "  No partition is ACTIVE - the card is present but nothing is connected."
+    status=1
+fi
+
+# ---------------------------------------------------------------------------
+# Peer reachability.
+# ---------------------------------------------------------------------------
+local_iface_for() {  # $1 = peer address -> local netdev on the same /24
+    ip -o -4 addr show | awk -v p="${1%.*}." 'index($4, p) == 1 {print $2; exit}'
+}
+
+rdma_dev_for() {  # $1 = netdev -> its RDMA device
+    local d
+    for d in /sys/class/infiniband/*; do
+        [[ -e "$d/device/net/$1" ]] && { basename "$d"; return 0; }
+    done
+    return 0
+}
+
+if [[ -r "$PEERS_FILE" ]]; then
+    echo
+    b "Peers"
+    probe_port=18515
+    while read -r pname paddr _; do
+        [[ -z "${pname:-}" || "$pname" == \#* ]] && continue
+        iface=$(local_iface_for "$paddr")
+        label=$(printf '%-10s %-16s' "$pname" "$paddr")
+
+        # No local interface on that subnet means the link carrying it is down.
+        # The Links section above is the authority on that and has already said
+        # so; failing again here would report one fault as two.
+        if [[ -z "$iface" ]]; then
+            printf '  %s skipped - no local link on this subnet\n' "$label"
+            continue
+        fi
+
+        if ! ping -c1 -W2 "$paddr" >/dev/null 2>&1; then
+            bad "  $label unreachable on ${iface:-no local iface for this subnet}"
+            status=1
+            continue
+        fi
+
+        if ! $do_peer; then
+            printf '  %s ping ok via %s\n' "$label" "${iface:-?}"
+            continue
+        fi
+
+        # The real proof. IP reachability does NOT imply the RDMA path works -
+        # RoCE v2 rides UDP 4791 and a firewall can pass ICMP while dropping it,
+        # which presents as a collective that hangs rather than one that errors.
+        rdev=$(rdma_dev_for "$iface")
+        probe_port=$((probe_port + 1))
+        # No -d on the server: rdma_cm picks the device from the address the
+        # client dials, so this does not assume the peer names its devices the
+        # same way this node does.
+        ssh -o BatchMode=yes -o ConnectTimeout=5 -f "$pname" \
+            "nohup timeout 20 ib_write_lat -R -p $probe_port -n 1000 >/dev/null 2>&1 &" \
+            >/dev/null 2>&1 || true
+        sleep 2
+        lat=$(timeout 25 ib_write_lat ${rdev:+-d "$rdev"} -R -p "$probe_port" -n 1000 "$paddr" 2>/dev/null \
+              | awk '$1 == 2 && NF >= 8 {print $5; exit}')
+        if [[ -n "${lat:-}" ]]; then
+            good "  $label RDMA ok via ${iface:-?} - ${lat} us write latency"
+        else
+            bad "  $label pings, but the RDMA round trip FAILED via ${iface:-?}"
+            printf '%s\n' \
+                "    ICMP passes and RoCE does not. Check ufw allows the interconnect" \
+                "    subnets (RoCE v2 is UDP 4791), and that perftest is installed on" \
+                "    both ends. See docs/runbooks/connect-cluster.md"
+            status=1
+        fi
+    done < "$PEERS_FILE"
+fi
+
+# ---------------------------------------------------------------------------
+echo
+if (( status == 0 )); then
+    good "Interconnect healthy."
+else
+    bad "Interconnect DEGRADED - see the lines above."
+fi
+printf 'NCCL calls this path NET/IB even though it is RoCE; that log line is not\n'
+printf 'evidence of an InfiniBand fabric. Confirm with:\n'
+printf '  NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,NET torchrun ... 2>&1 | grep "NET/IB"\n'
+exit $status

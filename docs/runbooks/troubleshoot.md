@@ -101,6 +101,30 @@ role writes beside it.
 
 ## Interconnect
 
+### <a name="no-infiniband-visible"></a>The InfiniBand tools show nothing, so the boxes look unconnected
+
+**They are almost certainly connected.** Check with the tool that reports the
+fabric actually present, rather than the one that is not:
+
+```bash
+gx10-interconnect          # exit 0 healthy, 1 degraded, 2 no NIC
+gx10-interconnect --peer   # also proves the RDMA path with a round trip
+```
+
+This fabric is **RoCE v2 on an Ethernet link layer**, so `ibhosts`, `ibnodes`,
+`iblinkinfo` and `ibnetdiscover` fail with `can't open UMAD port`, `base lid`
+and `sm lid` are `0x0`, the devices are named `roce*` rather than `mlx5_*`, and
+`opensm` is absent. Every one of those is correct on a healthy cluster — there
+is no subnet manager because RoCE does not have one. Do **not** install
+`opensm` or try to flip the card into IB mode.
+
+Conversely, NCCL logging `NET/IB` and `Using network IB` is *not* evidence of an
+InfiniBand fabric — that is its name for the ibverbs transport, which carries
+RoCE too. Seeing it means the fast path is in use, which is the good outcome.
+
+→ [connect-cluster: there is no InfiniBand here](connect-cluster.md#no-infiniband)
+· [why](../decisions.md#roce-not-ib)
+
 ### No RDMA devices
 
 `ibv_devices` empty, no `mlx5` interface.
@@ -180,6 +204,29 @@ does **not** catch this:
 ```bash
 make smoke      # exercises the real config path
 ```
+
+### <a name="optional-installs-nothing"></a>`make optional TAGS=…` reports success and installs nothing
+
+The recap says `ok=1 changed=0` and the role's tasks never appear — just
+`included: <role> for <host>`.
+
+Tags on a **dynamic** include select the include, not the tasks inside it. The
+role's own tasks carry no tag, so the include matches, runs, and everything it
+pulled in is then filtered out. The fix is `apply:`, which pushes the tag down:
+
+```yaml
+- name: Ray cluster
+  ansible.builtin.include_role:
+    name: ray
+    apply:
+      tags: [ray]        # <- without this the role runs zero tasks
+  tags: [ray, never]
+```
+
+Do not try to confirm it with `--list-tasks`: that does not expand dynamic
+includes, so it prints the include and stops, looking identical either way.
+The only proof is a run with a non-zero task count. `make optional-tags`
+guards it.
 
 ### A task reports `changed` on every run
 

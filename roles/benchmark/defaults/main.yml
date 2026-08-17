@@ -1,0 +1,50 @@
+---
+# Benchmark tooling. Every entry here is an OFFICIAL upstream implementation of
+# a benchmark the HPC industry already agreed on; nothing in this role measures
+# anything with code we wrote. The repo's own allreduce_test.py stays where it
+# is as a fast smoke test, but the numbers you report come from nccl-tests.
+#
+# What is deliberately NOT here, so the import surface stays small and
+# defensible:
+#
+#   OSU Micro-Benchmarks  Not packaged for Ubuntu, so it means a second source
+#                         build. perftest already measures the same fabric one
+#                         layer lower (verbs rather than MPI), and it is
+#                         already installed. Add it the day you actually run
+#                         MPI application codes - see the runbook.
+#   HPL / HPCG            NVIDIA ships these in the nvcr.io/nvidia/hpc-benchmarks
+#                         container. Rmax is the most quoted HPC number there
+#                         is, but the container's GB10/sm_121 support is not
+#                         something this repo has verified, and an unverified
+#                         FLOP number is worse than no FLOP number.
+#   nvbandwidth           Official NVIDIA, but a third source build to measure
+#                         H2D/D2H on a box whose CPU and GPU share one physical
+#                         pool, where the number means something different than
+#                         it does on a discrete GPU.
+
+# github.com/NVIDIA/nccl-tests, tag v2.19.7 (2026-08-03), the newest at the
+# time of writing. Pinned like llama_cpp_version: a benchmark you cannot
+# reproduce is an anecdote, and "whatever main was that day" is not a version.
+bench_nccl_tests_version: v2.19.7
+
+# sm_121 is the GB10. Kept separate from gpu_arch_list ("12.1") because nvcc
+# wants the digits without the dot, and deriving one from the other in Jinja
+# reads worse than stating it once here.
+bench_cuda_arch: "121"
+
+# Where the source build lands, alongside llama.cpp.
+bench_src_dir: "{{ primary_home }}/src/nccl-tests"
+
+# --- toggles ---------------------------------------------------------------
+# DCGM is NVIDIA's own GPU health and diagnostic service - `dcgmi diag` is the
+# official readiness check, not a proxy for one. The package comes from a repo
+# DGX OS already trusts, so this adds no new apt source.
+bench_install_dcgm: true
+
+# OpenMPI is not optional if you want multi-node nccl-tests: the binaries take
+# their rank from MPI, and there is no other supported launcher for them. It is
+# also the thing "ready to run HPC codes" actually means.
+bench_install_mpi: true
+
+bench_install_nccl_tests: true
+bench_install_fio: true

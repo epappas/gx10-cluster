@@ -1,0 +1,27 @@
+---
+# NetworkManager writes an MTU change into the connection PROFILE but does not
+# apply it to a connection that is already active. Measured: after setting
+# cluster_mtu, `nmcli -g 802-3-ethernet.mtu connection show gx10-cluster-0`
+# reported 9000 and the connection reported `activated`, while `ip link` still
+# said mtu 1500 and the RoCE active_mtu was still 1024. The nmcli task reports
+# `changed` either way, so without this the interconnect MTU appears to apply
+# and silently does not - the same trap as the missing daemon_reload in
+# roles/monitoring, and worse, because a half-applied MTU is asymmetric.
+#
+# Bouncing the interconnect is safe HERE specifically: ansible reaches both
+# boxes over the management NIC, never over the cable. It would not be safe
+# during a distributed job.
+- name: Reactivate the interconnect partitions
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - connection
+      - up
+      - "gx10-cluster-{{ idx }}"
+  become: true
+  loop: "{{ range(cluster_ifaces[: cluster_subnets | length] | length) | list }}"
+  loop_control:
+    loop_var: idx
+  # A reactivation is the point of the handler, not an incidental effect, so it
+  # is always a change when it runs - and it only runs when the profile moved.
+  changed_when: true

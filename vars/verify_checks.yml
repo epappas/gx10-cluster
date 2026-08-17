@@ -137,20 +137,49 @@ verify_checks:
       See docs/runbooks/run-distributed.md
 
   # --- cable-dependent: reported, never fatal ------------------------------
-  - name: "RDMA devices"
-    cmd: "ibv_devices 2>/dev/null | tail -n +3 | grep -q ."
+  #
+  # The fabric is RoCE v2 over an ETHERNET link layer, not InfiniBand. There is
+  # no subnet manager and no LID, so ibhosts / ibnodes / iblinkinfo /
+  # ibnetdiscover all fail with "can't open UMAD port" on a completely healthy
+  # cluster - they are worthless as checks here, and reading their failure as a
+  # verdict is the mistake this block is written to prevent. Ask sysfs and
+  # ibv_* instead, or run gx10-interconnect for the whole picture.
+
+    # Port STATE, not device presence. The old check was
+    # `ibv_devices | tail -n +3 | grep -q .`, which only proved the driver had
+    # enumerated something: all four ports could be DOWN with no cable in the
+    # box and it still reported green, because the CX-7 enumerates its ports
+    # whether or not any of them link. "A device exists" and "a link is up" are
+    # different questions and only the second one matters.
+  - name: "RDMA link active"
+    cmd: "grep -qxs '4: ACTIVE' /sys/class/infiniband/*/ports/1/state"
     required: false
-    hint: "No RDMA devices - expected until a QSFP cable links the two boxes. See docs/runbooks/connect-cluster.md"
+    hint: "No RDMA port is ACTIVE - expected until a QSFP cable links the two boxes. See docs/runbooks/connect-cluster.md"
+
+    # Guards an assumption the whole role rests on. roles/cluster addresses
+    # these ports as IP subnets and NCCL reaches them as RoCE, both of which
+    # require an Ethernet link layer. A card flipped to IB mode - by a firmware
+    # tool, or a replacement part shipped configured differently - would leave
+    # every other check here passing while nothing could talk.
+  - name: "RoCE fabric"
+    cmd: "grep -qxs 'Ethernet' /sys/class/infiniband/*/ports/1/link_layer
+      && ! grep -qxs 'InfiniBand' /sys/class/infiniband/*/ports/1/link_layer"
+    required: false
+    hint: "ConnectX ports are not on an Ethernet link layer; the IP addressing here assumes RoCE. See docs/runbooks/connect-cluster.md"
 
   - name: "interconnect addressed"
     cmd: "ip -br addr show | grep -qE '{{ cluster_subnets | join('|') | replace('.', '\\.') }}'"
     required: false
     hint: "Interconnect not addressed - expected until cabled. See docs/runbooks/connect-cluster.md"
 
+    # ONE cabled QSFP port, presented as two PCIe partitions that must each
+    # land on their own subnet - otherwise both flows leave by one interface.
+    # Verified as one port, not two: enp1s0f0np0 and enP2p1s0f0np0 share
+    # phys_port_name=p0 and one phys_switch_id.
   - name: "both interconnect partitions"
     cmd: "[ \"$(ip -br addr show | grep -cE '{{ cluster_subnets | join('|') | replace('.', '\\.') }}')\" -ge 2 ]"
     required: false
-    hint: "Fewer than two partitions addressed - you are capped at half the 200 Gb/s. See docs/runbooks/connect-cluster.md"
+    hint: "Fewer than two partitions addressed - you are capped at half the interconnect. See docs/runbooks/connect-cluster.md"
 
 
   # --- serving and monitoring ----------------------------------------------
@@ -167,6 +196,23 @@ verify_checks:
     cmd: "test -x $HOME/.local/bin/gx10-status"
     hint: "Status tool missing. Re-run: make apply TAGS=monitoring"
 
+    # In /usr/local/bin rather than ~/.local/bin, so that `ssh <node>
+    # gx10-interconnect` works: that is a non-login shell and never gets
+    # ~/.local/bin on PATH.
+  - name: "gx10-interconnect"
+    cmd: "test -x /usr/local/bin/gx10-interconnect"
+    hint: "Interconnect diagnostic missing. Re-run: make apply TAGS=cluster"
+
+    # Tests the TIMER, not the service. The service is oneshot and is inactive
+    # almost all the time by design - it runs for ~0.08 s and exits - so
+    # `is-active gx10-sample.service` would report failure on a perfectly
+    # healthy node. Not required, because monitoring_history is a real off
+    # switch and a node with it off is not broken.
+  - name: "history sampler"
+    cmd: "systemctl is-active --quiet gx10-sample.timer"
+    required: false
+    hint: "Nothing is recording history, so a 3am throttle will leave no trace. Re-run: make apply TAGS=monitoring"
+
     # The metrics stack is opt-in and deliberately absent by default - it costs
     # memory, which on this box is model capacity.
     #
@@ -178,7 +224,12 @@ verify_checks:
     required: false
     hint: "No exporter on {{ monitoring_bind }}:{{ node_exporter_port }} (opt-in). See docs/runbooks/monitoring.md"
 
+    # Counts model repos, not directory entries. "Is the hub directory
+    # non-empty" reported this check green on a cache holding one 4-byte
+    # CACHEDIR.TAG and no weights at all - huggingface_hub writes that marker
+    # the first time anything touches the cache, so the check passed on a box
+    # where the models role had never successfully downloaded a thing.
   - name: "models cached"
-    cmd: "test -d $HOME/.cache/huggingface/hub && [ \"$(ls -1 $HOME/.cache/huggingface/hub 2>/dev/null | wc -l)\" -gt 0 ]"
+    cmd: "[ \"$(ls -1d $HOME/.cache/huggingface/hub/models--* 2>/dev/null | wc -l)\" -gt 0 ]"
     required: false
     hint: "No models cached yet. See docs/runbooks/manage-models.md; run: make models"

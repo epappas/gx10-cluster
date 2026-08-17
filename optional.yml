@@ -29,7 +29,23 @@
 # and grafana too. Exactly what the role's own header promised it would not do.
 #
 # A dynamic include_role propagates only the tags on the include itself, so the
-# split is real and `--list-tasks --tags exporters` proves it.
+# split is real.
+#
+# `apply:` IS LOAD-BEARING. That same propagation rule is why: the tags below
+# select the include, and the role's own tasks carry no tag at all - so under
+# `--tags ray` the include ran, matched, and then every task inside it was
+# filtered out. `make optional TAGS=ray` included the role, executed nothing,
+# and reported ok=1 changed=0. A silent no-op that looks exactly like success,
+# on every one of these entries. `apply: tags:` is the documented mechanism
+# that pushes the tag down onto the included tasks.
+#
+# Each `apply` lists ONLY the tag that selects it, so the exporters/dashboards
+# split above is preserved - `--tags exporters` still cannot pull in grafana.
+#
+# `--list-tasks --tags exporters` does NOT prove any of this and was the reason
+# the bug survived: it does not expand dynamic includes, so it prints the
+# include task and stops, looking identical whether the role runs or not. The
+# only proof is a run that reports a non-zero task count.
 # ---------------------------------------------------------------------------
 
 - name: Install optional components
@@ -43,17 +59,23 @@
     - name: Ray cluster
       ansible.builtin.include_role:
         name: ray
+        apply:
+          tags: [ray]
       tags: [ray, never]
 
     - name: Slurm queueing
       ansible.builtin.include_role:
         name: slurm
+        apply:
+          tags: [slurm]
       tags: [slurm, never]
 
     - name: Metrics exporters (the cheap half)
       ansible.builtin.include_role:
         name: observability
         tasks_from: exporters
+        apply:
+          tags: [exporters]
       tags: [exporters, never]
 
     # dashboards.yml pulls in exporters.yml itself - there is nothing to scrape
@@ -62,9 +84,21 @@
       ansible.builtin.include_role:
         name: observability
         tasks_from: dashboards
+        apply:
+          tags: [dashboards]
       tags: [dashboards, never]
 
     - name: Node.js toolchain
       ansible.builtin.include_role:
         name: dev_node
+        apply:
+          tags: [node]
       tags: [node, never]
+
+    # Installs the tooling only. `make bench` runs it.
+    - name: Benchmark tooling
+      ansible.builtin.include_role:
+        name: benchmark
+        apply:
+          tags: [bench]
+      tags: [bench, never]

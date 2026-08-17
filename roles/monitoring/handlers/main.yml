@@ -1,0 +1,14 @@
+---
+# daemon_reload is on the handler, not the task: the unit files are written by
+# a copy task, and systemd will keep running the OLD unit until it is told to
+# re-read them. Without this an interval change appears to apply and does not.
+- name: Restart the sampler timer
+  ansible.builtin.systemd:
+    name: gx10-sample.timer
+    state: restarted
+    daemon_reload: true
+  become: true
+  # Handlers DO fire under --check when a notifying task reports changed, and
+  # the unit it restarts was never written in that mode - so without this a dry
+  # run fails at the very end, after appearing to succeed throughout.
+  when: not ansible_check_mode

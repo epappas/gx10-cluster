@@ -20,9 +20,123 @@
     mode: "0755"
   become: true
 
+# ---------------------------------------------------------------------------
+# History, still with no resident cost.
+#
+# gx10-status answers "what is happening now". Nothing answered "what happened
+# at 03:00", and on this box the two failures that quietly ruin an overnight
+# run - a thermal/power cap and a swap excursion - are both invisible by
+# morning. A timer is not a daemon: it forks a script, the script writes one
+# line and exits, and between samples this holds zero bytes.
+#
+# The alternative, node_exporter, is ~20 MB resident - which is 0.016% of 121
+# GB and genuinely not the problem people think it is. What rules it out here
+# is that it is a LISTENER whose data exists only while something external
+# scrapes it. This keeps recording with your laptop shut.
+# ---------------------------------------------------------------------------
+- name: Install the history sampler
+  ansible.builtin.copy:
+    src: gx10-sample
+    dest: /usr/local/bin/gx10-sample
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+  when: monitoring_history | bool
+
+- name: Ensure the sample directory exists
+  ansible.builtin.file:
+    path: "{{ monitoring_history_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+  when: monitoring_history | bool
+
+# AccuracySec is load-bearing at sub-minute intervals: systemd's default is
+# 1 min, so it would happily coalesce a 10 s timer into one firing a minute and
+# the history would silently be six times coarser than configured.
+- name: Install the sampler service and timer
+  ansible.builtin.copy:
+    dest: "/etc/systemd/system/{{ item.name }}"
+    mode: "0644"
+    content: "{{ item.content }}"
+  become: true
+  loop:
+    - name: gx10-sample.service
+      content: |
+        # Managed by gx10-cluster ansible (roles/monitoring).
+        [Unit]
+        Description=Append one GX10 health sample
+
+        [Service]
+        Type=oneshot
+        Environment=GX10_SAMPLE_OUT={{ monitoring_history_dir }}/metrics.csv
+        ExecStart=/usr/local/bin/gx10-sample
+    - name: gx10-sample.timer
+      content: |
+        # Managed by gx10-cluster ansible (roles/monitoring).
+        [Unit]
+        Description=Sample GX10 health every {{ monitoring_history_interval }}
+
+        [Timer]
+        OnBootSec=1min
+        OnUnitActiveSec={{ monitoring_history_interval }}
+        AccuracySec=1s
+
+        [Install]
+        WantedBy=timers.target
+  loop_control:
+    label: "{{ item.name }}"
+  notify: Restart the sampler timer
+  when: monitoring_history | bool
+
+- name: Enable the sampler timer
+  ansible.builtin.systemd:
+    name: gx10-sample.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+  become: true
+  when:
+    - monitoring_history | bool
+    # Under --check the unit file above was never actually written, so systemd
+    # cannot find it and this fails - on a node that is perfectly healthy.
+    # `make diff` has to report what WOULD change, not fall over on the
+    # consequences of its own dry-ness. Same shape as the models role's disk
+    # guard.
+    - not ansible_check_mode
+
+# ~1 MB/day at 10 s. Rotation is what keeps "cheap" true over months.
+# `create`, not `copytruncate`: the sampler opens the file per invocation and
+# closes it again, so there is no long-lived descriptor to keep valid, and
+# copytruncate has a window where a concurrent append is lost.
+- name: Rotate the sample log
+  ansible.builtin.copy:
+    dest: /etc/logrotate.d/gx10-sample
+    mode: "0644"
+    content: |
+      # Managed by gx10-cluster ansible (roles/monitoring).
+      {{ monitoring_history_dir }}/metrics.csv {
+          weekly
+          rotate {{ monitoring_history_keep_weeks }}
+          compress
+          missingok
+          notifempty
+          create 0644 root root
+      }
+  become: true
+  when: monitoring_history | bool
+
 - name: Explain
   ansible.builtin.debug:
     msg: >-
       `gx10-status` shows GPU, throttling, unified memory, swap and disk with
-      no daemon. `gx10-status -w` watches. For a scrapeable metrics endpoint
-      or dashboards, see docs/runbooks/monitoring.md
+      no daemon. `gx10-status -w` watches.
+      {{ '`gx10-sample -r` shows recorded history from '
+         ~ monitoring_history_dir ~ '/metrics.csv (sampled every '
+         ~ monitoring_history_interval ~ ', no resident cost).'
+         if monitoring_history | bool else '' }}
+      For a scrapeable metrics endpoint or dashboards, see
+      docs/runbooks/monitoring.md

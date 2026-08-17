@@ -29,8 +29,15 @@
       {{ wanted_models | map(attribute='id') | join(', ') }}
 
 - name: Check free disk
+  # NOT `df -P --output=avail`: coreutils rejects that combination outright
+  # ("options -P and --output are mutually exclusive", rc=1), which failed this
+  # task, and with it every run that reached the models role - the last one in
+  # site.yml, after everything else had already applied. --output is the part
+  # worth keeping; it names the column instead of counting fields, and it does
+  # not wrap long device names the way bare `df` does, which is the only thing
+  # -P was buying.
   ansible.builtin.shell:
-    cmd: "set -o pipefail; df -PBG --output=avail {{ primary_home }} | tail -1 | tr -dc '0-9'"
+    cmd: "set -o pipefail; df -BG --output=avail {{ primary_home }} | tail -1 | tr -dc '0-9'"
     executable: /bin/bash
   register: free_gb
   changed_when: false
@@ -162,8 +169,13 @@
   when: not ansible_check_mode
 
 - name: Report cache size
+  # The `|| echo` is what keeps `make diff` working on a node with no cache
+  # yet. This task is check_mode: false, but the task that CREATES the cache
+  # directory is not - so under --check du runs against a path that does not
+  # exist, and `set -o pipefail` turns its rc=1 into a failed task and a dead
+  # run. Reporting is not worth failing a dry run over.
   ansible.builtin.shell:
-    cmd: "set -o pipefail; du -sh {{ models_hf_home }} 2>/dev/null | cut -f1"
+    cmd: "set -o pipefail; du -sh {{ models_hf_home }} 2>/dev/null | cut -f1 || echo '(none yet)'"
     executable: /bin/bash
   register: cache_size
   changed_when: false

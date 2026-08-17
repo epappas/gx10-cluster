@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# Managed by gx10-cluster ansible (roles/monitoring). Local edits overwritten.
+#
+# One CSV row of history per invocation. Driven by a systemd timer, so between
+# samples this holds NOTHING resident - which is the whole point on a box where
+# host memory is GPU memory.
+#
+# It exists because `gx10-status` answers "what is happening now" and nothing
+# answered "what happened at 03:00". A thermal cap or a swap excursion during
+# an overnight run is invisible by morning; the job is just mysteriously slow.
+#
+# Measured cost on a GX10: one nvidia-smi query is ~0.03 s wall and ~21 MB peak
+# RSS, all of it transient. Everything else here is read straight out of
+# /proc and /sys and forks nothing at all.
+#
+#   gx10-sample          append one sample  (what the timer runs)
+#   gx10-sample -r [N]   show the last N rows, default 20
+#
+# Deliberately a plain file rather than a .j2, for the same reason as
+# gx10-status: shell is full of sequences Jinja claims. Everything
+# configurable arrives through the environment, set by the systemd unit.
+set -euo pipefail
+
+OUT="${GX10_SAMPLE_OUT:-/var/log/gx10/metrics.csv}"
+
+# throttle is '+'-joined rather than comma-joined so it stays one CSV field.
+HEADER='ts,gpu_util_pct,gpu_temp_c,gpu_power_w,sm_clock_mhz,throttle,swcap_us,mem_avail_mb,swap_used_mb,nvme_temp_c,nic_temp_max_c,load1'
+
+# --- report mode ------------------------------------------------------------
+if [[ "${1:-}" == "-r" ]]; then
+    if [[ ! -r "$OUT" ]]; then
+        echo "gx10-sample: no samples at $OUT" >&2
+        echo "  is the timer running?  systemctl status gx10-sample.timer" >&2
+        exit 1
+    fi
+    rows="${2:-20}"
+    { head -1 "$OUT"; tail -n "$rows" "$OUT"; } | column -t -s,
+    exit 0
+fi
+
+# --- sample -----------------------------------------------------------------
+# No fork: bash's own strftime. `date` would double this script's process count.
+printf -v ts '%(%FT%T%z)T' -1
+
+util="" temp="" power="" clk=""
+if command -v nvidia-smi > /dev/null 2>&1; then
+    # `|| true` because a driver hiccup must not cost us the whole row - the
+    # memory and thermal fields are exactly what you want in that case.
+    read -r util temp power clk < <(
+        nvidia-smi --query-gpu=utilization.gpu,temperature.gpu,power.draw,clocks.sm \
+                   --format=csv,noheader,nounits 2>/dev/null \
+            | tr -d ' ' | tr ',' ' ' || true
+    )
+fi
+
+# Throttling is invisible after the fact and is the usual reason an overnight
+# run came in slow - but only the FAULT reasons are worth a flag.
+#
+# SW Power Cap is deliberately excluded. MEASURED on this hardware, at complete
+# idle (0% util, ~5.3 W, 208 MHz, no compute process): Active in 7 of 15
+# consecutive one-second samples, and 46% of uptime by its own counter
+# (26149 s of 55870 s). It flaps second to second - ordinary DVFS on this SoC,
+# not a fault. Sampled into a boolean column it is close to a coin toss, which
+# is noise, not signal.
+#
+# It is still recorded, as the cumulative counter in swcap_us, because the RATE
+# is meaningful even though the state is not: divide the delta between two rows
+# by the interval and you get the fraction of that window spent power-limited,
+# which under load is exactly what you want to know.
+#
+# Test for exactly "Active": matching /Active/ also matches "Not Active", which
+# would report every reason as firing, always. Same trap gx10-status documents.
+throttle=none
+swcap_us=""
+if command -v nvidia-smi > /dev/null 2>&1; then
+    perf=$(nvidia-smi -q -d PERFORMANCE 2>/dev/null || true)
+    active=$(awk '/Clocks Event Reasons/,/Counters/' <<< "$perf" \
+        | awk -F': *' '$2 == "Active" {
+              name = $1; gsub(/^ +| +$/, "", name)
+              if (name != "SW Power Cap") { print name }
+          }' | paste -sd'+' || true)
+    if [[ -n "${active:-}" ]]; then
+        throttle="$active"
+    fi
+    swcap_us=$(awk -F': *' '/SW Power Capping/ { gsub(/ us/, "", $2); print $2; exit }' <<< "$perf" || true)
+fi
+
+# /proc, so no forks. MemAvailable is the number that matters here: on this
+# hardware it IS available GPU memory.
+mem_avail_mb=$(awk '/^MemAvailable:/ { printf "%d", $2 / 1024 }' /proc/meminfo)
+swap_used_mb=$(awk '/^SwapTotal:/ { t = $2 } /^SwapFree:/ { f = $2 } END { printf "%d", (t - f) / 1024 }' /proc/meminfo)
+read -r load1 _ < /proc/loadavg
+
+# hwmon is free: no vendor tool, no driver call. The NIC temperatures are worth
+# having because the ConnectX-7 power-throttle story in connect-cluster.md
+# presents as a fabric that negotiates full speed and then delivers a fraction.
+nvme_temp=""
+nic_temp_max=""
+for h in /sys/class/hwmon/hwmon*; do
+    [[ -r "$h/name" ]] || continue
+    hname=$(< "$h/name")
+    [[ -r "$h/temp1_input" ]] || continue
+    raw=$(< "$h/temp1_input")
+    deg=$((raw / 1000))
+    if [[ "$hname" == "nvme" ]]; then
+        nvme_temp="$deg"
+    elif [[ "$hname" == "mlx5" ]]; then
+        if [[ -z "$nic_temp_max" || "$deg" -gt "$nic_temp_max" ]]; then
+            nic_temp_max="$deg"
+        fi
+    fi
+done
+
+if [[ ! -s "$OUT" ]]; then
+    printf '%s\n' "$HEADER" >> "$OUT"
+fi
+
+# One write, well under a pipe buffer, so concurrent appends cannot interleave.
+printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+    "$ts" "${util:-}" "${temp:-}" "${power:-}" "${clk:-}" "$throttle" "${swcap_us:-}" \
+    "$mem_avail_mb" "$swap_used_mb" "${nvme_temp:-}" "${nic_temp_max:-}" "$load1" \
+    >> "$OUT"

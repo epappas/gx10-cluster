@@ -210,6 +210,23 @@ ray_port: 6379
 # matter if you install the optional stack (optional.yml --tags dashboards),
 # which is better run OFF this box - see docs/runbooks/monitoring.md.
 # ---------------------------------------------------------------------------
+# --- history, the zero-resident-cost half -----------------------------------
+# roles/monitoring drives a systemd timer that appends one CSV row per sample
+# and exits. A timer is not a daemon: nothing is held between samples, there is
+# no listening socket, and it keeps recording whether or not anything external
+# is scraping. This is the part that answers "what happened at 03:00" - the
+# question gx10-status structurally cannot.
+#
+# On by default because the cost is genuinely negligible and measured, not
+# assumed: one nvidia-smi query is ~0.03 s and ~21 MB peak RSS, all transient,
+# and everything else comes from /proc and /sys without forking. At 10 s that
+# is ~0.3% of one core of 20 and ~1 MB of CSV per day.
+monitoring_history: true
+monitoring_history_dir: /var/log/gx10
+# systemd time span syntax. Below ~5 s you are mostly measuring nvidia-smi.
+monitoring_history_interval: 10s
+monitoring_history_keep_weeks: 4
+
 grafana_port: 3000
 prometheus_port: 9090
 prometheus_retention: "30d"
@@ -399,11 +416,37 @@ cluster_peer_mgmt_addrs: >-
      | map('extract', hostvars, 'ansible_host')
      | select('defined') | list }}
 
-# MTU is deliberately NOT set. NVIDIA's own two-node playbook leaves it at the
-# default; the "mtu 1500" in their docs is `ip addr` output, not a directive.
-# A mismatch between ends silently drops packets, so this stays unset until
-# measured. Set cluster_mtu to enable it.
-cluster_mtu: ""
+# Jumbo frames on the interconnect. Previously unset, on the grounds that a
+# mismatch between ends silently drops packets so it wanted measuring first.
+# Measured, then set.
+#
+# What this actually buys, and it is worth being precise because "jumbo" names
+# the wrong number: the RoCE path MTU is quantised to powers of two at or below
+# the netdev MTU, so a 1500-byte netdev negotiates active_mtu 1024 and pays
+# ~82 bytes of wire overhead per packet - 7.4%. The card's max_mtu is 4096, so
+# crossing ~4200 unlocks active_mtu 4096 and drops that to 2.0%. Everything
+# above 4096 is inert for RDMA; 9000 is chosen because it is the conventional
+# jumbo value, costs nothing, and also covers any IP traffic on these links.
+#
+# MEASURED, two-node NCCL all-reduce busbw, four runs each:
+#   MTU 1500 (active_mtu 1024): 21.9 22.0 21.9 22.0  -> ~21.95 GB/s
+#   MTU 9000 (active_mtu 4096): 22.6 22.5 22.8 22.8  -> ~22.68 GB/s   +3.3%
+# The ranges do not overlap, so the gain is real, and it lands near the 5.9%
+# that header arithmetic predicts. Write latency is unchanged at ~1.7 us, so
+# small messages did not pay for it.
+#
+# Per-partition ib_write_bw did NOT move (13334.7 -> 13334.6 MB/s), and that is
+# the expected shape rather than a contradiction: one x4 partition is PCIe-bound
+# at ~106 Gb/s of a ~126 Gb/s bus, where wire overhead is not the limit. Both
+# partitions together are cable-bound at 200 Gb/s, which is exactly where
+# shaving per-packet overhead shows up.
+#
+# Applies to BOTH ends because ansible owns both. That is the whole reason this
+# is safe to set here and unsafe to set by hand: site.yml runs serial: 1, so
+# there is a window where the two ends disagree - harmless only because nothing
+# uses the interconnect during provisioning. Do not change this while a
+# distributed job is running.
+cluster_mtu: 9000
 
 # The management interface: NCCL/MPI bootstrap, and how you reach the box.
 #

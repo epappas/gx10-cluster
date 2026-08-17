@@ -385,3 +385,249 @@ The list is additive on purpose. `ansible.posix.authorized_key` with
 per-node `id_gx10_cluster` keys that `trust.yml` cross-authorizes from being
 wiped on the next run. The cost is that revoking a key means deleting the line
 *and* removing the stale entry from the node.
+
+## <a name="nordvpn-sysctl"></a>nordvpnd owns the socket buffer ceilings, so the repo stopped claiming them
+
+`roles/base` used to set `net.core.rmem_max` and `net.core.wmem_max` to
+134217728. It never had them: `nordvpnd` sets both to 7500000 itself on every
+start, and it is `Type=simple` with `Restart=always`, so nothing the play can
+schedule reliably runs after the daemon has finished initialising —
+`ExecStartPost` fires at fork, long before. On a booted node the repo's value
+was never in effect, and because it was still written to
+`/etc/sysctl.d/90-gx10.conf`, `ansible.posix.sysctl` compared the file against
+the live value and reported `changed` on every run: `make idempotence` could
+never pass, with no obvious culprit.
+
+Conceding is cheap. These are ceilings for large TCP transfers — checkpoint
+copies, model downloads — and explicitly **not** for NCCL, which runs over RDMA
+and bypasses the socket layer entirely. nordvpn's 7500000 is already ~35× the
+212992 kernel default.
+
+The two keys are removed with `state: absent` rather than just deleted from the
+loop, because a deleted loop entry leaves the line in `90-gx10.conf` on every
+already-provisioned box, still asserting a value nothing applies. If the VPN
+ever goes away, this is worth revisiting.
+
+## <a name="benchmark-tooling"></a>Benchmarks are upstream tools, and thresholds must cite a source
+
+`roles/benchmark` installs perftest, fio, OpenMPI, DCGM and a pinned
+`nccl-tests`, and `benchmark.yml` runs them. It computes nothing itself. The
+reason is comparability: `busbw` from `all_reduce_perf` can be held next to
+NVIDIA's published figures and next to every NCCL bug report ever filed, and a
+number this repo derived on its own cannot. The repo's `allreduce_test.py`
+stays as a fast smoke test — it is not what you quote.
+
+The harder rule is on thresholds. Every entry in `vars/benchmark_checks.yml`
+carries a mandatory `provenance` string, and where no defensible source exists
+the entry is `RECORD ONLY`: measured, reported, never asserted on. A threshold
+with no stated basis is indistinguishable from one picked to make the suite go
+green, and it is worse than no threshold at all, because it looks like
+engineering.
+
+The floors that do exist are set an order of magnitude below measured values,
+not just under them. They exist to catch the two failures
+[connect-cluster](runbooks/connect-cluster.md#reading-the-result) documents —
+TCP fallback and the reported ConnectX-7 firmware throttle — both of which
+present as a healthy cluster running an order of magnitude slow. A floor set
+near the measured value fails on ordinary variance instead, and a check people
+learn to ignore protects nothing. Drift is tracked by diffing successive result
+files.
+
+HPL is deliberately absent. `Rmax` is the most quoted number in HPC, but the
+only route to it here is a container whose GB10 support this repo has not
+verified, and an unverified FLOP number is worse than no FLOP number.
+
+## <a name="optional-apply-tags"></a>`apply:` on every optional `include_role`, or the component silently installs nothing
+
+A companion to [the entry above](#optional-include-role), and the failure it
+describes is worse than the one it fixed.
+
+Tags on a dynamic include select the **include**, not the tasks inside it. The
+role's own tasks carry no tag, so `--tags ray` matched the include, ran it, and
+then filtered out every task it pulled in. `make optional TAGS=ray` reported
+`ok=1 changed=0` having installed nothing — and it read as success. This
+affected all five opt-in entries at once, and was found only when a sixth was
+added and its packages never appeared on the box.
+
+`apply: tags:` is the documented mechanism that pushes the tag onto the
+included tasks. Each entry applies only the tag that selects it, so the
+exporters/dashboards split the entry above exists to protect is preserved:
+`--tags exporters` still cannot drag in grafana.
+
+The reason this survived is worth keeping. The comment here claimed
+`--list-tasks --tags exporters` proved the split — it proves nothing, because
+it does not expand dynamic includes. It prints the include task and stops,
+identical whether the role runs or not. A verification that cannot distinguish
+the working case from the broken one is not a weak check, it is a false one.
+`tests/check_optional_tags.py` now asserts the `apply` block is present, since
+neither ansible-lint nor `--syntax-check` nor a dry run can see its absence.
+
+## <a name="history-timer"></a>History comes from a timer, not an agent, and `SW Power Cap` is not a throttle
+
+Two decisions from the same measurements.
+
+**A timer, not an agent.** `gx10-status` could only ever answer "what is
+happening now", which leaves the two failures that actually ruin an overnight
+run — a thermal cap and a swap excursion — invisible by morning. The fix is
+`gx10-sample`, a script a systemd timer runs every 10 s: it appends one CSV row
+and exits, so nothing is resident between samples. Measured: 0.08 s wall,
+21 MB peak RSS per sample, all transient; ~1 MB of CSV per day.
+
+node_exporter was the obvious alternative and is rejected on the right grounds.
+It is ~20 MB resident, which is 0.016% of 121 GB — the memory objection people
+raise about it is real about Prometheus, whose TSDB lives in RAM, and
+essentially imaginary about the exporter itself. What rules it out is that it
+is a *listener*: its data exists only while something external scrapes it, so
+closing a laptop stops the history. The exporter tier stays available for when
+you want dashboards and have somewhere else to run them.
+
+**`SW Power Cap` is excluded from every throttle warning.** Measured on an idle
+GX10 with no compute process — 0% utilisation, ~5.3 W, 208 MHz — it was Active
+in 7 of 15 consecutive one-second samples, and 46% of uptime by its own counter
+(26149 s of 55870 s). It flaps second to second: ordinary DVFS on this SoC.
+
+`gx10-status` previously warned on it, which meant a red throttle warning on
+roughly every other invocation, uncorrelated with anything being wrong. A
+coin-flip alarm is worse than a constant one — you stop reading it, and it
+buries the `HW Thermal Slowdown` printed on the same line. Both tools now warn
+only on genuine fault reasons and record the cumulative counter instead,
+because the rate is meaningful even where the state is not.
+
+## <a name="roce-not-ib"></a>The fabric is RoCE, and a tool says so, because absence of InfiniBand reads as absence of a link
+
+The ConnectX-7 here runs an **Ethernet link layer** and carries RDMA as RoCE v2.
+Every InfiniBand-native way of asking "are the two boxes connected?" therefore
+returns nothing on a completely healthy cluster: `ibhosts`, `ibnodes`,
+`iblinkinfo` and `ibnetdiscover` all fail with `can't open UMAD port` because
+they speak IB SMPs to a subnet manager and RoCE has none; `base lid` and
+`sm lid` are `0x0` for the same reason; the devices are named `roce*`, not
+`mlx5_*`; and `opensm` is not installed, deliberately, because a subnet manager
+on an Ethernet link layer manages nothing.
+
+Nothing is indistinguishable from *not connected*. That is not a hypothetical:
+it is the failure that prompted this entry, with 21.6 GB/s of NCCL traffic
+crossing the link at the time.
+
+Two fixes, because the problem had two halves.
+
+**A tool that reports the fabric that is there.** `gx10-interconnect` prints the
+link layer, per-port state, address, MTU and PCIe ceiling, and peer
+reachability, and exits 0 healthy / 1 degraded / 2 no NIC so it can be gated on.
+`--peer` adds a real RDMA round trip, which matters because RoCE v2 rides
+UDP 4791 and a firewall can pass ICMP while dropping it — a link that pings
+perfectly and hangs every collective. It lives in `/usr/local/bin`, not
+`~/.local/bin` beside `gx10-status`, so that `ssh <node> gx10-interconnect`
+works: that is a non-login shell and never gets `~/.local/bin` on PATH.
+
+**Checks that ask the right question.** `RDMA devices` tested only whether
+`ibv_devices` listed anything, which the CX-7 does whether or not a single port
+links — green on a box with no cable in it. It is now `RDMA link active`,
+against port state in sysfs. A new `RoCE fabric` check asserts the Ethernet link
+layer, guarding the assumption the whole role rests on: address these ports as
+IP subnets and a card flipped to IB mode would leave every other check passing
+while nothing could talk.
+
+Note the trap in the other direction: **NCCL calls this transport `NET/IB`** and
+logs `Using network IB`. That is its name for ibverbs, which serves IB and RoCE
+alike. `NET/IB` is evidence the fast path is in use, not evidence of an
+InfiniBand fabric.
+
+## <a name="one-cable-two-partitions"></a>One cable, two PCIe partitions — and how to tell that from two cabled ports
+
+A revision of this repo "corrected" the interconnect description from *one port
+presenting two partitions* to *two separately cabled ports*, citing the two PCIe
+root complexes as evidence. That was wrong, and the way it was wrong is worth
+keeping, because the misreading is natural.
+
+Four netdevs exist. Two are up, on different PCIe roots (`0000:01:00.0` and
+`0002:01:00.0`), which looks exactly like two cards behind two cages. It is not.
+Three measurements settle it:
+
+```bash
+cat /sys/class/net/*/phys_switch_id     # all four identical -> one ConnectX-7 ASIC
+cat /sys/class/net/*/phys_port_name     # enp1s0f0np0 and enP2p1s0f0np0 are BOTH p0
+sudo ethtool -m <iface> | grep 'Vendor SN'
+```
+
+`phys_port_name` is the decisive one: the two live netdevs are two partitions of
+the **same physical cage**, `p0`. The `f1` pair is the second QSFP port, `p1`,
+which is empty. And both nodes read the *same* module serial
+(`01130300258K0747`, Amphenol NJAAKK-AU06 1 m DAC) — one cable, seen from each
+end, not two cables that happen to be the same model.
+
+The PCIe root split is real but is a packaging detail: the cage's lanes are
+presented as two x4 functions. They must still be on **different subnets**, or
+both flows leave by one interface and half the bandwidth is unreachable while
+every per-interface view looks correct.
+
+**The ceiling is the cable, not the bus.** Two Gen5 x4 partitions are ~126 Gb/s
+each, ~252 Gb/s together, behind a single 200 Gb/s port — so the wire binds
+first. One partition alone, though, is ~126 Gb/s and cannot carry the port,
+which is why addressing only one costs roughly half.
+
+Measured two-node NCCL all-reduce is 21.6 GB/s busbw ≈ 173 Gb/s ≈ **86% of the
+200 Gb/s cable**. That figure is itself the cross-check: against two 200 Gb/s
+cables it would be a dismal 43%, and the "two ports" reading never explained it.
+
+It did correctly recalibrate one thing. The runbook called ~10 GB/s "the healthy
+number", carried from NVIDIA's playbook and never measured here — about what a
+single partition delivers. The old table scored a half-configured cluster as
+perfect and a correct one as anomalous.
+
+One finding recorded rather than acted on: NCCL reports `GPU Direct RDMA
+Disabled` with `cuMemGdrSupport 0`, which is expected on GB10 — GPU memory *is*
+host memory, so there is no separate BAR to register for peer DMA, and
+`nvidia-peermem` will not change it.
+
+## <a name="jumbo-mtu"></a>Jumbo frames on the interconnect, and why the number that matters is 4096
+
+`cluster_mtu` was unset for a documented reason — a mismatch between ends drops
+packets silently, so it wanted measuring rather than guessing. It has now been
+measured and is set to 9000.
+
+**"Jumbo" names the wrong target.** The RoCE path MTU is quantised to powers of
+two at or below the netdev MTU, and the card's `max_mtu` is 4096. So a 1500-byte
+netdev negotiates `active_mtu 1024`; crossing ~4200 unlocks 4096; and everything
+above 4096 is inert for RDMA. 9000 is set because it is the conventional jumbo
+value and costs nothing, not because RDMA uses it.
+
+Per-packet wire overhead is ~82 bytes, so the predicted efficiency move is
+1024/(1024+82) = 92.6% → 4096/(4096+82) = 98.0%, or +5.9%.
+
+Measured, two-node NCCL all-reduce busbw, four runs each:
+
+| | runs | mean |
+|---|---|---|
+| MTU 1500 / `active_mtu` 1024 | 21.9, 22.0, 21.9, 22.0 | 21.95 GB/s |
+| MTU 9000 / `active_mtu` 4096 | 22.6, 22.5, 22.8, 22.8 | **22.68 GB/s** |
+
+**+3.3%**, with non-overlapping ranges, landing under the 5.9% ceiling as
+expected since MTU is not the only overhead. ~181 Gb/s ≈ **91% of the 200 Gb/s
+cable**. Write latency is unchanged at ~1.7 µs, so small messages did not pay
+for it.
+
+A first single pre-change sample read 21.6 GB/s and suggested +4.6%. It was a
+low outlier; four paired runs each way corrected it. One sample either side of a
+few-percent effect is not a measurement.
+
+**Per-partition `ib_write_bw` did not move at all** — 13334.7 → 13334.6 MB/s.
+That is the expected shape, not a contradiction: one x4 partition is PCIe-bound
+at ~107 Gb/s of a ~126 Gb/s bus, where wire overhead is not the binding
+constraint. Both partitions together are cable-bound at 200 Gb/s, which is
+exactly where shaving per-packet overhead pays. A single-partition benchmark
+would have concluded jumbo does nothing.
+
+### The trap that nearly hid it
+
+NetworkManager writes an MTU change into the connection **profile** and does not
+apply it to a connection that is already active. After the first apply,
+`nmcli -g 802-3-ethernet.mtu connection show gx10-cluster-0` reported `9000` and
+the connection reported `activated`, while `ip link` still said `mtu 1500` and
+`active_mtu` was still 1024. The nmcli task reports `changed` either way.
+
+So the role now notifies a handler that runs `nmcli connection up` on each
+partition. Same shape as the missing `daemon_reload` in `roles/monitoring`, and
+worse in consequence: a half-applied MTU is asymmetric, and asymmetric MTU drops
+packets silently rather than failing loudly. Bouncing the interconnect is safe
+only because ansible reaches both boxes over the management NIC — never over the
+cable — and it is not safe during a distributed job.

@@ -1,0 +1,162 @@
+---
+# Single-node benchmark entries, run by benchmark.yml on every host.
+#
+# Anything that needs BOTH boxes at once - ib_write_bw, iperf3, nccl-tests -
+# is not here. Those are client/server or MPI-launched and live as tasks in
+# benchmark.yml, for exactly the reason vars/README.md gives for the
+# cross-node drift check: nothing in a shell on node A can see node B.
+#
+# Two kinds of entry:
+#
+#   kind: gate    cmd exits 0 or non-zero. Asserts setup, not speed.
+#   kind: gauge   cmd prints ONE number on stdout. Always reported; asserted
+#                 only if the entry carries a `floor`.
+#
+# `provenance` is MANDATORY on every entry and is the whole point of this file.
+# A threshold with no stated source is indistinguishable from one somebody made
+# up to make the suite go green, so a floor without provenance is a bug. Where
+# there is no defensible source, the entry says so and records the number
+# without asserting on it - a measurement with no threshold is honest; a
+# threshold with no basis is not.
+
+benchmark_checks:
+  # --- setup gates ---------------------------------------------------------
+
+  # Two of the four RoCE functions are the f1 ports, which this cluster does
+  # not cable; they legitimately sit DOWN at Rate 40. What must be true is that
+  # exactly the two f0 partitions are ACTIVE, because one partition is half the
+  # fabric and the failure is silent - collectives still work, at half speed.
+  - name: "roce partitions active"
+    kind: gate
+    cmd: "[ \"$(rdma link show 2>/dev/null | grep -c 'state ACTIVE')\" -eq 2 ]"
+    provenance: >-
+      Count, not a rate. hardware.md: each QSFP port presents two PCIe x4
+      partitions which must both be up and on different subnets to reach the
+      full width.
+    hint: "Fewer (or more) than two ACTIVE RoCE links. See docs/runbooks/connect-cluster.md"
+
+  # The Ethernet rate the HCA negotiated. Note this is NOT the achievable
+  # bandwidth - see the PCIe gate below, which is the real ceiling.
+  - name: "roce link rate 200G"
+    kind: gate
+    cmd: "[ \"$(ibstat 2>/dev/null | awk '/Rate:/{print $2}' | sort -rn | head -1)\" = '200' ]"
+    provenance: >-
+      Read from the HCA (ibstat Rate), not a number chosen by us. 200 is what
+      a cabled ConnectX-7 QSFP port on this hardware reports.
+    hint: "No port negotiating 200. Reseat/replace the QSFP cable. See docs/runbooks/connect-cluster.md"
+
+  # The bottleneck that actually decides fabric throughput on this box, and the
+  # one people misread: the NIC advertises 200 Gb/s Ethernet per port while
+  # each function hangs off PCIe Gen5 x4, which is ~126 Gb/s. A card that
+  # renegotiated to x2, or to Gen4, halves your fabric and nothing else here
+  # would say so.
+  - name: "connectx pcie gen5 x4"
+    kind: gate
+    cmd: "[ \"$(sudo -n lspci -d 15b3: -vv 2>/dev/null | grep -c 'LnkSta:.*Speed 32GT/s, Width x4')\" -ge 2 ]"
+    required: false
+    provenance: >-
+      Read from PCIe config space (LnkSta). Gen5 x4 = 4 lanes x 32 GT/s x
+      128b/130b encoding = 126.03 Gb/s per function, which is below the 200
+      Gb/s the Ethernet side reports and is therefore the real per-partition
+      ceiling.
+    hint: "A ConnectX-7 function is not at Gen5 x4 (or sudo needs a password). Reseat the card."
+
+  # Throttling makes every number below meaningless and is the first thing to
+  # rule out. nvidia-smi names the reason; anything other than the two idle
+  # clock reasons is a real cap.
+  - name: "gpu not thermally capped"
+    kind: gate
+    cmd: >-
+      ! nvidia-smi --query-gpu=clocks_throttle_reasons.hw_thermal_slowdown,clocks_throttle_reasons.sw_thermal_slowdown
+      --format=csv,noheader 2>/dev/null | grep -qi active
+    required: false
+    provenance: >-
+      Vendor-reported throttle reasons, not a temperature threshold of our
+      choosing. Reported rather than fatal: a box that is merely warm right now
+      is not misconfigured.
+    hint: "Thermal slowdown is active - the numbers below are capped. Check airflow."
+
+  - name: "gpu ecc errors"
+    kind: gate
+    cmd: >-
+      [ "$(nvidia-smi --query-gpu=ecc.errors.uncorrected.volatile.total --format=csv,noheader 2>/dev/null
+      | tr -dc '0-9' )" = "0" ] || nvidia-smi --query-gpu=ecc.errors.uncorrected.volatile.total
+      --format=csv,noheader 2>/dev/null | grep -qi 'N/A'
+    provenance: >-
+      Vendor counter. Zero is the only correct value; "N/A" is accepted because
+      it means the part does not expose the counter, not that it failed.
+    hint: "Uncorrected ECC errors present. See docs/runbooks/troubleshoot.md"
+
+  # The vendor's own readiness diagnostic. -r 1 is the quick tier (seconds):
+  # deployment checks - driver, NVML, permissions, PCIe, ECC. Higher tiers
+  # stress the GPU for minutes and are opt-in via bench_dcgm_level.
+  #
+  # nv-hostengine is started for the length of the diag and stopped after, so
+  # this leaves no resident daemon behind - see the role.
+  - name: "dcgm diagnostic"
+    kind: gate
+    cmd: >-
+      set -o pipefail;
+      if systemctl is-active --quiet nvidia-dcgm; then dcgmi diag -r {{ bench_dcgm_level }} > /dev/null;
+      else nv-hostengine > /dev/null 2>&1;
+      trap 'nv-hostengine --term > /dev/null 2>&1 || true' EXIT;
+      sleep 2; dcgmi diag -r {{ bench_dcgm_level }} > /dev/null; fi
+    required: false
+    provenance: >-
+      NVIDIA DCGM, the vendor's official diagnostic. Pass/fail comes from the
+      tool; we invent no criteria. Optional because it needs DCGM installed
+      (`make optional TAGS=bench`).
+    hint: "dcgmi diag failed or DCGM is not installed. Run `dcgmi diag -r 1` by hand for the per-test detail."
+
+  # "Can this cluster launch an MPI job at all" is the most basic definition of
+  # HPC readiness, and it is also the prerequisite for the nccl-tests runs in
+  # benchmark.yml - those take their rank from MPI and cannot start without it.
+  - name: "mpi launches locally"
+    kind: gate
+    cmd: "mpirun --allow-run-as-root -np 1 hostname > /dev/null 2>&1"
+    required: false
+    provenance: >-
+      Functional check, no number. Optional because OpenMPI arrives with
+      `make optional TAGS=bench`.
+    hint: "mpirun cannot launch. Install the tooling: make optional TAGS=bench"
+
+  # --- gauges --------------------------------------------------------------
+
+  # Storage matters here for one concrete reason: a 75 GB checkpoint has to
+  # come off disk before a rank can start, and the model cache is on this
+  # filesystem. fio is the industry-standard block benchmark and these are its
+  # own reported metrics.
+  #
+  # libaio + direct=1 bypasses the page cache. Without direct=1 you measure RAM
+  # on a box with 128 GB of it and report a beautiful, meaningless number.
+  - name: "fio sequential read"
+    kind: gauge
+    metric: "sequential read bandwidth"
+    unit: "MB/s"
+    cmd: >-
+      set -o pipefail;
+      fio --name=seqread --directory={{ bench_fio_dir }} --size={{ bench_fio_size }}
+      --rw=read --bs=1M --direct=1 --ioengine=libaio --iodepth=16 --numjobs=1
+      --runtime=30 --time_based --group_reporting --output-format=json 2>/dev/null
+      | python3 -c "import json,sys; print(round(json.load(sys.stdin)['jobs'][0]['read']['bw_bytes']/1e6, 1))"
+    provenance: >-
+      RECORD ONLY - no floor. The vendor publishes no sequential-read figure
+      for this SSD that we have verified, so any threshold here would be
+      invented. Compare against the recorded baseline instead.
+    hint: "fio did not run. Install the tooling: make optional TAGS=bench"
+
+  - name: "fio random read IOPS"
+    kind: gauge
+    metric: "4K random read IOPS"
+    unit: "IOPS"
+    cmd: >-
+      set -o pipefail;
+      fio --name=randread --directory={{ bench_fio_dir }} --size={{ bench_fio_size }}
+      --rw=randread --bs=4k --direct=1 --ioengine=libaio --iodepth=64 --numjobs=4
+      --runtime=30 --time_based --group_reporting --output-format=json 2>/dev/null
+      | python3 -c "import json,sys; print(int(json.load(sys.stdin)['jobs'][0]['read']['iops']))"
+    provenance: >-
+      RECORD ONLY - no floor, same reason as above. 4K random read at QD64 is
+      the conventional IOPS figure, so the number is at least comparable with
+      published ones.
+    hint: "fio did not run. Install the tooling: make optional TAGS=bench"
