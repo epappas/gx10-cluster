@@ -70,6 +70,7 @@ Task-oriented. Start here.
 | Run a job across both nodes | [run-distributed](docs/runbooks/run-distributed.md) |
 | Measure the cluster and prove it performs | [benchmark](docs/runbooks/benchmark.md) |
 | See what the machine is doing | [monitoring](docs/runbooks/monitoring.md) |
+| Watch both nodes live in one screen | [monitoring](docs/runbooks/monitoring.md#cluster-wide) |
 | Fix something that's broken | [troubleshoot](docs/runbooks/troubleshoot.md) |
 | Change this repo safely | [contributing](docs/contributing.md) |
 

@@ -631,3 +631,41 @@ worse in consequence: a half-applied MTU is asymmetric, and asymmetric MTU drops
 packets silently rather than failing loudly. Bouncing the interconnect is safe
 only because ansible reaches both boxes over the management NIC — never over the
 cable — and it is not safe during a distributed job.
+
+## <a name="gx10-top"></a>`gx10-top` ships its collector, reads RDMA counters, and judges swap on growth
+
+A cluster-wide live view, because `gx10-status` can only ever answer "this box"
+and the interesting failures on a two-node cluster are *disagreements* between
+nodes. Same bargain as the rest of the role: fork a collector per node, render
+one frame, sleep. Nothing resident.
+
+Four decisions worth keeping.
+
+**The collector is shipped over stdin, not installed.** One file to deploy, and
+more importantly a renderer can never be fed a payload by a stale collector left
+on some node by an older provision. It costs a few KB per node per frame over a
+connection that is already multiplexed.
+
+**SSH is multiplexed** (`ControlMaster`/`ControlPersist`). At a 2 s refresh a
+fresh TCP handshake and key exchange per node per frame costs more than
+everything the collector actually does.
+
+**RoCE rows come from the RDMA port counters, never netdev.** RDMA bypasses the
+kernel network stack: measured, pushing 66 GiB across the cable moved
+`/sys/class/net/<if>/statistics/tx_bytes` by **exactly 0**. The RDMA counter, in
+4-octet words, gave `port_xmit_data * 4` = 68291 MiB over 5 s = 13.3 GB/s,
+matching `ib_write_bw` to the byte. A netdev-based panel would show a flat zero
+on a saturated link — the same class of mistake as reading an empty `ibhosts` as
+a missing fabric ([that one](#roce-not-ib)).
+
+**Swap warns on growth, not presence.** Both nodes carry a few hundred kB of
+long-idle pages, so a `> 0` alarm lit the divergence line red permanently. That
+is the identical coin-flip alarm removed from the `SW Power Cap` warning
+([why](#history-timer)), and it would bury a real excursion the same way. The
+level is always displayed; only an increase between frames warns.
+
+One implementation trap, recorded because it is silent and cost a debugging
+round: the rate and percentage helpers mutate the delta baseline, so calling them
+inside `$( )` ran them in a subshell and discarded every write. Every rate
+rendered as `-` forever, on every frame, with no error. They now return through a
+global instead.

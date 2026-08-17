@@ -70,6 +70,119 @@ while a job runs, that job is genuinely power-limited.
 The reasons that *are* faults: `HW Thermal Slowdown`, `SW Thermal Slowdown`,
 `HW Power Brake Slowdown`, `Sync Boost`.
 
+## <a name="cluster-wide"></a>All nodes at once — `gx10-top`
+
+`gx10-status` answers *this box*. `gx10-top` answers *the cluster*, in one
+screen, and it is the only view that can show you the thing neither node's own
+dashboard can: **where the two disagree**.
+
+```bash
+gx10-top             # all nodes, 2 s refresh
+gx10-top -i 5        # slower
+gx10-top -1          # one frame and exit (scriptable)
+gx10-top -H a,b      # explicit hosts
+```
+
+```
+gx10-top   2 node(s)   2s refresh   net rates rx/tx per s   inet 1.1.1.1
+
+                             odysseus        poseidon
+  GPU       util                   0%              0%
+            temp                 57 C            50 C
+            power              5.06 W         10.86 W
+            clock             208 MHz        2405 MHz
+            throttle             none            none
+            pwr-capped        1136 min        1059 min
+  CPU       total                 62%              6%
+            P-cores               56%              6%
+            load1               11.37            0.59
+            uptime             1d 16h          1d 16h
+  Memory    used(=GPU)       10/121 GB       13/121 GB
+            swap               636 kB           11 MB
+  Disk      root          600.7G free     602.9G free
+            nvme                 49 C            46 C
+  Network   wan enP7s7      4.8K/25.8K       4.1K/1.8K
+            vpn nordlynx     1.6K/3.1K           0B/0B
+            wifi wlP9s9      3.3K/3.6K               -
+            RoCE p1s0f0    44.2M/17.6G     15.1G/37.8M
+            RoCE P2p1s0f0        0B/0B           0B/0B
+            RoCE mtu          mtu 9000        mtu 9000
+            reach          gw 0.713 ms     gw 0.680 ms
+            internet           13.8 ms         14.9 ms
+  Docker    containers          1/1 up          2/2 up
+```
+
+Covers the `nvtop` half (GPU util/temp/power/clock/throttle), the `glances` half
+(CPU with a **P-core** split, memory, swap, disk, load, uptime), all four network
+roles (WAN, VPN, WiFi, Docker bridge, RoCE), reachability, and Docker.
+
+**Cost:** nothing resident. It forks a collector per node, renders one frame and
+sleeps — the same bargain as `gx10-status`. Nodes come from
+`/etc/gx10/interconnect.peers`, so it needs no inventory of its own. SSH
+connections are multiplexed (`ControlPersist`), because at a 2 s refresh a fresh
+handshake per node per frame would cost more than all the collection.
+
+A node that is off or unreachable degrades to one red column; it does not take
+the view down, and its numbers are cleared rather than left stale.
+
+### <a name="roce-counters"></a>Why the RoCE rows are not netdev counters
+
+**RDMA bypasses the kernel network stack, so `/sys/class/net/*/statistics/` never
+sees it.** Measured: pushing 66 GiB across the cable moved `tx_bytes` by
+**exactly 0**.
+
+The only source that sees RDMA is the RDMA port counter, in **4-octet words**:
+
+```bash
+# x4, because the unit is words and not bytes
+cat /sys/class/infiniband/rocep1s0f0/ports/1/counters/port_xmit_data
+```
+
+`port_xmit_data * 4` came to 68291 MiB over 5 s = 13.3 GB/s, matching what
+`ib_write_bw` reported to the byte. A netdev-based RoCE panel reads a flat zero
+on a link running at full speed — which on this cluster is a familiar shape of
+mistake ([the other one](connect-cluster.md#no-infiniband)).
+
+### The divergence line
+
+The bottom line is the point of a cluster view. It flags:
+
+- **clock skew > 2 s** — munge rejects Slurm credentials once clocks drift, with
+  errors that never mention time
+- **asymmetric RoCE MTU** — drops packets silently instead of failing loudly
+- a node **throttling** (genuine reasons only, not SW Power Cap)
+- a node **swapping** — on coherent memory that is a cliff
+- a node **unreachable**
+
+### Two live views side by side instead
+
+If you would rather have two independent full `gx10-status` panes, tmux does it
+with nothing new installed. Note the **full path**: `ssh <host> gx10-status`
+runs a non-login shell, which never picks up `~/.local/bin`.
+
+```bash
+tmux new-session -s gx10 "gx10-status -w" \; \
+  split-window -h "ssh -t poseidon '~/.local/bin/gx10-status -w'" \; \
+  select-layout even-horizontal
+```
+
+### On nvtop, and why it is half-blind here
+
+`nvtop` is installed and works, but on GB10 it reports:
+
+```
+MEM N/A MHz   FAN N/A%   MEM [N/A]   PCIe GEN 1@1x RX: N/A TX: N/A
+```
+
+No memory, no fan, no PCIe counters — there is no framebuffer to report, because
+host memory *is* GPU memory. The "GPU0 mem%" graph stays flat forever. It is a
+fine per-node process viewer; it is not a memory monitor here, and it only ever
+shows one host.
+
+`glances` genuinely does multi-node (`glances -s` per node, then
+`glances --browser`), at the cost of a resident Python process on every box —
+which is the thing this whole role exists to avoid.
+
 ## <a name="history-without-a-daemon"></a>History, without a daemon
 
 `gx10-status` answers *what is happening now*. Nothing answered *what happened
@@ -178,6 +291,9 @@ node_memory_SwapTotal_bytes - node_memory_SwapFree_bytes
 | Symptom | Cause | Fix |
 |---|---|---|
 | `gx10-status: command not found` | Not provisioned, or no new login | `make apply TAGS=monitoring`; re-login for PATH |
+| `gx10-top` shows one node only | No peers file — the cluster role writes it | `make apply TAGS=cluster`, or pass `-H a,b` |
+| `gx10-top` RoCE rows all `0B/0B` | Genuinely idle, or you are reading netdev counters by hand | [RDMA is invisible to netdev](#roce-counters) |
+| `gx10-top` column reads `(down)` | That node is unreachable over SSH | Its numbers are cleared, not stale; check the node |
 | GPU panels empty, host panels fine | Dashboard expects `DCGM_FI_*` | Use `gx10_gpu_*`; DCGM support on GB10 is partial |
 | "GPU memory" panel blank | It does not exist here | Use host memory — see above |
 | `power.limit` missing from metrics | `nvidia-smi` reports `[N/A]` on GB10 | Expected; the collector skips `[N/A]` rather than emitting a fake 0 |

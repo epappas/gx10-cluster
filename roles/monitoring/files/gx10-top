@@ -1,0 +1,472 @@
+#!/usr/bin/env bash
+# Managed by gx10-cluster ansible (roles/monitoring). Local edits overwritten.
+#
+# Cluster-wide live view: every GX10 side by side in one screen, with ZERO
+# resident cost. Nothing runs between refreshes - it forks a collector per node,
+# renders one frame, and sleeps. That is the same bargain as gx10-status and
+# gx10-sample, extended across the cluster.
+#
+#   gx10-top             all nodes, 2 s refresh
+#   gx10-top -i 5        slower
+#   gx10-top -1          one frame and exit (scriptable)
+#   gx10-top -H a,b      explicit hosts
+#
+# The collector is SHIPPED to each node over stdin rather than installed
+# alongside this file. One file to deploy, and - the real reason - a renderer
+# can never disagree with a stale collector left on some node by an older run.
+#
+# Nodes come from /etc/gx10/interconnect.peers (management names, deduplicated)
+# plus this host, so it needs no inventory of its own.
+#
+# WHY THE RoCE ROWS DO NOT USE NETDEV COUNTERS
+# RDMA bypasses the kernel network stack entirely. MEASURED: pushing 66 GiB
+# across the cable moved /sys/class/net/<if>/statistics/tx_bytes by exactly 0.
+# The only source that sees it is the RDMA port counter, in 4-octet words:
+# port_xmit_data * 4 came to 68291 MiB over 5 s = 13.3 GB/s, matching what
+# ib_write_bw reported to the byte. A netdev-based RoCE panel would read a flat
+# zero on a link running at full speed - the exact "looks broken, is fine" trap
+# this cluster is prone to.
+set -uo pipefail
+# NOT -e. A node that is powered off, rebooting or unreachable must degrade to
+# one grey column, not take the whole view down with it.
+
+interval=2
+once=false
+hosts_override=""
+INTERNET_TARGET=${GX10_TOP_TARGET:-1.1.1.1}
+PEERS=${GX10_PEERS_FILE:-/etc/gx10/interconnect.peers}
+# The internet probe runs every Nth frame, not every frame: it is the only thing
+# here that touches a machine outside the cluster, and a 2 s ping loop from
+# every node forever is rude for a number that changes slowly.
+PROBE_EVERY=5
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -i) interval=${2:?}; shift 2 ;;
+        -1) once=true; shift ;;
+        -H) hosts_override=${2:?}; shift 2 ;;
+        -h|--help) sed -n '3,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) printf 'unknown option: %s\n' "$1" >&2; exit 2 ;;
+    esac
+done
+
+# --------------------------------------------------------------------------
+# The collector. Runs once per node per frame and prints flat key=value lines.
+# Everything here is /proc and /sys except two nvidia-smi calls, one docker
+# call and (occasionally) a ping.
+# --------------------------------------------------------------------------
+read -r -d '' COLLECTOR <<'PAYLOAD' || true
+probe=${1:-0}; target=${2:-1.1.1.1}
+p() { printf '%s=%s\n' "$1" "$2"; }
+
+p host "$(cat /proc/sys/kernel/hostname)"
+p now "$(date +%s)"
+p up "$(cut -d. -f1 /proc/uptime)"
+p load1 "$(cut -d' ' -f1 /proc/loadavg)"
+
+# --- CPU. Totals only; the renderer turns successive frames into percentages.
+awk '/^cpu /{t=0; for(i=2;i<=NF;i++) t+=$i; print "cpu_tot="t; print "cpu_idle="$5+$6}' /proc/stat
+
+# P-cores are found by DynamIQ capacity rather than hardcoded: on this box the
+# X925s report ~1000 and the A725s ~720, but the split differs per platform and
+# the part IDs do not sort usefully (0xd85 is the FAST one, below 0xd87).
+pcores=$(for c in /sys/devices/system/cpu/cpu[0-9]*; do
+    cap=$(cat "$c/cpu_capacity" 2>/dev/null) || continue
+    [[ -n $cap ]] && printf '%s %s\n' "${c##*/cpu}" "$cap"
+done | awk '{n[$1]=$2; if($2>max) max=$2} END{for(i in n) if(n[i] > max*0.85) printf "%s ", i}')
+p pcores "$(echo "$pcores" | tr -s ' ' | sed 's/ $//')"
+if [[ -n ${pcores// /} ]]; then
+    awk -v list="$pcores" 'BEGIN{split(list,a," "); for(i in a) want["cpu"a[i]]=1}
+        $1 in want {for(i=2;i<=NF;i++) t+=$i; idle+=$5+$6}
+        END{print "pcpu_tot="t+0; print "pcpu_idle="idle+0}' /proc/stat
+fi
+p ncpu "$(nproc --all)"
+
+# --- Memory. On this hardware this IS GPU memory; there is no framebuffer.
+awk '/^MemTotal:/{p("mem_total_kb",$2)} /^MemAvailable:/{p("mem_avail_kb",$2)}
+     /^SwapTotal:/{st=$2} /^SwapFree:/{sf=$2}
+     END{print "swap_used_kb="st-sf}
+     function p(k,v){print k"="v}' /proc/meminfo
+
+# --- Disk and NVMe
+df -B1 --output=avail,pcent / 2>/dev/null | tail -1 \
+    | awk '{gsub(/%/,"",$2); print "disk_avail="$1; print "disk_pct="$2}'
+for h in /sys/class/hwmon/hwmon*; do
+    case "$(cat "$h/name" 2>/dev/null)" in
+        nvme) t=$(cat "$h/temp1_input" 2>/dev/null) && p nvme_temp $(( t / 1000 )); break ;;
+    esac
+done
+
+# --- GPU
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi --query-gpu=utilization.gpu,temperature.gpu,power.draw,clocks.sm \
+               --format=csv,noheader,nounits 2>/dev/null | tr -d ' ' \
+      | awk -F, 'NR==1{print "gpu_util="$1; print "gpu_temp="$2;
+                       print "gpu_power="$3; print "gpu_clock="$4}'
+    perf=$(nvidia-smi -q -d PERFORMANCE 2>/dev/null)
+    # SW Power Cap deliberately excluded: measured Active in 7 of 15 one-second
+    # idle samples and 46% of uptime. It is DVFS, not a fault, and warning on it
+    # buries a real thermal slowdown. The cumulative counter is kept instead.
+    faults=$(awk '/Clocks Event Reasons/,/Counters/' <<< "$perf" \
+        | awk -F': *' '$2 == "Active" {gsub(/^ +| +$/,"",$1); print $1}' \
+        | grep -v '^SW Power Cap$' | paste -sd, -)
+    p gpu_throttle "${faults:-none}"
+    cap=$(awk -F': *' '/SW Power Capping/{gsub(/ us/,"",$2); print $2; exit}' <<< "$perf")
+    [[ -n ${cap:-} && $cap != 0 ]] && p gpu_capped_min $(( cap / 60000000 ))
+fi
+
+# --- Network. Classify by role so the columns mean something.
+wan=$(ip route show default 2>/dev/null | awk 'NR==1{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}')
+gw=$(ip route show default 2>/dev/null | awk 'NR==1{for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}')
+p gw "${gw:--}"
+# The RoCE netdevs are excluded on purpose - see the header. Their netdev
+# counters stay at zero while the cable is saturated.
+roce_nd=""
+for d in /sys/class/infiniband/*; do
+    [[ -d $d/device/net ]] || continue
+    for n in "$d/device/net"/*; do roce_nd+=" ${n##*/}"; done
+done
+for i in /sys/class/net/*; do
+    n=${i##*/}
+    [[ $n == lo ]] && continue
+    [[ " $roce_nd " == *" $n "* ]] && continue
+    [[ $(cat "$i/operstate" 2>/dev/null) == up || $n == nordlynx ]] || continue
+    case "$n" in
+        "$wan")    lbl=wan ;;
+        nordlynx)  lbl=vpn ;;
+        docker*|br-*) lbl=dock ;;
+        wl*)       lbl=wifi ;;
+        *)         lbl=net ;;
+    esac
+    printf 'net=%s:%s:%s:%s\n' "$lbl" "$n" \
+        "$(cat "$i/statistics/rx_bytes" 2>/dev/null || echo 0)" \
+        "$(cat "$i/statistics/tx_bytes" 2>/dev/null || echo 0)"
+done
+
+# --- RoCE, from the RDMA counters. Units are 4-octet words; the renderer
+# multiplies. Only ACTIVE ports are reported - the uncabled QSFP port
+# contributes two permanently-down devices and listing them is just noise.
+for d in /sys/class/infiniband/*; do
+    dev=${d##*/}
+    st=$(cat "$d/ports/1/state" 2>/dev/null); st=${st#*: }
+    [[ $st == ACTIVE ]] || continue
+    nd=""; for n in "$d/device/net"/*; do nd=${n##*/}; done
+    printf 'roce=%s:%s:%s:%s:%s\n' "$dev" "${nd:--}" \
+        "$(cat "$d/ports/1/counters/port_rcv_data" 2>/dev/null || echo 0)" \
+        "$(cat "$d/ports/1/counters/port_xmit_data" 2>/dev/null || echo 0)" \
+        "$(cat "/sys/class/net/$nd/mtu" 2>/dev/null || echo '-')"
+done
+
+# --- Docker
+if docker ps -q >/dev/null 2>&1; then
+    p dock_run "$(docker ps -q 2>/dev/null | wc -l)"
+    p dock_all "$(docker ps -aq 2>/dev/null | wc -l)"
+    docker ps --format '{{.Names}}|{{.Status}}' 2>/dev/null | head -4 \
+        | while IFS='|' read -r nm stt; do printf 'dock_item=%s:%s\n' "$nm" "$stt"; done
+else
+    p dock_run -; p dock_all -
+fi
+
+# --- Reachability, only on probe frames.
+if [[ $probe == 1 ]]; then
+    for spec in "gw_rtt:${gw:-}" "inet_rtt:$target"; do
+        k=${spec%%:*}; ip=${spec#*:}
+        if [[ -n $ip ]]; then
+            r=$(ping -c1 -W1 "$ip" 2>/dev/null | awk -F'time=' '/time=/{split($2,a," "); print a[1]; exit}')
+            p "$k" "${r:-x}"
+        else
+            p "$k" -
+        fi
+    done
+fi
+PAYLOAD
+
+# --------------------------------------------------------------------------
+# Node discovery
+# --------------------------------------------------------------------------
+me=$(cat /proc/sys/kernel/hostname)
+nodes=("$me")
+if [[ -n $hosts_override ]]; then
+    IFS=, read -r -a nodes <<< "$hosts_override"
+elif [[ -r $PEERS ]]; then
+    while read -r n _; do
+        [[ -z ${n:-} || $n == \#* ]] && continue
+        [[ " ${nodes[*]} " == *" $n "* ]] || nodes+=("$n")
+    done < "$PEERS"
+fi
+
+CTL=$(mktemp -d "${TMPDIR:-/tmp}/gx10top.XXXXXX")
+trap 'rm -rf "$CTL"' EXIT INT TERM
+# ControlPersist matters at a 2 s refresh: without connection reuse every frame
+# pays a fresh TCP handshake plus key exchange per node, which costs more than
+# everything the collector does.
+SSHOPTS=(-o BatchMode=yes -o ConnectTimeout=4 -o ControlMaster=auto
+         -o "ControlPath=$CTL/%r@%h:%p" -o ControlPersist=30)
+
+declare -A D=() PREV=() SWG=()
+frame=0
+
+collect() {
+    local probe=$1 h
+    # Fan out. Frame time is then the SLOWEST node, not the sum of all of them.
+    for h in "${nodes[@]}"; do
+        if [[ $h == "$me" ]]; then
+            bash -s -- "$probe" "$INTERNET_TARGET" <<< "$COLLECTOR" > "$CTL/$h.out" 2>/dev/null &
+        else
+            ssh "${SSHOPTS[@]}" "$h" bash -s -- "$probe" "$INTERNET_TARGET" \
+                <<< "$COLLECTOR" > "$CTL/$h.out" 2>/dev/null &
+        fi
+    done
+    wait
+    for h in "${nodes[@]}"; do
+        # Wipe this host's slice, so a node that drops out shows blanks rather
+        # than whatever it last reported - stale numbers presented as live are
+        # worse than an obvious gap.
+        local k
+        for k in "${!D[@]}"; do [[ $k == "$h|"* ]] && unset 'D[$k]'; done
+        D["$h|ok"]=0
+        [[ -s "$CTL/$h.out" ]] || continue
+        while IFS='=' read -r key val; do
+            [[ -z ${key:-} ]] && continue
+            case "$key" in
+                net|roce|dock_item) D["$h|$key"]+="$val"$'\n' ;;
+                *) D["$h|$key"]=$val ;;
+            esac
+        done < "$CTL/$h.out"
+        D["$h|ok"]=1
+    done
+}
+
+hum() {  # bytes -> human, fixed width
+    awk -v b="${1:-0}" 'BEGIN{
+        u="B"; if(b>=1073741824){b/=1073741824;u="G"} else if(b>=1048576){b/=1048576;u="M"}
+        else if(b>=1024){b/=1024;u="K"}
+        printf (u=="B") ? "%.0f%s" : "%.1f%s", b, u}'
+}
+
+# NOTE both helpers below return through the global RET rather than stdout, and
+# must NOT be called inside $( ). They mutate PREV, which is the delta baseline;
+# a command substitution runs them in a subshell, so every write was thrown away
+# and every rate rendered as "-" forever. Measured that the hard way.
+RET=""
+pct_delta() {  # $1 total_now $2 idle_now $3 key -> sets RET to busy %
+    local tn=${1:-0} in=${2:-0} k=$3 tp ip dt di
+    tp=${PREV[${k}_t]:-}; ip=${PREV[${k}_i]:-}
+    PREV[${k}_t]=$tn; PREV[${k}_i]=$in
+    if [[ -z $tp || -z $ip ]]; then RET="-"; return; fi
+    dt=$((tn - tp)); di=$((in - ip))
+    if (( dt <= 0 )); then RET="-"; return; fi
+    RET=$(awk -v d="$dt" -v i="$di" 'BEGIN{printf "%.0f", (d-i)*100/d}')
+}
+
+rate() {  # $1 now $2 key $3 scale -> sets RET to bytes/sec, compact
+    local now=${1:-0} k=$2 sc=${3:-1} prev d
+    prev=${PREV[$k]:-}
+    PREV[$k]=$now
+    if [[ -z $prev ]]; then RET="-"; return; fi
+    d=$(( (now - prev) * sc ))
+    (( d < 0 )) && d=0
+    RET=$(hum $(( d / interval )))
+}
+
+# Column helpers. One place decides width, so every row lines up.
+W=16
+row() { local lbl=$1 sub=$2; shift 2; printf '  %-9s %-9s' "$lbl" "$sub"
+        local v; for v in "$@"; do printf '%*s' "$W" "$v"; done; printf '\n'; }
+hr()  { printf '  %s\n' "$(printf '%.0s-' $(seq 1 $((19 + W * ${#nodes[@]}))))"; }
+
+render() {
+    local h vals=() n
+    printf '\033[H\033[2J'
+    printf '\033[1mgx10-top\033[0m   %d node(s)   %ss refresh   net rates rx/tx per s   inet %s   %s\n\n' \
+        "${#nodes[@]}" "$interval" "$INTERNET_TARGET" "$(date '+%H:%M:%S')"
+
+    printf '  %-9s %-9s' "" ""
+    for h in "${nodes[@]}"; do
+        if [[ ${D["$h|ok"]:-0} == 1 ]]; then printf '\033[1m%*s\033[0m' "$W" "$h"
+        else printf '\033[31m%*s\033[0m' "$W" "$h (down)"; fi
+    done; printf '\n'; hr
+
+    # ---- GPU (the nvtop half)
+    local gpulbl=GPU
+    for spec in "util:gpu_util:%" "temp:gpu_temp: C" "power:gpu_power: W" "clock:gpu_clock: MHz"; do
+        local lb=${spec%%:*} rest=${spec#*:} key sfx
+        key=${rest%%:*}; sfx=${rest#*:}
+        vals=(); for h in "${nodes[@]}"; do
+            n=${D["$h|$key"]:-}; vals+=("${n:+$n$sfx}"); vals[-1]=${vals[-1]:--}
+        done
+        row "${gpulbl}" "$lb" "${vals[@]}"; gpulbl=""
+    done
+    vals=(); for h in "${nodes[@]}"; do vals+=("${D["$h|gpu_throttle"]:--}"); done
+    local bad=0; for v in "${vals[@]}"; do [[ $v != none && $v != - ]] && bad=1; done
+    (( bad )) && printf '\033[31m' ; row "" throttle "${vals[@]}"; (( bad )) && printf '\033[0m'
+    vals=(); for h in "${nodes[@]}"; do
+        n=${D["$h|gpu_capped_min"]:-}; vals+=("${n:+$n min}"); vals[-1]=${vals[-1]:--}
+    done; row "" pwr-capped "${vals[@]}"
+    hr
+
+    # ---- CPU / memory / disk (the glances half)
+    vals=(); for h in "${nodes[@]}"; do
+        pct_delta "${D["$h|cpu_tot"]:-0}" "${D["$h|cpu_idle"]:-0}" "$h.cpu"; vals+=("$RET%")
+    done
+    row CPU total "${vals[@]}"
+    vals=(); for h in "${nodes[@]}"; do
+        pct_delta "${D["$h|pcpu_tot"]:-0}" "${D["$h|pcpu_idle"]:-0}" "$h.pcpu"; vals+=("$RET%")
+    done
+    row "" P-cores "${vals[@]}"
+    vals=(); for h in "${nodes[@]}"; do vals+=("${D["$h|load1"]:--}"); done
+    row "" load1 "${vals[@]}"
+    vals=(); for h in "${nodes[@]}"; do
+        n=${D["$h|up"]:-}
+        if [[ -n $n ]]; then vals+=("$(( n/86400 ))d $(( (n%86400)/3600 ))h"); else vals+=("-"); fi
+    done; row "" uptime "${vals[@]}"
+
+    vals=(); for h in "${nodes[@]}"; do
+        local t=${D["$h|mem_total_kb"]:-0} a=${D["$h|mem_avail_kb"]:-0}
+        if (( t > 0 )); then vals+=("$(( (t-a)/1048576 ))/$(( t/1048576 )) GB"); else vals+=("-"); fi
+    done
+    # Labelled as what it is: there is no separate VRAM number on this hardware.
+    row Memory "used(=GPU)" "${vals[@]}"
+    # Swap is judged on GROWTH, not presence. Both nodes sit on a few hundred kB
+    # of long-idle pages, so alarming on "> 0" lit the divergence line red
+    # permanently - the same coin-flip alarm that was removed from the SW Power
+    # Cap warning, and it would bury a genuine excursion the same way. The level
+    # is always displayed; only an increase between frames is a warning.
+    local sw=0
+    vals=(); for h in "${nodes[@]}"; do
+        local s=${D["$h|swap_used_kb"]:-0} sp=${PREV[$h.swap]:-}
+        PREV[$h.swap]=$s
+        SWG[$h]=0
+        if [[ -n $sp ]] && (( s > sp )); then SWG[$h]=1; sw=1; fi
+        if (( s >= 1024 )); then vals+=("$(( s/1024 )) MB"); else vals+=("$s kB"); fi
+    done
+    (( sw )) && printf '\033[31m'; row "" swap "${vals[@]}"; (( sw )) && printf '\033[0m'
+
+    vals=(); for h in "${nodes[@]}"; do vals+=("$(hum "${D["$h|disk_avail"]:-0}") free"); done
+    row Disk root "${vals[@]}"
+    vals=(); for h in "${nodes[@]}"; do n=${D["$h|nvme_temp"]:-}; vals+=("${n:+$n C}"); vals[-1]=${vals[-1]:--}; done
+    row "" nvme "${vals[@]}"
+    hr
+
+    # ---- Network, by role. Union of labels across nodes so a NIC that only
+    # exists on one box still gets a row instead of silently vanishing.
+    local labels=() seen lbl iface
+    for h in "${nodes[@]}"; do
+        while IFS=: read -r lbl iface _ _; do
+            [[ -z ${lbl:-} ]] && continue
+            seen=0; for x in "${labels[@]:-}"; do [[ $x == "$lbl:$iface" ]] && seen=1; done
+            (( seen )) || labels+=("$lbl:$iface")
+        done <<< "${D["$h|net"]:-}"
+    done
+    local first=1
+    for entry in "${labels[@]:-}"; do
+        [[ -z $entry ]] && continue
+        lbl=${entry%%:*}; iface=${entry#*:}
+        vals=(); for h in "${nodes[@]}"; do
+            local line rx="" tx=""
+            line=$(grep -m1 "^$lbl:$iface:" <<< "${D["$h|net"]:-}" || true)
+            if [[ -n $line ]]; then IFS=: read -r _ _ rx tx <<< "$line"
+                rate "$rx" "$h.$iface.rx"; local rr=$RET
+                rate "$tx" "$h.$iface.tx"; vals+=("$rr/$RET")
+            else vals+=("-"); fi
+        done
+        row "${first:+Network}" "$lbl $iface" "${vals[@]}"; first=""
+    done
+
+    # ---- RoCE. Counters are 4-octet words, hence the x4.
+    local rdev rrx rtx rlist=()
+    for h in "${nodes[@]}"; do
+        while IFS=: read -r rdev _; do
+            [[ -z ${rdev:-} ]] && continue
+            seen=0; for x in "${rlist[@]:-}"; do [[ $x == "$rdev" ]] && seen=1; done
+            (( seen )) || rlist+=("$rdev")
+        done <<< "${D["$h|roce"]:-}"
+    done
+    for rdev in "${rlist[@]:-}"; do
+        [[ -z $rdev ]] && continue
+        vals=(); for h in "${nodes[@]}"; do
+            local line
+            line=$(grep -m1 "^$rdev:" <<< "${D["$h|roce"]:-}" || true)
+            if [[ -n $line ]]; then IFS=: read -r _ _ rrx rtx _ <<< "$line"
+                rate "$rrx" "$h.$rdev.rx" 4; local rr=$RET
+                rate "$rtx" "$h.$rdev.tx" 4; vals+=("$rr/$RET")
+            else vals+=("-"); fi
+        done
+        row "" "RoCE ${rdev#roce}" "${vals[@]}"
+    done
+    vals=(); for h in "${nodes[@]}"; do
+        n=$(awk -F: 'NR==1{print $5}' <<< "${D["$h|roce"]:-}"); vals+=("${n:+mtu $n}"); vals[-1]=${vals[-1]:--}
+    done; row "" "RoCE mtu" "${vals[@]}"
+
+    vals=(); for h in "${nodes[@]}"; do
+        n=${D["$h|gw_rtt"]:-}; vals+=("${n:+gw ${n} ms}"); vals[-1]=${vals[-1]:--}
+    done; row "" reach "${vals[@]}"
+    vals=(); for h in "${nodes[@]}"; do
+        n=${D["$h|inet_rtt"]:-}
+        case "$n" in "") vals+=("-") ;; x) vals+=("unreachable") ;;
+                     *) vals+=("${n} ms") ;; esac
+    done; row "" internet "${vals[@]}"
+    hr
+
+    # ---- Docker
+    vals=(); for h in "${nodes[@]}"; do
+        vals+=("${D["$h|dock_run"]:--}/${D["$h|dock_all"]:--} up")
+    done; row Docker containers "${vals[@]}"
+    local maxi=0 c
+    for h in "${nodes[@]}"; do
+        c=$(grep -c . <<< "${D["$h|dock_item"]:-}" || true); (( c > maxi )) && maxi=$c
+    done
+    for (( i = 1; i <= maxi; i++ )); do
+        vals=(); for h in "${nodes[@]}"; do
+            n=$(sed -n "${i}p" <<< "${D["$h|dock_item"]:-}"); n=${n%%:*}
+            vals+=("${n:0:$((W-1))}"); vals[-1]=${vals[-1]:--}
+        done; row "" "" "${vals[@]}"
+    done
+    hr
+
+    # ---- Divergence. The whole point of a cluster view: differences between
+    # nodes that each node's own dashboard cannot possibly show you.
+    local warn=() skew a b
+    if (( ${#nodes[@]} > 1 )); then
+        a=${D["${nodes[0]}|now"]:-0}; b=${D["${nodes[1]}|now"]:-0}
+        if (( a > 0 && b > 0 )); then
+            skew=$(( a > b ? a - b : b - a ))
+            # munge (Slurm) rejects credentials once clocks drift, with errors
+            # that never mention time.
+            (( skew > 2 )) && warn+=("clock skew ${skew}s")
+        fi
+        local m0 m1
+        m0=$(awk -F: 'NR==1{print $5}' <<< "${D["${nodes[0]}|roce"]:-}")
+        m1=$(awk -F: 'NR==1{print $5}' <<< "${D["${nodes[1]}|roce"]:-}")
+        # Asymmetric MTU drops packets silently instead of failing loudly.
+        [[ -n $m0 && -n $m1 && $m0 != "$m1" ]] && warn+=("RoCE MTU $m0 vs $m1")
+    fi
+    for h in "${nodes[@]}"; do
+        [[ ${D["$h|ok"]:-0} == 1 ]] || warn+=("$h unreachable")
+        n=${D["$h|gpu_throttle"]:-none}; [[ $n != none && $n != - ]] && warn+=("$h throttled: $n")
+        (( ${SWG[$h]:-0} )) && warn+=("$h swap GROWING - $(( ${D["$h|swap_used_kb"]:-0} / 1024 )) MB")
+    done
+    if (( ${#warn[@]} )); then
+        printf '  \033[31m!\033[0m %s\n' "${warn[@]}"
+    else
+        printf '  \033[32mok\033[0m  nodes agree; nothing throttled, no swap growth\n'
+    fi
+}
+
+# Every rate here is a delta between two frames, so the first frame has no
+# baseline. Prime it with a discarded render rather than showing a screen of
+# dashes - and do the same for -1, because a one-shot that reports no network
+# activity at all is not merely unhelpful, it is wrong.
+printf 'gx10-top: sampling %d node(s)...\n' "${#nodes[@]}"
+collect 0
+render > /dev/null
+
+if $once; then
+    sleep "$interval"; collect 1; render; exit 0
+fi
+while true; do
+    frame=$(( frame + 1 ))
+    sleep "$interval"
+    if (( frame % PROBE_EVERY == 1 )); then collect 1; else collect 0; fi
+    render
+done

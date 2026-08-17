@@ -198,10 +198,15 @@ verify_checks:
 
     # In /usr/local/bin rather than ~/.local/bin, so that `ssh <node>
     # gx10-interconnect` works: that is a non-login shell and never gets
-    # ~/.local/bin on PATH.
+    # ~/.local/bin on PATH. Same for gx10-top below, which is invoked over SSH
+    # by its own collector fan-out.
   - name: "gx10-interconnect"
     cmd: "test -x /usr/local/bin/gx10-interconnect"
     hint: "Interconnect diagnostic missing. Re-run: make apply TAGS=cluster"
+
+  - name: "gx10-top"
+    cmd: "test -x /usr/local/bin/gx10-top"
+    hint: "Cluster-wide top missing. Re-run: make apply TAGS=monitoring"
 
     # Tests the TIMER, not the service. The service is oneshot and is inactive
     # almost all the time by design - it runs for ~0.08 s and exits - so

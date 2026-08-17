@@ -34,6 +34,26 @@
 # is that it is a LISTENER whose data exists only while something external
 # scrapes it. This keeps recording with your laptop shut.
 # ---------------------------------------------------------------------------
+# The cluster-wide view. Same bargain as the other two: it forks a collector per
+# node, renders a frame and sleeps, so nothing is resident between refreshes.
+#
+# /usr/local/bin rather than ~/.local/bin beside gx10-status, for the same
+# reason gx10-interconnect lives there: it is invoked over SSH by its own
+# collector fan-out and by anything scripting it, and a non-login shell never
+# gets ~/.local/bin on PATH.
+#
+# It ships its own collector to each node over stdin instead of relying on a
+# copy being installed remotely, so a node running an older provision cannot
+# feed the renderer a payload it does not understand.
+- name: Install the cluster-wide top
+  ansible.builtin.copy:
+    src: gx10-top
+    dest: /usr/local/bin/gx10-top
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
 - name: Install the history sampler
   ansible.builtin.copy:
     src: gx10-sample
