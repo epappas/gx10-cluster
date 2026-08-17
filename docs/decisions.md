@@ -664,8 +664,39 @@ is the identical coin-flip alarm removed from the `SW Power Cap` warning
 ([why](#history-timer)), and it would bury a real excursion the same way. The
 level is always displayed; only an increase between frames warns.
 
-One implementation trap, recorded because it is silent and cost a debugging
-round: the rate and percentage helpers mutate the delta baseline, so calling them
-inside `$( )` ran them in a subshell and discarded every write. Every rate
-rendered as `-` forever, on every frame, with no error. They now return through a
-global instead.
+**It has to be readable at a glance, not parsed.** A monitoring tool you must
+read line by line is one you stop opening. So the top two lines are a green `OK`
+or a red `ALERT` naming the fault, and the common case needs no reading at all;
+below that, bars carry magnitude and sparklines carry ~12 samples of trend.
+Colour is consistent - green fine, amber >60%, red >85% or broken - with GPU
+utilisation the deliberate exception, cyan and never red, because a busy GPU is
+the goal rather than an alarm.
+
+**GPU processes are attributed to their container.** `nvidia-smi` only ever sees
+the host pid and reports a containerised process as a bare `python`, so "which
+container is keeping the GPU busy" had no answer anywhere on the box. The tool
+reads the pid's cgroup and matches the 12-hex id against `docker ps`, printing
+`@name`. Verified against a `--gpus all` container: pid 244850 ->
+`docker-<64hex>.scope` -> `gputest`. Note also that `--query-compute-apps` does
+report per-process GPU memory on GB10 (measured 767 MiB for a torch process) even
+though the device-level memory query returns `[N/A]` - no framebuffer to total,
+but per-process accounting works.
+
+Three implementation traps, recorded because each is silent.
+
+The rate and percentage helpers mutate the delta baseline, so calling them inside
+`$( )` ran them in a subshell and discarded every write. Every rate rendered as
+`-` forever, on every frame, with no error. They return through a global now.
+
+`printf %*s` pads by **bytes**, not display columns, so a bar drawn with U+2588
+(3 bytes, 1 column) destroys the grid. Bars are therefore ASCII; sparklines,
+which have no ASCII equivalent worth having, are padded by hand from a known
+sample count.
+
+The first version trapped `INT` to clean up but never exited, so Ctrl-C ran the
+handler and the loop carried straight on - the view could not be quit at all.
+Cleanup is now on `EXIT` and `INT`/`TERM` just `exit 130`; the refresh wait is a
+`read -t` rather than `sleep`, so `q` works too without a second thread. Testing
+that needs a real pty: launched with `&` from a non-interactive shell, bash
+inherits SIGINT as ignored and refuses to trap it at all, which looks exactly
+like the bug that was just fixed.

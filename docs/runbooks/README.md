@@ -17,6 +17,7 @@ table. If you worked something out at 2am, it belongs here.
 | Measure the cluster and prove it performs | [benchmark](benchmark.md) |
 | See what the machine is doing | [monitoring](monitoring.md) |
 | Watch both nodes live in one screen | [monitoring](monitoring.md#cluster-wide) |
+| Find which container or process is using the GPU | [monitoring](monitoring.md#who-is-on-the-gpu) |
 | Update packages without breaking CUDA | [upgrade-drivers](upgrade-drivers.md) |
 | Get back in after an SSH lockout | [recover-ssh-lockout](recover-ssh-lockout.md) |
 | Diagnose anything else | [troubleshoot](troubleshoot.md) |

@@ -81,40 +81,83 @@ gx10-top             # all nodes, 2 s refresh
 gx10-top -i 5        # slower
 gx10-top -1          # one frame and exit (scriptable)
 gx10-top -H a,b      # explicit hosts
+q  or  Ctrl-C        # quit
 ```
 
 ```
-gx10-top   2 node(s)   2s refresh   net rates rx/tx per s   inet 1.1.1.1
+ gx10-top  2 node(s) · 2s · q quits · inet 1.1.1.1  11:04:33
+   OK    nodes agree · nothing throttled · no swap growth
 
-                             odysseus        poseidon
-  GPU       util                   0%              0%
-            temp                 57 C            50 C
-            power              5.06 W         10.86 W
-            clock             208 MHz        2405 MHz
-            throttle             none            none
-            pwr-capped        1136 min        1059 min
-  CPU       total                 62%              6%
-            P-cores               56%              6%
-            load1               11.37            0.59
-            uptime             1d 16h          1d 16h
-  Memory    used(=GPU)       10/121 GB       13/121 GB
-            swap               636 kB           11 MB
-  Disk      root          600.7G free     602.9G free
-            nvme                 49 C            46 C
-  Network   wan enP7s7      4.8K/25.8K       4.1K/1.8K
-            vpn nordlynx     1.6K/3.1K           0B/0B
-            wifi wlP9s9      3.3K/3.6K               -
-            RoCE p1s0f0    44.2M/17.6G     15.1G/37.8M
-            RoCE P2p1s0f0        0B/0B           0B/0B
-            RoCE mtu          mtu 9000        mtu 9000
-            reach          gw 0.713 ms     gw 0.680 ms
-            internet           13.8 ms         14.9 ms
-  Docker    containers          1/1 up          2/2 up
+                                     odysseus                poseidon
+  GPU   util                [#########-]  96%       [----------]   0%
+        trend                              ▇▇                      ▁▁
+        temp/power                71C  89.26W             51C  10.88W
+        clock                        2249 MHz                2405 MHz
+        throttle                         none                    none
+        pwr-capped                   1146 min                1059 min
+        on-GPU       41642M @ar-fleet-9a43381f  431M @latent-cloud-d64
+                                415M @gputest  507M @latent-cloud-d16
+  ---------------------------------------------------------------------
+  CPU   total               [#---------]  11%       [----------]   1%
+        P-cores             [##--------]  21%       [----------]   1%
+        trend                              .▁                      .▁
+        load1/up                  0.61  1d17h             0.41  1d17h
+  BUSY  top by cpu       103.0% python   737.7M      1.1% bash     4.2M
+                           8.9% VLLM     4.0G      0.7% python3  1.3G
+                         0.7% claude   784.3M    0.6% nordvpnd 126.4M
+  ---------------------------------------------------------------------
+  MEM   used(=GPU)          [####------]  45%       [#---------]  10%
+        unified                   55 / 121 GB             13 / 121 GB
+        swap                           636 kB                   11 MB
+  DISK  used                [###-------]  32%       [###-------]  31%
+        free/nvme            599.4G free  45C        600.8G free  45C
+  ---------------------------------------------------------------------
+  NET   wan enP7s7               v8.8K ^24.3K             v7.0K ^5.7K
+        vpn nordlynx              v1.3K ^2.7K             v1.5K ^3.7K
+        RoCE p1s0f0                   v0B ^0B                 v0B ^0B
+        RoCE mtu                     mtu 9000                mtu 9000
+        reach            gw 0.6ms  net 14.5ms    gw 0.8ms  net 14.1ms
+  DOCK  containers                2/2 running             2/3 running
 ```
 
-Covers the `nvtop` half (GPU util/temp/power/clock/throttle), the `glances` half
-(CPU with a **P-core** split, memory, swap, disk, load, uptime), all four network
-roles (WAN, VPN, WiFi, Docker bridge, RoCE), reachability, and Docker.
+**Read the top two lines and stop.** The banner is either a green `OK` or a red
+`ALERT` naming what is wrong, so the common case needs no reading at all. Below
+it, bars give you magnitude at a glance and sparklines give you the last ~12
+samples of trend, so you can see a climb without watching for it.
+
+Colour means one thing consistently: **green fine, amber >60%, red >85% or
+broken**. GPU utilisation is the deliberate exception — it is cyan and never
+red, because a busy GPU is the goal here, not an alarm.
+
+### <a name="who-is-on-the-gpu"></a>Which container is keeping the GPU busy
+
+The `on-GPU` rows answer this, and nothing else on the box does:
+
+```
+on-GPU   41642M @ar-fleet-9a43381f     <- @ prefix = container
+              415M @gputest
+              767M python              <- no @ = host process
+```
+
+`nvidia-smi` only ever sees the **host** pid, and reports a containerised
+process as a bare `python` with no hint of which container it belongs to. The
+attribution comes from reading that pid's cgroup and matching the 12-hex id
+against `docker ps`. Verified against a `--gpus all` container: pid 244850 →
+`docker-<64hex>.scope` → `gputest`.
+
+Worth knowing: `--query-compute-apps` **does** report per-process GPU memory on
+GB10 (measured 767 MiB for a torch process) even though the *device-level*
+memory query returns `[N/A]`. There is no framebuffer to total up, but
+per-process accounting still works.
+
+`BUSY  top by cpu` is the other half of the same question — the top 5 processes
+by CPU with their RSS, per node. Percentages are summed across cores, so >100%
+is normal and expected for a threaded job.
+
+Covers the `nvtop` half (GPU util/temp/power/clock/throttle, plus who is on the
+GPU), the `glances` half (CPU with a **P-core** split, top processes, memory,
+swap, disk, load, uptime), every network role (WAN, VPN, WiFi, Docker bridge,
+RoCE), reachability, and Docker.
 
 **Cost:** nothing resident. It forks a collector per node, renders one frame and
 sleeps — the same bargain as `gx10-status`. Nodes come from
@@ -293,7 +336,10 @@ node_memory_SwapTotal_bytes - node_memory_SwapFree_bytes
 | `gx10-status: command not found` | Not provisioned, or no new login | `make apply TAGS=monitoring`; re-login for PATH |
 | `gx10-top` shows one node only | No peers file — the cluster role writes it | `make apply TAGS=cluster`, or pass `-H a,b` |
 | `gx10-top` RoCE rows all `0B/0B` | Genuinely idle, or you are reading netdev counters by hand | [RDMA is invisible to netdev](#roce-counters) |
-| `gx10-top` column reads `(down)` | That node is unreachable over SSH | Its numbers are cleared, not stale; check the node |
+| `gx10-top` column reads `DOWN` | That node is unreachable over SSH | Its numbers are cleared, not stale; check the node |
+| `gx10-top` will not quit | Fixed — press `q` or Ctrl-C | Earlier builds trapped INT to clean up but never exited |
+| `on-GPU` shows `python` with no `@` | It is a host process, not a container | Expected; the `@name` prefix marks containers |
+| Bars misaligned in your terminal | Terminal is narrower than the table needs | Widen it, or use `-H` with fewer hosts |
 | GPU panels empty, host panels fine | Dashboard expects `DCGM_FI_*` | Use `gx10_gpu_*`; DCGM support on GB10 is partial |
 | "GPU memory" panel blank | It does not exist here | Use host memory — see above |
 | `power.limit` missing from metrics | `nvidia-smi` reports `[N/A]` on GB10 | Expected; the collector skips `[N/A]` rather than emitting a fake 0 |
