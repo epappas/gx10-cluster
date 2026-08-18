@@ -1,0 +1,29 @@
+name: ray
+kind: cluster
+engine: ray
+provenance: unverified
+summary: Ephemeral 2-node Ray cluster in containers (head + worker)
+
+# This is NOT roles/ray, and the difference is deliberate.
+#
+#   roles/ray          a systemd Ray that survives reboots - a standing service
+#   workspaces/cluster/ray  a Ray you start for an experiment and throw away
+#
+# They will fight over ports if you run both. Pick one. For RL work the
+# ephemeral one is usually right: verl pins Ray and you want that version for
+# the run, not whatever the host was provisioned with a month ago.
+requires:
+  gpu_arch: "12.1"
+  min_unified_gb: 16
+  docker: true
+  peers: 1
+
+images:
+  - rayproject/ray:latest-py312-aarch64
+
+endpoints:
+  - "http://127.0.0.1:8265  (Ray dashboard)"
+  - "ray://127.0.0.1:10001  (Ray Client)"
+
+sources:
+  - https://docs.ray.io/en/latest/ray-core/starting-ray.html

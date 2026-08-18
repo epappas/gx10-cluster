@@ -12,6 +12,7 @@ table. If you worked something out at 2am, it belongs here.
 | Work out what the fabric is and whether it works | [diagnose-interconnect](diagnose-interconnect.md) |
 | Tune host network settings for the interconnect | [tune-network](tune-network.md) |
 | Run or serve a model | [serve-models](serve-models.md) |
+| Spin up inference, Ray or RL environments | [workspaces](workspaces.md) |
 | Download or clean up model weights | [manage-models](manage-models.md) |
 | Run a job across both nodes | [run-distributed](run-distributed.md) |
 | Measure the cluster and prove it performs | [benchmark](benchmark.md) |

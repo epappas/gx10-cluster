@@ -17,6 +17,12 @@ skip_list:
 
 exclude_paths:
   - .git/
+  # workspaces/ is deliberately NOT ansible - compose files, job scripts and
+  # engine configs. ansible-lint parses every YAML it finds and reports them as
+  # malformed playbooks, which is both wrong and, since it drops the whole run
+  # to the 'min' profile, hides real findings in roles/. The manifests have
+  # their own validator: tests/check_workspaces.py, wired into `make check`.
+  - workspaces/
 
   # Vault files are ciphertext, not YAML. Line 1 is `$ANSIBLE_VAULT;1.1;AES256`
   # and ansible-lint reports `yaml[document-start]: Missing document start` on

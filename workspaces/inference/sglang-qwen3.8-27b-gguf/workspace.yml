@@ -1,0 +1,32 @@
+name: sglang-qwen3.8-27b-gguf
+kind: inference
+engine: sglang
+provenance: unverified
+summary: Qwen3.8-27B GGUF via SGLang - NOT the NVFP4 build
+
+# READ THIS BEFORE REACHING FOR SGLANG ON THIS HARDWARE.
+#
+# SGLang cannot serve unsloth/Qwen3.8-27B-NVFP4. The checkpoint has a QUANTISED
+# lm_head and SGLang does not support that, so the model that this Blackwell
+# hardware is otherwise ideal for is exactly the one SGLang will not load. The
+# GGUF build works, which is what this workspace uses.
+#
+# So: pick SGLang for its scheduler and structured-output work, not to run
+# NVFP4. If you want NVFP4, the vllm-qwen3.8-27b-nvfp4 workspace is the answer.
+requires:
+  gpu_arch: "12.1"
+  min_unified_gb: 28
+  docker: true
+
+images:
+  - lmsysorg/sglang:latest
+
+models:
+  - unsloth/Qwen3.8-27B-GGUF
+
+endpoints:
+  - "http://127.0.0.1:8900/v1  (OpenAI-compatible)"
+
+sources:
+  - https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4
+  - https://unsloth.ai/docs/models/qwen3.8

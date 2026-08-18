@@ -51,7 +51,7 @@ help:  ## Show this help
 # --- Checks that run anywhere (and in CI) ----------------------------------
 
 .PHONY: check
-check: lint syntax smoke render handlers optional-tags docs lockfile shellcheck  ## Every offline check (what CI runs)
+check: lint syntax smoke render handlers optional-tags workspaces docs lockfile shellcheck  ## Every offline check (what CI runs)
 
 .PHONY: deps
 deps:  ## Install the pinned collections
@@ -109,6 +109,10 @@ optional-tags:  ## Every optional include_role must push its tag onto the role's
 
 # A stale index is worse than no index - it denies the existence of a role or
 # runbook, confidently. This checks coverage only, not prose quality.
+.PHONY: workspaces
+workspaces:  ## Workspace manifests are well-formed and runnable
+	@python3 tests/check_workspaces.py
+
 .PHONY: docs
 docs:  ## Directory indexes must list every role, runbook and vars file
 	@python3 tests/check_docs.py
@@ -125,8 +129,8 @@ lockfile:  ## The ML lockfile must be a real resolution, not a hand-edit
 .PHONY: shellcheck
 shellcheck:  ## Lint the shell scripts (skipped if shellcheck is absent)
 	@if command -v shellcheck > /dev/null; then \
-		files="bootstrap.sh $$(grep -rl '^#!.*bash' roles/*/files/ 2>/dev/null | sort || true)"; \
-		shellcheck $$files && echo "shellcheck: clean ($$(echo $$files | wc -w) files)"; \
+		files="bootstrap.sh $$(grep -rl '^#!.*bash' roles/*/files/ workspaces/ 2>/dev/null | sort || true)"; \
+		shellcheck -x $$files && echo "shellcheck: clean ($$(echo $$files | wc -w) files)"; \
 	else \
 		echo "shellcheck: not installed locally - CI runs it"; \
 	fi

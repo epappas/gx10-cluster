@@ -1,0 +1,35 @@
+name: ray-verl
+kind: rl
+engine: ray+verl
+provenance: unverified
+summary: verl RL (GRPO/PPO) on Ray, vLLM rollouts, FSDP training
+
+# RL post-training is the hardest thing in this repo to fit on a GB10, and the
+# constraint is memory, not compute. A run holds the policy, a reference copy,
+# optimiser state AND the rollout engine at once - on unified memory those all
+# come out of the same 121 GB that also holds the page cache.
+#
+# So the default recipe is a SMALL policy (Qwen3-8B class). A 27B GRPO run does
+# not fit on one node without offload and aggressive sharding, and pretending
+# otherwise wastes an afternoon discovering it. Scale up only after a small run
+# is green end to end.
+#
+# min_unified_gb is set to 90, not 121: below that you are into swap, and on
+# coherent memory swap is a cliff rather than a slope.
+requires:
+  gpu_arch: "12.1"
+  min_unified_gb: 90
+  docker: true
+
+images:
+  - verlai/verl:latest
+
+models:
+  - Qwen/Qwen3-8B
+
+endpoints:
+  - "http://127.0.0.1:8265  (Ray dashboard, if using the ray workspace)"
+
+sources:
+  - https://verl.readthedocs.io/en/latest/start/quickstart.html
+  - https://github.com/volcengine/verl

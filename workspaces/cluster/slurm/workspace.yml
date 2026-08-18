@@ -1,0 +1,27 @@
+name: slurm
+kind: cluster
+engine: slurm
+provenance: unverified
+summary: Batch submission recipes for the Slurm installed by roles/slurm
+
+# Slurm is the one thing here that is NOT containerised, and that is a
+# considered exception rather than an oversight.
+#
+# A scheduler is infrastructure: it owns munge keys, a controller with state, a
+# daemon on every node and a shared clock. Running it per-experiment defeats
+# the point of having a queue, and a containerised slurmd that cannot see host
+# processes cannot account for them either. So the DAEMONS stay with ansible
+# (`make optional TAGS=slurm`) and this workspace ships the part that actually
+# changes per experiment: the job scripts.
+#
+# That is the same split as everywhere else in this repo - ansible converges
+# the machine, workspaces run the work - it just lands on the other side of the
+# line from Ray, where the ephemeral option is genuinely useful.
+requires:
+  peers: 1
+
+endpoints:
+  - "sbatch / squeue on the controller node"
+
+sources:
+  - https://slurm.schedmd.com/sbatch.html

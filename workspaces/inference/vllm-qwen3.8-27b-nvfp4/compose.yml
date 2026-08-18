@@ -1,0 +1,53 @@
+# Qwen3.8-27B NVFP4 on a single GB10, served over the OpenAI API.
+#
+# Flags follow MiaAI-Lab's DGX Spark configuration and the NVIDIA forum post
+# for the sibling MixedInt4 build; both are linked in workspace.yml. Where the
+# two disagreed the more conservative value is used and the difference noted.
+services:
+  vllm:
+    # aarch64 nightly, NOT the default tag: NVFP4 support landed in 0.25.0 and
+    # the stable multi-arch tags lag it.
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:nightly-aarch64}
+    container_name: ws-vllm-qwen38-nvfp4
+    restart: unless-stopped
+    # The whole GPU, and there is only one on a GB10.
+    runtime: nvidia
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+      - HF_HOME=/hf
+      # NCCL is not used at tensor-parallel-size 1, but vLLM still initialises
+      # it. Point the bootstrap at the management NIC for the same reason
+      # /etc/nccl.conf does (docs/decisions.md#nccl-socket-ifname).
+      - NCCL_SOCKET_IFNAME=${MGMT_IFACE:-enP7s7}
+    volumes:
+      # Reuse the host HF cache the models role already populated, rather than
+      # downloading 20 GB a second time into a container volume.
+      - ${HF_HOME:-${HOME}/.cache/huggingface}:/hf
+    ports:
+      - "${PORT:-8888}:8000"
+    # Unified memory: the model, the KV cache and the page cache are all the
+    # same 121 GB. Without a limit a runaway allocation takes the box down
+    # rather than the container.
+    shm_size: ${SHM_SIZE:-16g}
+    ipc: host
+    command: >
+      --model ${MODEL:-unsloth/Qwen3.8-27B-NVFP4}
+      --served-model-name ${SERVED_NAME:-qwen3.8-27b}
+      --host 0.0.0.0
+      --port 8000
+      --tensor-parallel-size 1
+      --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION:-0.84}
+      --max-model-len ${MAX_MODEL_LEN:-262144}
+      --kv-cache-dtype ${KV_CACHE_DTYPE:-fp8}
+      --reasoning-parser qwen3
+      --trust-remote-code
+      --speculative-config '{"method":"mtp","num_speculative_tokens":${SPEC_TOKENS:-2}}'
+    healthcheck:
+      # /health, not /v1/models: the latter answers before the weights finish
+      # loading, so a dependent service would start talking to a server that
+      # then 503s. 20 GB of NVFP4 off NVMe is minutes, hence the long start.
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: ${START_PERIOD:-15m}

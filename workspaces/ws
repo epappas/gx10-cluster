@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# Workspaces: runnable recipes for inference, cluster and RL environments.
+#
+# DELIBERATELY NOT ANSIBLE. Ansible's job in this repo ends at "the machine is
+# ready" - drivers held, CUDA present, docker usable, RDMA up, weights cached.
+# What you then RUN on that machine changes far more often than the machine
+# does, and coupling the two means every experiment needs a playbook run and
+# every recipe is only reproducible through ansible. So:
+#
+#   roles/     converge a machine to a state          (slow, rare, privileged)
+#   workspaces/ run an environment on a ready machine  (fast, often, unprivileged)
+#
+# The ONLY coupling is the `requires:` block in each workspace.yml, checked by
+# `ws check`. No workspace reads anything from roles/, and no role knows a
+# workspace exists. Every recipe here is plain docker/compose or a plain
+# command, so you can read it, copy it, and run it by hand without this script.
+#
+#   ws list                 every workspace, with provenance
+#   ws show   <name>        the manifest, readably
+#   ws check  <name>        does THIS machine meet its requirements?
+#   ws up     <name>        start it (runs check first)
+#   ws down   <name>        stop it
+#   ws logs   <name> [-f]   tail it
+#   ws status               what is running
+set -euo pipefail
+
+WS_ROOT=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+export WS_ROOT
+# shellcheck source-path=SCRIPTDIR source=lib/common.sh
+source "$WS_ROOT/lib/common.sh"
+
+# Anchored on content, not line numbers: a hardcoded range silently truncates
+# the help text the first time anyone edits the header above it.
+usage() { awk '/^#   ws list/,/^#   ws status/ { sub(/^# {0,3}/, ""); print }' "$0"; }
+
+need_name() { [[ -n ${1:-} ]] || die "which workspace? try: ws list"; }
+
+resolve() {  # name -> dir, with a useful error
+    local d
+    d=$(ws_dir "$1") || die "no workspace '$1'. try: ws list"
+    printf '%s' "$d"
+}
+
+# Each workspace may ship a .env.example. The real .env is gitignored, so a
+# recipe can carry a HF token or a host-specific path without that reaching the
+# repo - same three-tier rule as the ansible half
+# (docs/decisions.md#private-vars).
+load_env() {
+    local d=$1
+    [[ -f "$d/.env" ]] && { set -a; # shellcheck disable=SC1091
+                            source "$d/.env"; set +a; }
+    return 0
+}
+
+compose() {  # $1 = dir; rest = compose args
+    local d=$1; shift
+    ( cd "$d" && docker compose --project-name "ws-$(basename "$d")" "$@" )
+}
+
+cmd_list() {
+    printf '%s%-34s %-10s %-9s %s%s\n' "$c_bold" WORKSPACE KIND ENGINE SUMMARY "$c_off"
+    local n d m prov col
+    for n in $(ws_all); do
+        d=$(ws_dir "$n"); m="$d/workspace.yml"
+        prov=$(ws_field "$m" provenance)
+        # Provenance is the same discipline the docs use: unlabelled means
+        # measured here. A recipe nobody has run says so, in the listing, so
+        # you know before you spend an hour on it.
+        case "$prov" in
+            verified)   col=$c_grn ;;
+            unverified) col=$c_yel ;;
+            *)          col=$c_red ;;
+        esac
+        printf '%s%-34s%s %-10s %-9s %s\n' "$col" "$n" "$c_off" \
+            "$(ws_field "$m" kind)" "$(ws_field "$m" engine)" "$(ws_field "$m" summary)"
+    done
+    printf '\n%sgreen = run on this hardware · yellow = written, never run%s\n' "$c_dim" "$c_off"
+}
+
+cmd_show() {
+    need_name "${1:-}"; local d; d=$(resolve "$1")
+    cat "$d/workspace.yml"
+    printf '\n%s--- files ---%s\n' "$c_dim" "$c_off"
+    ls -1 "$d"
+}
+
+cmd_check() {
+    need_name "${1:-}"; local d; d=$(resolve "$1")
+    printf '%s%s%s\n' "$c_bold" "$1" "$c_off"
+    if ws_preflight "$d/workspace.yml"; then
+        ok "ready"
+    else
+        die "requirements not met - see above. Ansible owns these: make apply"
+    fi
+}
+
+cmd_up() {
+    need_name "${1:-}"; local d; d=$(resolve "$1"); shift
+    ws_preflight "$d/workspace.yml" || die "requirements not met - see above"
+    load_env "$d"
+    if [[ -x "$d/up.sh" ]]; then
+        "$d/up.sh" "$@"
+    elif [[ -f "$d/compose.yml" ]]; then
+        compose "$d" up -d "$@"
+        printf '\n'; ok "started. logs: ws logs $(basename "$d") -f"
+        ws_list_field "$d/workspace.yml" endpoints | sed 's/^/  endpoint: /'
+    else
+        die "workspace has neither up.sh nor compose.yml"
+    fi
+}
+
+cmd_down() {
+    need_name "${1:-}"; local d; d=$(resolve "$1")
+    load_env "$d"
+    if [[ -x "$d/down.sh" ]]; then "$d/down.sh"
+    elif [[ -f "$d/compose.yml" ]]; then compose "$d" down
+    else die "workspace has neither down.sh nor compose.yml"; fi
+}
+
+cmd_logs() {
+    need_name "${1:-}"; local d; d=$(resolve "$1"); shift
+    load_env "$d"
+    [[ -f "$d/compose.yml" ]] || die "no compose.yml - this workspace logs elsewhere, see its README"
+    compose "$d" logs "$@"
+}
+
+cmd_status() {
+    local n d any=0
+    for n in $(ws_all); do
+        d=$(ws_dir "$n")
+        [[ -f "$d/compose.yml" ]] || continue
+        if [[ -n $(compose "$d" ps -q 2>/dev/null) ]]; then
+            any=1; printf '%s%s%s\n' "$c_bold" "$n" "$c_off"
+            compose "$d" ps --format '  {{.Service}}  {{.Status}}  {{.Ports}}' 2>/dev/null
+        fi
+    done
+    (( any )) || printf '%sno workspace is running%s\n' "$c_dim" "$c_off"
+}
+
+case "${1:-}" in
+    list)          shift; cmd_list "$@" ;;
+    show)          shift; cmd_show "$@" ;;
+    check)         shift; cmd_check "$@" ;;
+    up)            shift; cmd_up "$@" ;;
+    down)          shift; cmd_down "$@" ;;
+    logs)          shift; cmd_logs "$@" ;;
+    status)        shift; cmd_status "$@" ;;
+    ""|-h|--help)  usage ;;
+    *)             die "unknown command '$1'. try: ws --help" ;;
+esac

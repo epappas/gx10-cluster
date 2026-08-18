@@ -1,0 +1,23 @@
+name: llamacpp-qwen3.8-27b-gguf
+kind: inference
+engine: llama.cpp
+provenance: unverified
+summary: Qwen3.8-27B UD-Q4_K_XL GGUF, OpenAI API, lowest memory
+
+# The cheap option: ~17-19 GB at 4-bit against NVFP4's ~22.6 GB, and it runs on
+# the llama.cpp roles/ml already built for sm_121 - no container, no image
+# pull. Slower than vLLM for batch serving; better when you want the memory
+# back for something else.
+requires:
+  gpu_arch: "12.1"
+  min_unified_gb: 24
+  docker: false
+
+models:
+  - unsloth/Qwen3.8-27B-GGUF
+
+endpoints:
+  - "http://127.0.0.1:8899/v1  (OpenAI-compatible)"
+
+sources:
+  - https://unsloth.ai/docs/models/qwen3.8

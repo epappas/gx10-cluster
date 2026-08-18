@@ -1,0 +1,27 @@
+name: vllm-qwen3.8-27b-nvfp4
+kind: inference
+engine: vllm
+provenance: unverified
+summary: Qwen3.8-27B NVFP4, OpenAI API, 1M ctx via YaRN
+
+# NVFP4 is a Blackwell-only format and GB10 is sm_121, so this is the quant
+# this hardware exists for. It is ALSO the reason there is no SGLang variant of
+# this workspace: the checkpoint has a quantised lm_head, which SGLang does not
+# support. See the engine/quant matrix in workspaces/README.md.
+requires:
+  gpu_arch: "12.1"
+  min_unified_gb: 40
+  docker: true
+
+images:
+  - vllm/vllm-openai:nightly-aarch64
+
+models:
+  - unsloth/Qwen3.8-27B-NVFP4
+
+endpoints:
+  - "http://127.0.0.1:8888/v1  (OpenAI-compatible)"
+
+sources:
+  - https://github.com/MiaAI-Lab/Qwen3.8-27B-DGX-Spark-RTX-6000
+  - https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4

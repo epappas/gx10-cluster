@@ -776,3 +776,67 @@ machines have it and forget it exists, and the only way to see the failure is to
 run from a tree that never had it. `git archive $(git write-tree) | tar -x` into
 a temp directory reproduces a clone including uncommitted work, and is now the
 cheapest way to check this class of bug before publishing.
+
+## <a name="workspaces"></a>Workspaces are not Ansible, and the seam is a `requires:` block
+
+`roles/` and `workspaces/` do two different jobs on two different clocks:
+
+| | `roles/` | `workspaces/` |
+|---|---|---|
+| Converges | a **machine** to a state | nothing — it **runs** things |
+| Frequency | rare, privileged, slow | constant, unprivileged, fast |
+| Failure means | the node is broken | today's experiment is broken |
+
+What you run changes far more often than the machine does. Expressing recipes
+as roles means every experiment needs a playbook run, every recipe is
+reproducible only through Ansible, and a serving flag change becomes a
+converge. So Ansible stops at *ready* and workspaces take it from there.
+
+**The only coupling is the `requires:` block**, checked by `ws check`: a
+workspace declares what it needs (compute capability, unified memory, docker,
+an ACTIVE RDMA port, reachable peers) and the runner tests that against the
+machine Ansible produced. No workspace reads anything from `roles/`, and no
+role knows a workspace exists. When `ws check` fails it names an Ansible fix;
+when a workspace fails after checks pass, the machine is fine.
+
+Every recipe is plain `docker`/`compose` or a plain command, so it can be read,
+copied and run without `ws` at all. A recipe only a runner can execute is a
+worse recipe.
+
+**Manifests are a flat YAML subset**, parsed with awk. `yq` is not installed by
+this repo and adding a dependency to read six files is not worth it — but that
+choice has a sharp edge: awk silently returns nothing for structure it cannot
+read, so a typo'd requirement key means the check never runs and preflight
+reports ready. `tests/check_workspaces.py` exists for exactly that failure and
+rejects unknown `requires:` keys, name/directory mismatches, and manifests with
+no `sources:`.
+
+**`workspaces/` is excluded from ansible-lint.** It parses every YAML it finds,
+reported the compose files as malformed playbooks, and — worse — dropped the
+whole run from the `production` profile to `min`, which would have hidden real
+findings in `roles/`.
+
+**Ray exists twice, deliberately.** `roles/ray` installs a standing systemd
+service; `workspaces/cluster/ray` starts an ephemeral containerised cluster for
+one experiment. They will fight over ports, so pick one — but for RL the
+ephemeral one is usually right, because verl pins a Ray version and you want
+that one rather than whatever the host was provisioned with.
+
+**Slurm deliberately lands on the other side of the line.** Its daemons stay in
+Ansible: a scheduler is infrastructure — munge keys, controller state, a daemon
+per node, a shared clock — and a containerised `slurmd` that cannot see host
+processes cannot account for them. The workspace ships only what changes per
+experiment, the job scripts.
+
+**The engine/quant matrix is the expensive thing to learn late.** SGLang cannot
+serve `unsloth/Qwen3.8-27B-NVFP4`: the checkpoint has a quantised `lm_head`,
+which SGLang does not support. So on Blackwell hardware, whose entire advantage
+here is NVFP4, SGLang is the one engine that cannot use it. This is recorded in
+`workspaces/README.md`, in the runbook and in the SGLang manifest itself,
+because it is discoverable only by trying and failing.
+
+**All six workspaces ship `provenance: unverified`.** They are written from
+vendor documentation and the sources cited in each manifest, not from a
+completed run on this hardware — `ws list` renders that in yellow. Publishing
+them unverified but labelled is the same trade the runbooks make; publishing
+them as if they were tested would not be.

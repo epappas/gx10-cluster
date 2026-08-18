@@ -24,3 +24,14 @@ __pycache__/
 # Your real inventory - hostnames and addresses. Seeded from
 # inventory.example.yml by bootstrap.sh. See docs/decisions.md#private-vars.
 inventory.yml
+
+# Editor and tooling backups. inventory.yml.gx10.bak held real addresses and
+# was untracked but NOT ignored, so any `git add -A` would have published it.
+*.bak
+*.orig
+*~
+
+# Workspace runtime state: real .env files (tokens, host paths) and pidfiles.
+# The tracked .env.example files are the documented template.
+workspaces/**/.env
+workspaces/**/.pid
