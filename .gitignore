@@ -7,6 +7,15 @@
 # guarded a file that could not work. Verified with a real play.
 group_vars/*/vault.yml
 host_vars/*/vault.yml
+
+# Site-specific values that are private but NOT secret - your username, an
+# address that differs from the example inventory, a local override you do not
+# want to push. Encrypting these with vault would be theatre; keeping them out
+# of a public repo is the actual requirement. Same directory form as above, so
+# ansible auto-loads them and they outrank group_vars/all.yml.
+# Committed defaults -> local.yml (private) -> vault.yml (private + secret).
+group_vars/*/local.yml
+host_vars/*/local.yml
 __pycache__/
 .smoke.yml
 .idem.log

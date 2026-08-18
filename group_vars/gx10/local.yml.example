@@ -1,0 +1,21 @@
+---
+# Copy to group_vars/gx10/local.yml and edit. That path is gitignored, so
+# nothing here reaches a public repo.
+#
+#     cp group_vars/gx10/local.yml.example group_vars/gx10/local.yml
+#
+# This file is for values that are PRIVATE BUT NOT SECRET - things that are
+# nobody else's business but would not hurt you if they leaked. Real secrets
+# (hf_token, the NordVPN token) belong in group_vars/gx10/vault.yml, encrypted
+# with ansible-vault.
+#
+# It loads after group_vars/all.yml and outranks it, so anything you set here
+# wins over the committed default without editing a tracked file.
+
+# The account to log in as. The committed default is your LOCAL username, which
+# is right whenever the accounts match - set this only when they differ.
+# gx10_user: ubuntu
+
+# Any other committed default you want to override locally, for example:
+# monitoring_history_interval: 30s
+# cluster_mtu: 1500

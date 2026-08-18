@@ -11,10 +11,15 @@
 # a fresh clone needs no edit when your username matches locally and remotely -
 # which is the common case, and is what ansible would have defaulted to anyway.
 #
-# Override when the account on the boxes differs from your local one:
+# Override when the account on the boxes differs from your local one. Prefer
+# the PRIVATE file - this one is committed, and your username is nobody else's
+# business:
 #
-#     gx10_user: ubuntu                 # here, permanently
-#     make apply EXTRA='-e gx10_user=ubuntu'    # once
+#     group_vars/gx10/local.yml         # gitignored, outranks this file
+#     make apply EXTRA='-e gx10_user=ubuntu'    # once, no file
+#
+# See group_vars/gx10/local.yml.example and the three tiers in
+# docs/decisions.md#private-vars.
 #
 # lookup('env', ...) IS correct here, despite the warning below about
 # primary_user, and the difference is worth being precise about. Which account

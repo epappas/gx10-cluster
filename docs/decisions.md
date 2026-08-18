@@ -701,3 +701,42 @@ Cleanup is now on `EXIT` and `INT`/`TERM` just `exit 130`; the refresh wait is a
 that needs a real pty: launched with `&` from a non-interactive shell, bash
 inherits SIGINT as ignored and refuses to trap it at all, which looks exactly
 like the bug that was just fixed.
+
+## <a name="private-vars"></a>Three tiers for configuration, and site identity is not a secret
+
+Values here fall into three groups, and conflating them is how a public repo
+ends up carrying someone's username or a token ends up in git.
+
+| Tier | Where | Tracked | For |
+|---|---|---|---|
+| Default | `group_vars/all.yml` | **yes** | What the repo does out of the box |
+| Private | `group_vars/<group>/local.yml`, `host_vars/<host>/local.yml` | no | Private but not secret — your username, a local override |
+| Secret | `group_vars/<group>/vault.yml` | no, and encrypted | `hf_token`, the NordVPN token |
+
+Ansible loads them in that order and each outranks the last, so a private
+override wins without editing a tracked file — which is the point. Both private
+tiers use the **directory** form, because `group_vars/<group>/*` is auto-loaded
+while `group_vars/<group>.local.yml` parses as a group named `<group>.local` and
+is silently never read.
+
+The middle tier was missing, and its absence is what put `ansible_user: epappas`
+into a committed inventory. Encrypting a username with vault would be theatre —
+it is not a secret, it just is not the public's business — so the requirement is
+"untracked", not "encrypted", and a plain gitignored file is the honest fit.
+
+**Defaults still live in the tracked file.** A private-only value breaks a fresh
+clone: `ansible_user: "{{ gx10_user }}"` with `gx10_user` defined nowhere is an
+undefined-variable error before the first connection. So `gx10_user` defaults to
+the invoking local user in `group_vars/all.yml` and the private file overrides
+it. Verified in both directions: with `gx10_user` set in
+`group_vars/gx10/local.yml` the connection uses it; with the file removed it
+falls back to the committed default.
+
+**The management addresses were deliberately NOT moved.** `ansible_host` is
+already documented as the single source for a node's address, and an overlay
+would create exactly the second copy that this file warns about elsewhere. They
+are RFC1918 addresses, non-routable and shared by millions of networks, so the
+disclosure is close to nil; the argument for changing them is presentational
+rather than about privacy. If you want them out of the repo, gitignore
+`inventory.yml` and ship `inventory.example.yml` instead — that keeps one source
+of truth, at the cost of a CI step to seed it.
