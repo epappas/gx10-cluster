@@ -8,7 +8,26 @@
 #            to inventory.yml and drive it from node 1.
 # ---------------------------------------------------------------------------
 set -euo pipefail
+
 cd "$(dirname "$0")"
+
+# inventory.yml is gitignored, so a fresh clone has none - and the play check
+# below parses it. Seed from the example rather than failing on a file the
+# clone was never going to contain.
+if [ ! -f inventory.yml ]; then
+    cp inventory.example.yml inventory.yml
+    echo "    ok   seeded inventory.yml from inventory.example.yml - EDIT IT"
+fi
+
+# ansible.cfg sets vault_password_file, and a MISSING one is a hard error on
+# every ansible command - not a fallback to prompting. A fresh clone has none,
+# so without this the very next check in this script fails with a vault error
+# that has nothing to do with what it was testing.
+if [ ! -f .vault_pass ]; then
+    umask 077
+    printf 'change-me-if-you-add-a-vault\n' > .vault_pass
+    echo "    ok   created a placeholder .vault_pass (no vault file to decrypt yet)"
+fi
 
 echo "==> Checking platform"
 arch="$(uname -m)"
@@ -78,6 +97,9 @@ cat <<'EOF'
 Bootstrap complete.
 
 Next:
+  0. Edit inventory.yml - your hostnames and addresses. It is gitignored and
+     was seeded from inventory.example.yml, whose 192.0.2.x addresses are
+     RFC 5737 documentation addresses and route nowhere on purpose.
   1. Put your laptop's public key in group_vars/all.yml under authorized_keys.
      Password SSH auth stays ON until you ALSO set ssh_disable_passwords, and
      that is a decision you make after checking from another terminal that key

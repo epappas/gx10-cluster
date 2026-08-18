@@ -76,8 +76,8 @@ Exit code `0` healthy · `1` degraded · `2` no NIC, so you can gate on it.
 
 ```bash
 git clone https://github.com/epappas/gx10-cluster && cd gx10-cluster
+./bootstrap.sh            # installs ansible via uv, no sudo; seeds inventory.yml
 $EDITOR inventory.yml     # your hostnames and addresses - see below
-./bootstrap.sh            # installs ansible via uv, no sudo
 make apply                # provisions EVERY node in the inventory
 # log out and back in     -- picks up docker/nordvpn groups, zsh, shell env
 make verify               # asserts the nodes are in the expected state
@@ -87,8 +87,12 @@ make verify               # asserts the nodes are in the expected state
 that a sudoers drop-in removes the prompt — details and the full preflight
 checklist are in [provision-node](docs/runbooks/provision-node.md).
 
-**`inventory.yml` ships two example nodes**, `odysseus` and `poseidon`. Replace
-them with yours — hostnames, `ansible_host` addresses, and `cluster_index`.
+**`inventory.yml` is gitignored** — your hostnames and addresses never enter the
+repo. `bootstrap.sh` seeds it from `inventory.example.yml`, which ships two
+example nodes to replace: hostnames, `ansible_host` addresses, and
+`cluster_index`. Its `192.0.2.x` addresses are RFC 5737 documentation addresses
+and route nowhere on purpose, so forgetting to edit fails fast rather than
+reaching some other device on your LAN.
 
 **Your username is not in there.** The account to log in as comes from
 `gx10_user` in `group_vars/all.yml`, which defaults to whoever you are locally.

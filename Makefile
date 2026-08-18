@@ -31,6 +31,18 @@ ANSIBLE_ARGS := $(if $(LIMIT),--limit $(LIMIT),) $(if $(TAGS),--tags $(TAGS),) \
 
 .DEFAULT_GOAL := help
 
+# inventory.yml is gitignored - it holds your hostnames and addresses. Without
+# this guard a fresh clone gets ansible's "provided hosts list is empty" warning
+# and then "skipping: no hosts matched", which reads like a tag typo rather than
+# a missing file.
+.PHONY: inventory
+inventory:
+	@test -f inventory.yml || { \
+	  echo "inventory.yml is missing - it is gitignored, so a fresh clone has none."; \
+	  echo "Seed it and edit your hostnames and addresses:"; \
+	  echo; echo "    cp inventory.example.yml inventory.yml"; echo; \
+	  exit 1; }
+
 .PHONY: help
 help:  ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -50,7 +62,7 @@ lint:  ## ansible-lint at the production profile
 	ansible-lint --nocolor
 
 .PHONY: syntax
-syntax:  ## Parse the playbooks
+syntax: inventory  ## Parse the playbooks
 	ansible-playbook site.yml --syntax-check
 	ansible-playbook verify.yml --syntax-check
 	ansible-playbook optional.yml --syntax-check
@@ -60,7 +72,7 @@ syntax:  ## Parse the playbooks
 # aborts every real run - exactly the bug that shipped once. Execute a trivial
 # play so the whole config path is exercised for real.
 .PHONY: smoke
-smoke:  ## Prove ansible.cfg actually loads and a play can run
+smoke: inventory  ## Prove ansible.cfg actually loads and a play can run
 	@printf '%s\n' \
 		'- hosts: localhost' \
 		'  connection: local' \
@@ -122,29 +134,29 @@ shellcheck:  ## Lint the shell scripts (skipped if shellcheck is absent)
 # --- Targets that need the real hardware -----------------------------------
 
 .PHONY: diff
-diff:  ## Dry run showing what would change (ASKPASS= once sudo is passwordless)
+diff: inventory  ## Dry run showing what would change (ASKPASS= once sudo is passwordless)
 	ansible-playbook site.yml $(ASKPASS) --check --diff $(ANSIBLE_ARGS)
 
 .PHONY: apply
-apply:  ## Provision. Run under tmux. (ASKPASS= once sudo is passwordless)
+apply: inventory  ## Provision. Run under tmux. (ASKPASS= once sudo is passwordless)
 	ansible-playbook site.yml $(ASKPASS) $(ANSIBLE_ARGS)
 
 .PHONY: verify
-verify:  ## Assert the node is in the expected state; fails loudly if not
+verify: inventory  ## Assert the node is in the expected state; fails loudly if not
 	ansible-playbook verify.yml $(ANSIBLE_ARGS)
 
 # Deliberately not part of `verify`. Verify is seconds, read-only and safe on a
 # busy box; this loads the GPUs, the fabric and the disk for minutes.
 .PHONY: bench
-bench:  ## Benchmark the cluster (needs: make optional TAGS=bench)
+bench: inventory  ## Benchmark the cluster (needs: make optional TAGS=bench)
 	ansible-playbook benchmark.yml $(ANSIBLE_ARGS)
 
 .PHONY: models
-models:  ## Download the model sets (long; resumable)
+models: inventory  ## Download the model sets (long; resumable)
 	ansible-playbook site.yml $(ASKPASS) --tags models $(ANSIBLE_ARGS)
 
 .PHONY: optional
-optional:  ## Install an opt-in component: make optional TAGS=ray|slurm|exporters|dashboards|node|bench
+optional: inventory  ## Install an opt-in component: make optional TAGS=ray|slurm|exporters|dashboards|node|bench
 	@[ -n "$(TAGS)" ] || { echo "pick one: make optional TAGS=ray|slurm|exporters|dashboards|node|bench"; exit 1; }
 	ansible-playbook optional.yml $(ASKPASS) --tags $(TAGS) $(if $(LIMIT),--limit $(LIMIT),) $(EXTRA)
 
@@ -184,7 +196,7 @@ lock:  ## Re-resolve the ML lockfile (run ON a GX10; commit the result)
 # run. NOTE it catches only one direction - a task that reports changed when it
 # should not. A changed_when that NEVER fires makes this target pass.
 .PHONY: idempotence
-idempotence:  ## Apply twice; the second run must report zero changes
+idempotence: inventory  ## Apply twice; the second run must report zero changes
 	@echo "==> first run"
 	@ansible-playbook site.yml $(ASKPASS) $(ANSIBLE_ARGS) > /dev/null
 	@echo "==> second run (must be changed=0)"

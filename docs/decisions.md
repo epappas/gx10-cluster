@@ -732,11 +732,47 @@ it. Verified in both directions: with `gx10_user` set in
 `group_vars/gx10/local.yml` the connection uses it; with the file removed it
 falls back to the committed default.
 
-**The management addresses were deliberately NOT moved.** `ansible_host` is
-already documented as the single source for a node's address, and an overlay
-would create exactly the second copy that this file warns about elsewhere. They
-are RFC1918 addresses, non-routable and shared by millions of networks, so the
-disclosure is close to nil; the argument for changing them is presentational
-rather than about privacy. If you want them out of the repo, gitignore
-`inventory.yml` and ship `inventory.example.yml` instead — that keeps one source
-of truth, at the cost of a CI step to seed it.
+**The management addresses moved too, via a gitignored inventory.** The earlier
+version of this entry argued they should stay: `ansible_host` is the documented
+single source for a node's address, and an overlay would create a second copy.
+That reasoning was right about overlays and wrong about the conclusion - the
+answer that keeps one source of truth is to gitignore `inventory.yml` and track
+`inventory.example.yml` instead. There is still exactly one place a node's
+address is written; it just is not a tracked file.
+
+The example ships RFC 5737 documentation addresses (`192.0.2.0/24`) rather than
+plausible RFC1918 ones, deliberately: they are guaranteed not to route, so
+forgetting to edit fails fast with an unreachable host instead of quietly
+reaching some other device on your LAN.
+
+`bootstrap.sh` seeds `inventory.yml` if it is missing, CI seeds it before
+running checks, and every Makefile target that reads the inventory depends on a
+guard that prints the `cp` command. Without that guard a missing inventory
+surfaces as "provided hosts list is empty" followed by "skipping: no hosts
+matched", which reads like a tag typo rather than a missing file.
+
+## <a name="ci-was-red"></a>CI was red on every run, because a gitignored file is a hard dependency
+
+Found while testing the gitignored-inventory change, by cloning the repo and
+running `make check` the way a stranger would: **every CI run had been failing**,
+and the badge added to the README on the assumption it was green was advertising
+a red build.
+
+`ansible.cfg` sets `vault_password_file = .vault_pass`. That file is gitignored,
+and a **missing** vault password file is a hard error on every ansible command -
+not a fallback to prompting. So no checkout could run a single ansible command,
+and `make check` failed at the first one. The file's own comment predicted this
+exactly ("if you clone this repo without one, either create it or comment this
+line out"); what was missing was anyone acting on it for CI.
+
+The fix is to create the file rather than to remove the setting: a checkout
+contains no `vault.yml` either, so nothing is ever decrypted and the password is
+irrelevant - but the file has to exist. CI writes a placeholder; `bootstrap.sh`
+writes one for humans, at `umask 077`.
+
+The general lesson, which is why this is written down: **a gitignored file that
+every command depends on is a hard dependency with no declaration.** Local
+machines have it and forget it exists, and the only way to see the failure is to
+run from a tree that never had it. `git archive $(git write-tree) | tar -x` into
+a temp directory reproduces a clone including uncommitted work, and is now the
+cheapest way to check this class of bug before publishing.

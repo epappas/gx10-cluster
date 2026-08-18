@@ -36,6 +36,19 @@ jobs:
       # ansible-lint runs in its own isolated venv with ansible-core and NO
       # collections, so every non-builtin module errors as unknown. It
       # auto-installs whatever requirements.yml declares.
+      # Both files below are gitignored, so a checkout - here or on anyone's
+      # laptop - does not have them, and ansible needs both to run at all.
+      #
+      # This is why CI was RED on every run: ansible.cfg sets
+      # vault_password_file = .vault_pass, and a MISSING one is a hard error on
+      # every ansible command, not a fallback to prompting. A checkout contains
+      # no vault.yml either, so nothing is ever decrypted and the value is
+      # irrelevant - but the file has to exist.
+      - name: Seed the gitignored files a checkout cannot contain
+        run: |
+          cp inventory.example.yml inventory.yml
+          echo 'ci-placeholder-nothing-to-decrypt' > .vault_pass
+
       - name: Install pinned collections
         run: ansible-galaxy collection install -r requirements.yml
 

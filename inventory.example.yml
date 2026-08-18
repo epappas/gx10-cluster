@@ -1,5 +1,16 @@
 ---
-# GX10 cluster inventory.
+# GX10 cluster inventory - EXAMPLE. Copy it and edit:
+#
+#     cp inventory.example.yml inventory.yml
+#
+# `inventory.yml` is gitignored, so your hostnames and addresses stay out of the
+# repo. bootstrap.sh seeds it for you if it is missing. Nothing reads this file
+# directly - ansible.cfg points at inventory.yml.
+#
+# The addresses below are RFC 5737 documentation addresses (192.0.2.0/24),
+# chosen deliberately: they are guaranteed not to route anywhere, so forgetting
+# to edit this fails fast with an unreachable host instead of quietly reaching
+# some other device on your LAN.
 #
 # The inventory hostname IS the machine's hostname. `roles/base` sets the
 # system hostname from `node_hostname`, which defaults to the inventory name,
@@ -24,10 +35,10 @@
 # not dropped. So it must be the address on the interface the nodes actually
 # reach each other over - the one `mgmt_iface` resolves to.
 #
-# These are the wired enP7s7 addresses, which is the default route on both
-# boxes and therefore what mgmt_iface auto-detects. The WiFi addresses these
-# replaced (192.168.4.36/.37) were neither: 130 ms against 0.88 ms, and on a
-# different subnet from the interface NCCL would have bootstrapped over.
+# Use the WIRED address, not WiFi. On the reference pair the wired link is the
+# default route and therefore what mgmt_iface auto-detects; the WiFi addresses
+# were neither, and measured 130 ms against 0.88 ms on a different subnet from
+# the interface NCCL would have bootstrapped over.
 #
 # roles/base pins them, so a DHCP lease cannot move a node's identity out from
 # under this file. See mgmt_addr_static in group_vars/all.yml.
@@ -48,12 +59,12 @@ all:
     gx10:
       hosts:
         odysseus:
-          ansible_host: 192.168.1.70
+          ansible_host: 192.0.2.10   # <- replace
           cluster_index: 10
           cluster_rank: 0
 
         poseidon:
-          ansible_host: 192.168.1.68
+          ansible_host: 192.0.2.11   # <- replace
           cluster_index: 11
           cluster_rank: 1
 

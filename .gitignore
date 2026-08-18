@@ -20,3 +20,7 @@ __pycache__/
 .smoke.yml
 .idem.log
 .ansible/
+
+# Your real inventory - hostnames and addresses. Seeded from
+# inventory.example.yml by bootstrap.sh. See docs/decisions.md#private-vars.
+inventory.yml
