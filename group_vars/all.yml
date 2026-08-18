@@ -6,9 +6,32 @@
 # Skip work with tags (`--tags ml`, `--skip-tags ml`) rather than toggles.
 # ============================================================================
 
+# The account to CONNECT as, and the only place your username appears. Every
+# node in the inventory uses it (inventory.yml sets ansible_user from this), so
+# a fresh clone needs no edit when your username matches locally and remotely -
+# which is the common case, and is what ansible would have defaulted to anyway.
+#
+# Override when the account on the boxes differs from your local one:
+#
+#     gx10_user: ubuntu                 # here, permanently
+#     make apply EXTRA='-e gx10_user=ubuntu'    # once
+#
+# lookup('env', ...) IS correct here, despite the warning below about
+# primary_user, and the difference is worth being precise about. Which account
+# to log in AS is a decision made on the CONTROL node - exactly like the
+# username in `ssh user@host` - so reading the controller's environment is
+# right. primary_user answers a different question, "which account did we end
+# up as on the target", and only the target can answer that.
+# Verified: with USER and LOGNAME both unset (cron, a systemd unit) this
+# templates to an empty string and ansible falls back to its own default, which
+# is the same local user by another route. So it degrades to correct rather
+# than to broken, and needs no guard.
+gx10_user: "{{ lookup('env', 'USER') }}"
+
 # ansible_facts['user_id'] is a fact from the target. Do NOT use lookup('env', ...)
 # here - lookups evaluate on the CONTROL node, so driving node B from node A
-# would silently install everything under node A's username.
+# would silently install everything under node A's username. It follows
+# gx10_user automatically: connect as someone else and this reports them.
 primary_user: "{{ ansible_facts['user_id'] }}"
 primary_home: "{{ ansible_facts['env']['HOME'] }}"
 

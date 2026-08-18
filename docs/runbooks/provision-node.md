@@ -119,7 +119,7 @@ it from the cluster:
 
 ```bash
 # from your laptop
-scp epappas@192.168.1.70:.ssh/gx10_admin ~/.ssh/gx10_admin
+scp <you>@<node-address>:.ssh/gx10_admin ~/.ssh/gx10_admin
 chmod 600 ~/.ssh/gx10_admin
 ssh-keygen -p -f ~/.ssh/gx10_admin        # add a passphrase; it has none
 
@@ -127,7 +127,7 @@ ssh-keygen -p -f ~/.ssh/gx10_admin        # add a passphrase; it has none
 shred -u ~/.ssh/gx10_admin                # the .pub can stay
 ```
 
-Use it with `ssh -i ~/.ssh/gx10_admin epappas@odysseus`, or give it a `Host`
+Use it with `ssh -i ~/.ssh/gx10_admin <you>@odysseus`, or give it a `Host`
 block in your laptop's `~/.ssh/config`.
 
 Adding your own key alongside it is one line in `group_vars/all.yml`:

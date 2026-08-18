@@ -88,7 +88,17 @@ that a sudoers drop-in removes the prompt — details and the full preflight
 checklist are in [provision-node](docs/runbooks/provision-node.md).
 
 **`inventory.yml` ships two example nodes**, `odysseus` and `poseidon`. Replace
-them with yours. The inventory name **is** the machine's hostname — the play
+them with yours — hostnames, `ansible_host` addresses, and `cluster_index`.
+
+**Your username is not in there.** The account to log in as comes from
+`gx10_user` in `group_vars/all.yml`, which defaults to whoever you are locally.
+Set it only if the account on the boxes differs:
+
+```bash
+make apply EXTRA='-e gx10_user=ubuntu'    # once, or set it in group_vars
+```
+
+The inventory name **is** the machine's hostname — the play
 sets it, and `/etc/hosts`, `~/.ssh/config`, the Slurm `NodeName` and the
 Prometheus label all derive from that one string
 ([renaming](docs/runbooks/provision-node.md#renaming-a-node)).

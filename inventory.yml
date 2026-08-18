@@ -58,7 +58,11 @@ all:
           cluster_rank: 1
 
       vars:
-        # Both boxes run the same account. Until `sudo_passwordless` has been
-        # applied once, `become` needs -K - and ansible prompts once per RUN,
-        # not once per host, so both nodes must accept the same sudo password.
-        ansible_user: epappas
+        # Both boxes run the same account, and it is NOT hardcoded here - see
+        # gx10_user in group_vars/all.yml, which defaults to your local
+        # username. Set it there, or pass -e gx10_user=... for one run.
+        #
+        # Until `sudo_passwordless` has been applied once, `become` needs -K -
+        # and ansible prompts once per RUN, not once per host, so every node
+        # must accept the same sudo password.
+        ansible_user: "{{ gx10_user }}"
