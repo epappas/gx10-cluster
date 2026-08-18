@@ -1,61 +1,129 @@
 # gx10-cluster
 
-Ansible provisioning for ASUS Ascent GX10 (NVIDIA GB10 Grace Blackwell) nodes,
-written so a second box comes up identical to the first.
+**Turn two NVIDIA GB10 boxes into a working two-node GPU cluster — and know why
+every setting is what it is.**
 
-```bash
-./bootstrap.sh        # install ansible via uv, no sudo
-make apply            # provision BOTH nodes (prompts for sudo). Run under tmux.
-# log out and back in  -- docker, nordvpn groups; zsh; shell environment
-make verify           # assert the nodes are in the expected state
+[![CI](https://github.com/epappas/gx10-cluster/actions/workflows/ci.yml/badge.svg)](https://github.com/epappas/gx10-cluster/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Platform](https://img.shields.io/badge/platform-aarch64%20Ubuntu%2024.04-lightgrey)
+![Hardware](https://img.shields.io/badge/hardware-NVIDIA%20GB10%20%C2%B7%20DGX%20Spark-76B900)
+![Daemons](https://img.shields.io/badge/monitoring%20daemons-0-success)
+
+Ansible that provisions ASUS Ascent GX10 / NVIDIA DGX Spark nodes, links them
+over the ConnectX-7 cable, and ships three zero-cost diagnostic tools. Every
+non-obvious choice has a written reason, and every hardware claim says whether
+it was measured or merely read on a forum.
+
+## Is this for you?
+
+| You… | Then |
+|---|---|
+| own one or more **GB10 / DGX Spark** boxes | Run it — this is exactly what it is for |
+| own **one** box, not two | Fine. The cluster half skips cleanly when uncabled |
+| are debugging GB10 and landed here from a search | **You do not need the playbook.** Jump to [what we learned](#what-we-learned-the-hard-way) — that is the half most people want |
+| have different GPU hardware | Read the decisions, skip the playbook. `site.yml` asserts `sm_121` and refuses to run elsewhere |
+
+## What it looks like
+
+`gx10-top` — every node in one screen, **nothing resident between refreshes**:
+
+```
+ gx10-top  2 node(s) · 2s · q quits · inet 1.1.1.1  07:12:44
+   OK    nodes agree · nothing throttled · no swap growth
+
+                                     odysseus                poseidon
+  GPU   util                [#########-]  96%       [----------]   0%
+        trend                              ▇▇                      ▁▁
+        temp/power                71C  89.26W             52C  11.07W
+        throttle                         none                    none
+        on-GPU          41642M @train-7f2a91c4  431M @infer-pool-d64
+  CPU   total               [#---------]  11%       [----------]   1%
+        P-cores             [##--------]  21%       [----------]   1%
+  BUSY  top by cpu       103.0% python   737.7M      3.5% bash     3.3M
+  MEM   used(=GPU)          [####------]  45%       [----------]   6%
+        swap                           636 kB                 2316 MB
+  THERM hottest C        nic 57 soc 51 ssd 47    nic 56 soc 54 ssd 49
+  NET   RoCE p1s0f0             v44.2M ^17.6G           v15.1G ^37.8M
+        RoCE mtu                     mtu 9000                mtu 9000
+        reach            gw 0.7ms  net 14.6ms    gw 0.7ms  net 13.7ms
+  DOCK  containers                1/1 running             2/2 running
 ```
 
-`make` on its own lists every target.
+<sub>Real output, but a composite of two captures — the GPU load and the RoCE
+traffic were measured minutes apart. Container names are placeholders.</sub>
 
-The two nodes are `odysseus` (192.168.1.70) and `poseidon` (192.168.1.68). The
-inventory name **is** the machine's hostname — the play sets it, and
-`/etc/hosts`, `~/.ssh/config`, the Slurm `NodeName` and the Prometheus label all
-derive from that one string. To rename a box, rename it in `inventory.yml` and
-re-run ([how](docs/runbooks/provision-node.md#renaming-a-node)).
+The `@` prefix marks a **container** — `nvidia-smi` only ever sees a host pid, so
+"which container is using the GPU" has no answer without this.
 
-Both are addressed over SSH, including the one you type the command on — there
-is no `ansible_connection: local` special case, so the command behaves the same
-wherever you run it and no host skips the SSH path
-([why](docs/decisions.md#ssh-both-nodes)).
+`gx10-interconnect` — what the fabric actually is, and whether it works:
 
-**The first run needs `-K`** and both boxes must accept the same sudo password,
-because `-K` prompts once per run rather than once per host. That run installs a
-sudoers drop-in (`sudo_passwordless`), so every run after it does not — drop the
-prompt with `ASKPASS=`:
-
-```bash
-make apply                 # first time: prompts for sudo
-make diff ASKPASS=         # afterwards: no prompt
+```
+Fabric
+  RoCE v2 over Ethernet - there is NO InfiniBand subnet here, by design.
+  MT4129, firmware 28.45.4028
+Links
+  rocep1s0f0     enp1s0f0np0      ACTIVE  200 Gb/sec
+                                  addr 192.168.100.10/24  mtu 9000 (RoCE 4096)
+                                  PCIe 5.0 x4, ~126 Gb/s ceiling
+Peers
+  poseidon   192.168.100.11   RDMA ok via enp1s0f0np0 - 1.71 us write latency
+Interconnect healthy.
 ```
 
-`-K` also needs a real terminal. Over a non-tty it fails with
-`Can not control echo on the terminal` and then `Missing sudo password`, so
-either run it from a shell or use `ASKPASS=` once the drop-in is in place.
+Exit code `0` healthy · `1` degraded · `2` no NIC, so you can gate on it.
 
-Two things the play cannot do for you:
+## Quickstart
 
-- **Move the cluster admin private key off the node** — it is generated at
-  `~/.ssh/gx10_admin` on `odysseus` and belongs on your laptop
+```bash
+git clone https://github.com/epappas/gx10-cluster && cd gx10-cluster
+$EDITOR inventory.yml     # your hostnames and addresses - see below
+./bootstrap.sh            # installs ansible via uv, no sudo
+make apply                # provisions EVERY node in the inventory
+# log out and back in     -- picks up docker/nordvpn groups, zsh, shell env
+make verify               # asserts the nodes are in the expected state
+```
+
+`make` on its own lists every target. First run needs a sudo password; after
+that a sudoers drop-in removes the prompt — details and the full preflight
+checklist are in [provision-node](docs/runbooks/provision-node.md).
+
+**`inventory.yml` ships two example nodes**, `odysseus` and `poseidon`. Replace
+them with yours. The inventory name **is** the machine's hostname — the play
+sets it, and `/etc/hosts`, `~/.ssh/config`, the Slurm `NodeName` and the
+Prometheus label all derive from that one string
+([renaming](docs/runbooks/provision-node.md#renaming-a-node)).
+
+Two things the play deliberately cannot do for you:
+
+- **Move the cluster admin private key off the node.** Generated at
+  `~/.ssh/gx10_admin`; it belongs on your laptop
   ([how](docs/runbooks/provision-node.md#the-cluster-admin-key)).
-- **Join the Meshnet** — the NordVPN client is installed and the firewall is
-  open for it, but logging in needs a token you generate in Nord Account
-  ([how](docs/runbooks/provision-node.md#join-the-meshnet)). Until then the
-  nodes are reachable on the LAN only.
+- **Join the Meshnet.** The client is installed and the firewall is open, but
+  logging in needs a token you generate
+  ([how](docs/runbooks/provision-node.md#join-the-meshnet)).
 
-> **Status: applied end-to-end on both nodes.** `odysseus` and `poseidon` are
-> provisioned; `make verify` passes on both, a full `make diff` reports zero
-> changes, and a two-node NCCL all-reduce runs at 22.7 GB/s busbw over the
-> interconnect (~91% of the 200 Gb/s cable, with jumbo frames).
->
-> Two optional checks are red by design: the metrics exporter, which is opt-in,
-> and the history sampler, whose timer is not started on these nodes. Both are
-> `required: false`. The benchmark suite installs but has
-> [not been proven by a run](docs/runbooks/benchmark.md).
+## What we learned the hard way
+
+The playbook is the smaller half of this repo. These are GB10 findings that cost
+real debugging time, each measured on the hardware:
+
+| Finding | Why it bites |
+|---|---|
+| **There is no InfiniBand.** The ConnectX-7 runs Ethernet and carries RDMA as RoCE v2 | `ibhosts`, `iblinkinfo` and `ibnetdiscover` all fail with `can't open UMAD port` on a *perfectly healthy* cluster, and "nothing" reads as "not connected" ([why](docs/decisions.md#roce-not-ib)) |
+| **`nvidia-smi` cannot report GPU memory** | Host memory *is* GPU memory. `free -h` is your VRAM monitor; imported dashboards show blank tiles ([detail](docs/runbooks/monitoring.md)) |
+| **`SW Power Cap` is "Active" ~46% of the time at idle** | It is DVFS, not a fault. Alarming on it fires on every other glance and buries a real thermal slowdown ([measurements](docs/decisions.md#history-timer)) |
+| **One cable, two PCIe partitions — not two cables** | Two netdevs on two PCIe roots look like two ports until you check `phys_port_name` ([how to tell](docs/decisions.md#one-cable-two-partitions)) |
+| **Jumbo frames buy ~3.3%, and 9000 is the wrong number to care about** | RoCE quantises to powers of two and caps at 4096; above that is inert for RDMA ([measurements](docs/decisions.md#jumbo-mtu)) |
+| **RDMA is invisible to netdev counters** | 66 GiB across the cable moved `tx_bytes` by *exactly 0*. A netdev-based panel reads zero on a saturated link ([why](docs/runbooks/monitoring.md#roce-counters)) |
+| **NCCL logs `NET/IB` on a RoCE fabric** | That is its name for ibverbs. It is *not* evidence of InfiniBand ([detail](docs/runbooks/connect-cluster.md#no-infiniband)) |
+
+Measured here: **22.7 GB/s** busbw on a two-node NCCL all-reduce, ~91% of the
+200 Gb/s cable. If your number is half that, you have one partition addressed.
+
+**Every claim is labelled.** Unlabelled means verified on our hardware with the
+command in the doc; community-reported claims ship with a way to measure whether
+they applied to you. See [provenance](docs/README.md#provenance) — most GB10
+information online is unsourced and some of it is wrong.
 
 ## Runbooks
 
@@ -74,72 +142,103 @@ Task-oriented. Start here.
 | Run a job across both nodes | [run-distributed](docs/runbooks/run-distributed.md) |
 | Measure the cluster and prove it performs | [benchmark](docs/runbooks/benchmark.md) |
 | See what the machine is doing | [monitoring](docs/runbooks/monitoring.md) |
-| Watch both nodes live in one screen | [monitoring](docs/runbooks/monitoring.md#cluster-wide) |
+| Watch every node live in one screen | [monitoring](docs/runbooks/monitoring.md#cluster-wide) |
 | Fix something that's broken | [troubleshoot](docs/runbooks/troubleshoot.md) |
-| Change this repo safely | [contributing](docs/contributing.md) |
+
+## The tools
+
+Installed by the `monitoring` and `cluster` roles. All three are plain scripts —
+**no daemon, nothing resident between invocations**, because on unified memory
+every resident MB is a MB the model cannot use.
+
+| Command | Answers |
+|---|---|
+| `gx10-status` | What is this box doing right now? |
+| `gx10-top` | What is every node doing, and where do they disagree? |
+| `gx10-interconnect` | Is the fabric up, and what is it? (`--peer` proves RDMA end to end) |
+| `gx10-sample -r` | What happened at 03:00? (systemd timer, ~1 MB/day of CSV) |
 
 ## Reference
 
-- [docs/](docs/README.md) — index of everything below
-- [roles/](roles/README.md) — what each role does, and its tag
-- [hardware.md](docs/hardware.md) — GX10 facts that drive the design, and what
-  DGX OS already manages so you don't re-tune it
-- [decisions.md](docs/decisions.md) — why things are the way they are, one
-  short entry per decision
-- [SECURITY.md](SECURITY.md) — how to report a vulnerability, which parts of the
-  posture are deliberate, and the risks this repo accepts on purpose
+| | |
+|---|---|
+| [docs/](docs/README.md) | Index of everything, and the provenance rules |
+| [decisions.md](docs/decisions.md) | Why the repo is the way it is — one entry per choice |
+| [hardware.md](docs/hardware.md) | Verified GX10 facts, and what DGX OS already owns |
+| [roles/](roles/README.md) | What each role does, and its tag |
+| [contributing](docs/contributing.md) | How to change this without it rotting |
+| [SECURITY.md](SECURITY.md) | Reporting, deliberate posture, accepted risks |
 
 ## Layout
 
 ```
 site.yml            main playbook (serial: 1, any_errors_fatal)
 verify.yml          assertion-based health check
+optional.yml        opt-in components, never run by site.yml
+benchmark.yml       the benchmark runner
 bootstrap.sh        the one thing you run by hand
 Makefile            every command you need
-inventory.yml       both nodes, interconnect index and rank
+inventory.yml       your nodes, interconnect index and rank
 group_vars/all.yml  every tunable
-vars/               playbook-scoped data           -> vars/README.md
-tests/              render, handler and docs checks
-optional.yml        opt-in components, never run by site.yml
-roles/              16 roles, 11 of them in site.yml -> roles/README.md
-docs/               runbooks and reference          -> docs/README.md
+roles/              16 roles, 11 of them in site.yml  -> roles/README.md
+vars/               playbook-scoped data              -> vars/README.md
+tests/              render, handler, tag and docs checks
+docs/               runbooks and reference            -> docs/README.md
 ```
 
-Run one role with `make apply TAGS=ml`, skip one with `make apply SKIP=ml`, and
-pass anything else with `EXTRA='-e allow_apt_upgrade=true'`. (Not `make apply
--e ...` — make eats `-e` as its own flag and the variable never reaches
-Ansible.) The models role is the long pole at ~130 GB; `make apply SKIP=models`
-now and `make models` later.
+## Running less than everything
 
-The five roles `site.yml` does not run are opt-in — `ray`, `slurm`,
-`observability` (two tiers, two tags), `dev_node` and `benchmark`:
+```bash
+make apply TAGS=ml                      # one role
+make apply SKIP=models                  # all but one (models is ~130 GB)
+make apply EXTRA='-e allow_apt_upgrade=true'
+```
+
+Not `make apply -e …` — make eats `-e` as its own flag and it never reaches
+Ansible.
+
+Five roles are opt-in and never run from `site.yml`:
 
 ```bash
 make optional TAGS=ray|slurm|exporters|dashboards|node|bench
 ```
 
-Nothing in `optional.yml` runs without a tag, so a bare invocation is a no-op.
-`exporters` and `dashboards` really are separate tiers — that took an
-`include_role` rewrite to make true
-([why](docs/decisions.md#optional-include-role)).
-
-There is no `enable_*` variable *per role* — tags do that. A few within-role
-toggles remain (`build_llama_cpp`, `install_ollama`, `install_nordvpn`,
-`enable_ufw`) because tags cannot reach inside a role.
+A bare `optional.yml` run is a no-op. There is no `enable_*` variable per role —
+tags do that — though a few within-role toggles remain (`build_llama_cpp`,
+`install_ollama`, `install_nordvpn`, `enable_ufw`) because tags cannot reach
+inside a role.
 
 ## Requirements
 
-aarch64 Ubuntu 24.04 (DGX OS 7.x) on GB10 hardware. `site.yml` asserts the
-architecture and the GPU compute capability before doing anything, because the
-PyTorch index and llama.cpp CUDA arch here are chosen for `sm_121` and would
-silently misbuild elsewhere. It also refuses to run as root: everything lands in
-the connecting user's home, and under `sudo` that would be `/root`.
+**aarch64 Ubuntu 24.04 (DGX OS 7.x) on GB10.** `site.yml` asserts the
+architecture and GPU compute capability before doing anything, because the
+PyTorch index and llama.cpp CUDA arch are chosen for `sm_121` and would silently
+misbuild elsewhere. It also refuses to run as root — everything lands in the
+connecting user's home, which under `sudo` would be `/root`.
 
-The ML venv is installed from a committed lockfile
-(`roles/ml/files/requirements-ml.txt`), resolved for aarch64 and the cu130
-index. `make lock` regenerates it and must run **on a GX10** — see
-[contributing](docs/contributing.md#adding-or-changing-a-python-package).
+The ML venv installs from a committed lockfile
+(`roles/ml/files/requirements-ml.txt`), resolved for aarch64 against the cu130
+index. `make lock` regenerates it and must run **on a GX10**
+([why](docs/contributing.md#adding-or-changing-a-python-package)).
+
+## Status
+
+Provisioning is applied end-to-end on both nodes: `make verify` passes, a full
+`make diff` reports zero changes, and the interconnect carries 22.7 GB/s.
+
+Honest gaps: the **benchmark suite installs but has never been run**
+([so labelled](docs/runbooks/benchmark.md)), and the history sampler's timer is
+not started on these nodes. The tier-2 items in
+[tune-network](docs/runbooks/tune-network.md) are explicitly unmeasured.
+
+## Contributing
+
+Issues and PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). The one rule
+that matters: `make check` must pass, and if you change behaviour, say in the
+commit message how you verified it.
+
+Security issues go through [SECURITY.md](SECURITY.md), not a public issue.
 
 ## License
 
-MIT
+[MIT](LICENSE) © Evangelos Pappas

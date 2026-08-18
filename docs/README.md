@@ -31,6 +31,14 @@ propagates.
 
 ## Status
 
-The playbook has been reviewed and statically checked, but **applied
-end-to-end on zero machines**. The DGX-OS facts in `hardware.md` are verified
-live; the playbook's own behaviour is not.
+Provisioning is **applied end-to-end on both nodes** — `make verify` passes and
+a full `make diff` reports zero changes. The GB10 facts in `hardware.md` and the
+interconnect measurements in `decisions.md` are first-hand.
+
+Two things are deliberately not proven: the **benchmark suite has never been
+run** (statically checked only, and [labelled as such](runbooks/benchmark.md)),
+and the tier-2 items in [tune-network](runbooks/tune-network.md) are unmeasured
+hypotheses rather than results.
+
+The top-level [README](../README.md#status) is the single source of truth for
+this; if the two ever disagree, that one is right.
