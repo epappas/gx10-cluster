@@ -1,7 +1,6 @@
 # gx10-cluster
 
-**Turn two NVIDIA GB10 boxes into a working two-node GPU cluster — and know why
-every setting is what it is.**
+**Turn NVIDIA GB10 boxes into a working GPU cluster — fully configurable automation playbooks.**
 
 [![CI](https://github.com/epappas/gx10-cluster/actions/workflows/ci.yml/badge.svg)](https://github.com/epappas/gx10-cluster/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
