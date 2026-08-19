@@ -1,0 +1,37 @@
+name: vllm-2node-tp2
+kind: inference
+engine: vllm
+provenance: unverified
+summary: Tensor-parallel vLLM across BOTH nodes over RoCE - for models too big for one
+
+# The case this exists for: a model that does not fit on one GB10 with useful
+# KV cache. The default is the 120B NVFP4 already cached on both nodes - 75 GB
+# of weights against ~110 GB available, which on ONE node leaves ~35 GB for KV
+# and is not worth doing. Split across two, each node holds ~37 GB and the KV
+# budget roughly triples.
+#
+# Ported from MiaAI-Lab's DeepSeek-v4-Flash 2x DGX Spark recipe (see sources),
+# which is the only published two-node GB10 serving configuration we found.
+# What was taken and what was deliberately NOT taken is in
+# docs/decisions.md#two-node-vllm - the short version is that their DeepSeek
+# hotfixes and nvfp4_ds_mla KV dtype are model-specific, while their container
+# and NCCL wiring is the generic part everyone needs and is easy to get wrong.
+requires:
+  gpu_arch: "12.1"
+  min_unified_gb: 40
+  docker: true
+  rdma: true
+  peers: 1
+
+images:
+  - vllm/vllm-openai:nightly-aarch64
+
+models:
+  - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+
+endpoints:
+  - "http://127.0.0.1:8888/v1  (OpenAI-compatible, on the rank-0 node)"
+
+sources:
+  - https://github.com/MiaAI-Lab/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark
+  - https://github.com/MiaAI-Lab/Qwen3.8-27B-DGX-Spark-RTX-6000

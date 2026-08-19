@@ -840,3 +840,68 @@ vendor documentation and the sources cited in each manifest, not from a
 completed run on this hardware — `ws list` renders that in yellow. Publishing
 them unverified but labelled is the same trade the runbooks make; publishing
 them as if they were tested would not be.
+
+## <a name="two-node-vllm"></a>What was ported from MiaAI-Lab's 2x DGX Spark recipe, and what was not
+
+[MiaAI-Lab/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark](https://github.com/MiaAI-Lab/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark)
+is the only published **two-node GB10** serving configuration we have found, and
+it runs the topology this cluster has. Most of it is DeepSeek-v4 plumbing. A
+small part of it is the generic answer to "how do you run one model across two
+Sparks", and that part is easy to get wrong in ways that fail quietly.
+
+### Taken
+
+| From them | Why it matters |
+|---|---|
+| `--device /dev/infiniband` and `ulimit memlock=-1` on the container | **The two most consequential lines.** Without the device nodes, ibverbs finds no adapter inside the container and NCCL falls back to **TCP** — which works, just slowly, so it presents as a disappointing model rather than a misconfiguration. Without unlimited memlock, queue-pair registration fails outright |
+| `TP_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME` | vLLM's distributed init is `torch.distributed`, and **gloo does not read `NCCL_SOCKET_IFNAME`**. Unset, it picks an interface by its own heuristic — on this box that can be `docker0` or the VPN — and the ranks never meet. This repo set only the NCCL variable |
+| `--nnodes/--node-rank/--master-addr/--master-port`, `--headless` on rank 1, `--distributed-executor-backend mp` | The two-node vLLM topology itself |
+| `NCCL_IB_ROCE_VERSION_NUM=2`, `NCCL_IB_ADDR_FAMILY=AF_INET` | The GID table here carries both RoCE v1 and v2 for every port; only v2 routes |
+| `NCCL_NVLS_ENABLE=0` | No NVLink between two Sparks, so NVLS has nothing to accelerate |
+| **Disable `earlyoom`** | Their first documented gotcha. On unified memory the largest-RSS process is *always* the model server and "tight" is its normal operating point, so earlyoom kills precisely the workload the cluster exists for. Now a `make verify` check — it is not installed here, and this stops a distro update turning it on silently |
+
+### Not taken
+
+- **The DeepSeek-v4 hotfix stack.** Nine-plus patch scripts against their vLLM
+  fork, addressing numbered upstream issues. Model- and fork-specific.
+- **`--kv-cache-dtype nvfp4_ds_mla`, `--tokenizer-mode deepseek_v4`, the
+  deepseek reasoning/tool parsers.** Model-specific.
+- **The Anemll fork image** `ghcr.io/anemll/dspark-vllm-gx10`. Taking a fork
+  means inheriting its release cadence for every model; upstream
+  `nightly-aarch64` is the same bet this repo already makes elsewhere.
+- **`--moe-backend flashinfer_b12x` and the `VLLM_B12X_*` tuning.** MoE- and
+  fork-specific.
+- **Their fabric addressing.** They point the rendezvous at the interconnect
+  subnet. This repo keeps bootstrap on management and lets NCCL choose RoCE
+  independently through ibverbs — measured, and documented at
+  [#nccl-socket-ifname](#nccl-socket-ifname) and [#hosts-split](#hosts-split).
+- **`NCCL_IB_HCA`.** The interesting one, because it is a *measured*
+  disagreement rather than a preference. They pin the device list; we do not,
+  because our own NCCL run shows discovery already getting it right:
+  `NET/IB : Using [0]rocep1s0f0:1/RoCE [1]roceP2p1s0f0:1/RoCE` — both ACTIVE
+  ports, both permanently-DOWN partitions correctly skipped. Pinning a device
+  list by hand is how you silently end up on one rail after a cable moves. It
+  remains available as `IB_HCA=` in the workspace's `.env`, for the case where
+  a log actually shows the wrong device.
+
+### Improved on
+
+Their operational model keeps a `.env` on each node, and the README warns you
+to sync it to the worker before restarting, with both ranks needing an
+identical image digest. That is a real hazard with a silent failure mode:
+mismatched ranks hang at init rather than erroring. `workspaces/inference/vllm-2node-tp2`
+launches **both** ranks from one script, so the class of bug does not exist
+rather than being documented.
+
+### Recorded, not acted on
+
+They compile kernels for **`sm_121a` / `TORCH_CUDA_ARCH_LIST=12.1a`** — note the
+`a` suffix, the architecture-specific variant — while this repo builds
+llama.cpp for `sm_121` and checks `compute_cap` against `12.1`. These are not in
+conflict (`nvidia-smi` reports `12.1`; the `a` form is a compilation target),
+but if a FlashInfer or CUTE-DSL kernel ever misbehaves here, the arch suffix is
+the first thing to check.
+
+Their published throughput, for calibration rather than as our target: ~62–83
+decode tok/s single-stream and ~160–190 tok/s aggregate across six streams, for
+a much larger model than anything measured here.

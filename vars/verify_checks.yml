@@ -100,6 +100,20 @@ verify_checks:
     required: false
     hint: "No {{ nordvpn_iface }} address - Meshnet is off, so this node is LAN-only. See docs/runbooks/recover-ssh-lockout.md"
 
+    # earlyoom kills the largest RSS process when memory gets tight. On a
+    # unified-memory box the largest process is ALWAYS the model server, and
+    # "tight" is the normal operating point of a 75 GB model - so earlyoom
+    # reliably kills exactly the workload this cluster exists to run, under
+    # deep-context load, with no error from the server itself.
+    #
+    # Reported independently by MiaAI-Lab as the first gotcha of running vLLM
+    # across two DGX Sparks (docs/decisions.md#two-node-vllm). Not installed by
+    # this repo and currently inactive on both nodes; this check exists so a
+    # distro update cannot turn it on silently.
+  - name: "earlyoom not active"
+    cmd: "! systemctl is-active --quiet earlyoom"
+    hint: "earlyoom is running and will kill the model server under load: sudo systemctl disable --now earlyoom"
+
   - name: "swappiness"
     cmd: "[ \"$(sysctl -n vm.swappiness)\" = '1' ]"
     hint: "Swappiness is not 1; a large job can hit the swap cliff. Re-run: make apply TAGS=base"

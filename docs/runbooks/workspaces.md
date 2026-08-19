@@ -37,6 +37,16 @@ does not support that — so on Blackwell hardware, whose whole advantage is
 NVFP4, SGLang is the one engine that cannot use it. That is not a bug to work
 around; pick vLLM for NVFP4, or SGLang with GGUF.
 
+**One node or two?** Use `vllm-2node-tp2` when the model does not fit one node
+with useful KV cache — the 120B NVFP4 is the worked example. Two-node serving
+adds three requirements that all fail *quietly*: the container needs
+`/dev/infiniband` and unlimited memlock or NCCL silently falls back to TCP;
+`GLOO_SOCKET_IFNAME`/`TP_SOCKET_IFNAME` must be set because gloo ignores
+`NCCL_SOCKET_IFNAME`; and both ranks need identical flags or they hang at init.
+Confirm the transport with
+`docker logs ws-vllm-2node 2>&1 | grep -E 'NET/IB|NET/Socket'`
+([what was ported and why](../decisions.md#two-node-vllm)).
+
 Rough guidance:
 
 - **vLLM + NVFP4** — best throughput, highest memory. The default choice here.
@@ -93,6 +103,9 @@ one node without heavy sharding, and discovering that costs an afternoon.
 | SGLang refuses the NVFP4 model | Quantised `lm_head`, unsupported | Use vLLM, or the GGUF build |
 | OOM / swap growing | Two workloads, or utilisation too high | `ws down` the other; lower `GPU_MEMORY_UTILIZATION` in `.env` |
 | Ray worker never joins | Head bound to loopback, or peer unreachable | Set `HEAD_IP` in `.env`; check `gx10-interconnect` |
+| 2-node vLLM hangs at init | Ranks never met — gloo picked the wrong interface, or flags differ | Both are handled by `vllm-2node-tp2`; if hand-rolling, set `GLOO_SOCKET_IFNAME` |
+| 2-node vLLM works but is slow | Fell back to TCP — container missing `/dev/infiniband` or memlock | `grep -E 'NET/IB\|NET/Socket'` in the logs |
+| Model server killed under load, no error | `earlyoom` — it targets the largest-RSS process, which is always the server | `make verify` checks this; `systemctl disable --now earlyoom` |
 
 ## Provenance
 

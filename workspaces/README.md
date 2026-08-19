@@ -44,6 +44,39 @@ GB10 is Blackwell (`sm_121`), so NVFP4 is the format this hardware exists for �
 and it is exactly the one SGLang cannot load. Pick SGLang for its scheduler,
 not to run NVFP4.
 
+## One node or two?
+
+| | Use |
+|---|---|
+| Model fits one node with useful KV cache | `vllm-qwen3.8-27b-nvfp4` — simpler, no fabric involved |
+| Model does **not** fit, or KV cache is starved | `vllm-2node-tp2` — tensor-parallel across the cable |
+
+The 120B NVFP4 is the worked example: 75 GB of weights against ~110 GB
+available leaves ~35 GB for KV on one node, which is not worth doing. Split
+across two, each holds ~37 GB and the KV budget roughly triples.
+
+**Two-node serving has three requirements single-node does not**, and all three
+fail quietly rather than loudly:
+
+1. **`--device /dev/infiniband` and `--ulimit memlock=-1` on the container.**
+   Without the device nodes, ibverbs finds no adapter *inside the container* and
+   NCCL falls back to TCP. It still works — at a fraction of the speed — so it
+   looks like a slow model, not a broken config.
+2. **`GLOO_SOCKET_IFNAME` and `TP_SOCKET_IFNAME`.** vLLM's distributed init is
+   `torch.distributed`, and gloo does **not** read `NCCL_SOCKET_IFNAME`. Unset,
+   it can pick `docker0` or the VPN and the ranks never meet.
+3. **Identical image and flags on both ranks.** Mismatched ranks hang at init.
+   `vllm-2node-tp2` launches both from one script so this cannot drift.
+
+Always confirm the transport rather than assuming it:
+
+```bash
+docker logs ws-vllm-2node 2>&1 | grep -E 'NET/IB|NET/Socket'
+```
+
+`NET/IB` is ibverbs and covers RoCE — that is what you want. `NET/Socket` means
+you are on TCP.
+
 ## Sampling: thinking vs instruct is not a preference
 
 Qwen3.8 ships two documented parameter sets and using the wrong one degrades
