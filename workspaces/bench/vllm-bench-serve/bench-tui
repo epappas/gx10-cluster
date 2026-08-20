@@ -1,0 +1,600 @@
+#!/usr/bin/env bash
+# A live terminal view over `vllm bench serve`, and a concurrency sweep to feed
+# it. Run by up.sh; runnable on its own.
+#
+# WHY THIS EXISTS. `vllm bench serve` is the right measurement tool and the
+# wrong reporting tool for this hardware. It prints one table when the run is
+# already over, and its only visualisation is `--plot-timeline`, an HTML file
+# you open afterwards. On a GB10 that is a bad fit for one specific reason:
+# host memory IS GPU memory, so the interesting question during a benchmark is
+# not "what was the throughput" but "did the KV cache saturate, did the box
+# start swapping, did the GPU ever actually get busy" - all of which are
+# transient and all of which are invisible in a summary printed at the end.
+# A run that swapped and a run that did not produce the same shaped table.
+#
+# So this drives the sweep and renders what is happening WHILE it happens:
+# server-side queue depth and KV usage straight off the vLLM /metrics endpoint,
+# GPU and memory off the host, and the completed sweep points accumulating
+# underneath. The HTML timeline is still written - it is better than this at
+# per-request forensics - this is better at watching the machine.
+#
+#   bench-tui                      sweep the default concurrency ladder
+#   bench-tui -1                   one point, no sweep (CONCURRENCY=1)
+#   bench-tui -c 1,4,16            explicit ladder
+#   q or Ctrl-C                    quit, and stop the in-flight bench
+#
+# Everything else comes from the environment - see .env.example.
+#
+# WHY THE SWEEP SCALES num_prompts WITH CONCURRENCY
+# A fixed prompt count measures different things at each rung: 64 prompts at
+# concurrency 1 is 64 sequential requests, at concurrency 32 it is two batches,
+# most of which is ramp. Ramp is exactly what a steady-state throughput number
+# must not contain. Prompts are therefore concurrency * PROMPTS_PER_STREAM, so
+# every rung runs the same number of requests PER STREAM and the comparison
+# down the column is honest.
+#
+# WHY THE BARS ARE ASCII
+# Same reason as gx10-top: bash printf pads %*s by BYTES, so a bar drawn with
+# U+2588 (3 bytes, 1 column) destroys column alignment. Sparklines have no
+# ASCII equivalent worth having and are padded by hand instead.
+set -uo pipefail
+# NOT -e. A failed curl to /metrics, a bench point that errors, a server that
+# restarts mid-sweep - none of those should take the view down. They should
+# show up as a gap in the trend and a failed row in the table, which is
+# information. `set -e` here converts information into an exit.
+
+cd "$(dirname "$(readlink -f "$0")")" || exit 1
+# .env is gitignored and optional, so shellcheck cannot follow it.
+# shellcheck source=/dev/null
+[[ -f .env ]] && { set -a; . ./.env; set +a; }
+
+BASE_URL=${BASE_URL:-http://127.0.0.1:8888/v1}
+BACKEND=${BACKEND:-vllm}
+INPUT_LEN=${INPUT_LEN:-1024}
+OUTPUT_LEN=${OUTPUT_LEN:-128}
+PROMPTS_PER_STREAM=${PROMPTS_PER_STREAM:-8}
+MIN_PROMPTS=${MIN_PROMPTS:-16}
+CONCURRENCY=${CONCURRENCY:-1,2,4,8,16,32}
+IMAGE=${IMAGE:-vllm/vllm-openai:nightly-aarch64}
+RESULT_DIR=${RESULT_DIR:-$HOME/.local/state/gx10-bench}
+INTERVAL=${INTERVAL:-1}
+RUN_NAME=ws-bench-run
+
+while getopts "1c:h" opt; do
+    case $opt in
+        1) CONCURRENCY=1 ;;
+        c) CONCURRENCY=$OPTARG ;;
+        h) awk '/^#   bench-tui/,/^#   q or/ { sub(/^# {0,3}/, ""); print }' "$0"; exit 0 ;;
+        *) exit 2 ;;
+    esac
+done
+
+# The metrics endpoint lives at the server ROOT, while BASE_URL points at the
+# OpenAI path. Deriving one from the other is worth doing rather than asking
+# for both: two URLs in a .env is two things to get out of step.
+ROOT_URL=${BASE_URL%/v1}
+ROOT_URL=${ROOT_URL%/}
+
+c_red=$'\033[31m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_dim=$'\033[2m'
+c_bold=$'\033[1m'; c_off=$'\033[0m'; c_cyn=$'\033[36m'
+
+die() { printf '%sbench-tui: %s%s\n' "$c_red" "$*" "$c_off" >&2; exit 1; }
+
+# --- preflight -------------------------------------------------------------
+# All three of these fail informatively here and cryptically later, which is
+# the whole argument for checking them up front.
+command -v curl >/dev/null || die "curl not found"
+command -v python3 >/dev/null || die "python3 not found (used to read the result JSON)"
+
+curl -sf --max-time 5 "$ROOT_URL/v1/models" >/dev/null 2>&1 \
+    || die "no server answering at $ROOT_URL/v1/models
+
+A bench workspace needs something to bench. Start one first:
+  ws up vllm-qwen3.8-27b-nvfp4        # or any other inference workspace
+  ws up vllm-2node-deepseek-v4-flash"
+
+# MODEL is what goes in the request body, and it must be the SERVED name. The
+# tokenizer cannot be loaded from a served name like 'qwen3.8-27b', so it is a
+# separate value - this is the single most common way a first bench run dies,
+# several minutes in, with a HF 404.
+MODEL=${MODEL:-$(curl -sf --max-time 5 "$ROOT_URL/v1/models" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"][0]["id"])' 2>/dev/null)}
+[[ -n ${MODEL:-} ]] || die "cannot determine the served model name; set MODEL in .env"
+TOKENIZER=${TOKENIZER:-$MODEL}
+
+mkdir -p "$RESULT_DIR" || die "cannot create $RESULT_DIR"
+
+# Collector scratch. Same lifetime as the view; removed by the EXIT trap.
+CTL=$(mktemp -d -t bench-tui.XXXXXX) || die "cannot create a scratch directory"
+
+USE_DOCKER=1
+if [[ ${BENCH_LOCAL:-0} == 1 ]]; then
+    command -v vllm >/dev/null || die "BENCH_LOCAL=1 but no host 'vllm' on PATH"
+    USE_DOCKER=0
+elif ! docker ps -q >/dev/null 2>&1; then
+    die "docker not usable, and BENCH_LOCAL is not set"
+fi
+
+# --- terminal --------------------------------------------------------------
+cleanup() {
+    # The bench runs in a container, so killing this shell is NOT enough - the
+    # container outlives it and keeps hammering a server you thought you had
+    # stopped benching.
+    (( USE_DOCKER )) && docker rm -f "$RUN_NAME" >/dev/null 2>&1
+    [[ -n ${BENCH_PID:-} ]] && kill "$BENCH_PID" 2>/dev/null
+    [[ -n ${CTL:-} ]] && rm -rf "$CTL"
+    printf '\033[?25h'
+}
+# Two traps, same split as gx10-top: INT exits (which fires EXIT, which
+# cleans), rather than cleaning directly - a cleanup-on-INT that does not exit
+# leaves a view that cannot be quit.
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+# --- rendering helpers -----------------------------------------------------
+# `read -t` is the frame pacer AND the keyboard. That only works on a terminal:
+# with stdin closed or redirected - `ws up ... > log`, nohup, a CI runner - it
+# returns instantly at EOF and the loop spins at 100% CPU instead of sleeping.
+# So on a non-tty, pace with sleep and give up on the keyboard, which nobody is
+# at anyway.
+if [[ -t 0 ]]; then
+    pace() { if read -rsn1 -t "$1" key 2>/dev/null; then case "$key" in q|Q) return 1 ;; esac; fi; return 0; }
+else
+    pace() { sleep "$1"; return 0; }
+fi
+
+BW=${BW:-10}
+SPARK_N=${SPARK_N:-24}
+SPARKCH=(▁ ▂ ▃ ▄ ▅ ▆ ▇ █)
+declare -A HIST=()
+RET=""
+
+bar() {  # $1 pct  $2 mode(util|cap) -> RET = coloured bar + right-aligned pct
+    local p=${1:-} mode=${2:-cap} f col txt
+    if ! [[ $p =~ ^[0-9]+$ ]]; then RET=$(printf '%*s' $((BW + 7)) '-'); return; fi
+    (( p > 100 )) && p=100
+    f=$(( p * BW / 100 ))
+    case $mode in
+        # A busy GPU is the POINT of a benchmark, so utilisation never goes
+        # red. Red is for KV cache and memory, where full is a real problem.
+        util) col=36 ;;
+        *)    if   (( p >= 85 )); then col=31
+              elif (( p >= 60 )); then col=33
+              else col=32; fi ;;
+    esac
+    txt="["
+    (( f > 0 )) && txt+=$(printf '#%.0s' $(seq 1 "$f"))
+    (( BW - f > 0 )) && txt+=$(printf -- '-%.0s' $(seq 1 $((BW - f))))
+    txt+="]"
+    RET=$(printf '\033[%dm%s\033[0m%4d%%' "$col" "$txt" "$p")
+}
+
+spark_push() {  # $1 key  $2 value 0-100 (blank = a gap, drawn as '.')
+    local k=$1 v=${2:-} cur
+    cur="${HIST[$k]:-} ${v:--}"
+    HIST[$k]=$(awk -v n="$SPARK_N" '{s=(NF>n)?NF-n+1:1; for(i=s;i<=NF;i++) printf "%s ", $i}' <<< "$cur")
+}
+
+spark() {  # $1 key -> RET. Padded BY HAND: these glyphs are 3 bytes and 1
+           # column, and printf pads by bytes.
+    local k=$1 v out="" n=0 lead=""
+    for v in ${HIST[$k]:-}; do
+        n=$(( n + 1 ))
+        if [[ $v =~ ^[0-9]+$ ]]; then
+            (( v > 100 )) && v=100
+            out+="${SPARKCH[$(( v * 7 / 100 ))]}"
+        else out+="."; fi
+    done
+    (( SPARK_N - n > 0 )) && lead=$(printf ' %.0s' $(seq 1 $((SPARK_N - n))))
+    RET="$lead$out"
+}
+
+# --- collectors ------------------------------------------------------------
+# Server-side truth, straight off vLLM's Prometheus endpoint. This is the half
+# a client-side benchmark cannot see: how deep the queue got, and how close the
+# KV cache came to full. A run whose KV cache pegged at 100% was measuring
+# preemption, not throughput, and the summary table will not say so.
+M_run=""; M_wait=""; M_kv=""; M_gen=""; M_tps=""
+_prev_gen=""; _prev_t=""
+
+poll_metrics() {
+    local body now
+    body=$(curl -sf --max-time 2 "$ROOT_URL/metrics" 2>/dev/null) || {
+        M_run=""; M_wait=""; M_kv=""; M_tps=""; return 1; }
+    now=$(date +%s.%N)
+
+    # Summed, not last-one-wins: a data-parallel server emits one line PER
+    # ENGINE, and taking the last would silently report one engine's load as
+    # the whole server's. KV usage is a fraction, so it averages instead.
+    eval "$(awk '
+        /^vllm:num_requests_running/    { r += $NF }
+        /^vllm:num_requests_waiting/    { w += $NF }
+        /^vllm:kv_cache_usage_perc/     { k += $NF; kn++ }
+        /^vllm:gpu_cache_usage_perc/    { gk += $NF; gkn++ }
+        /^vllm:generation_tokens_total/ { g += $NF }
+        END {
+            # V1 renamed gpu_cache_usage_perc -> kv_cache_usage_perc. Which one
+            # a given nightly emits is not something a benchmark should have an
+            # opinion about, so accept either.
+            if (kn == 0) { k = gk; kn = gkn }
+            printf "M_run=%d; M_wait=%d; M_kv=%d; M_gen=%.0f\n",
+                   r + 0, w + 0, (kn ? k / kn : 0) * 100, g + 0
+        }' <<< "$body")"
+
+    # Decode rate from the counter delta rather than from anything the client
+    # reports: this counts tokens the SERVER produced, including for requests
+    # that have not returned yet, so it moves during a long generation instead
+    # of stepping once at the end.
+    if [[ -n $_prev_gen && -n $_prev_t ]]; then
+        M_tps=$(awk -v g="$M_gen" -v p="$_prev_gen" -v n="$now" -v o="$_prev_t" \
+            'BEGIN { d = n - o; if (d > 0 && g >= p) printf "%.0f", (g - p) / d; else print "" }')
+    fi
+    _prev_gen=$M_gen; _prev_t=$now
+    return 0
+}
+
+# EVERY NODE, NOT JUST THIS ONE. A tensor-parallel server has ONE endpoint -
+# rank 0 serves, rank 1 is headless - so the load generator and /metrics
+# already describe the whole deployment. Host telemetry does not: rank 1's
+# GPU, memory and swap live on another machine, and rank 1 swapping invalidates
+# a benchmark exactly as much as rank 0 swapping does. Watching only the node
+# you happen to have typed on is how you publish a number the cluster did not
+# produce.
+#
+# Nodes come from the file roles/cluster writes, plus this host, so this needs
+# no inventory of its own and picks up a third and fourth Spark by itself.
+# Quoted delimiter, so NOTHING here expands locally - this is a program to be
+# run on another machine, and $line/$g/$2 must reach that shell intact.
+read -r -d '' SAMPLER <<'PAYLOAD' || true
+line=$(nvidia-smi --query-gpu=utilization.gpu,power.draw,temperature.gpu \
+       --format=csv,noheader,nounits 2>/dev/null | head -1)
+IFS=", " read -r g p t <<< "$line"
+# Unified memory: this IS the GPU memory budget. nvidia-smi reports [N/A] for
+# framebuffer on GB10 and cannot answer it, so /proc/meminfo does.
+awk -v g="${g:-?}" -v p="${p:-?}" -v t="${t:-?}" '
+    /^MemTotal:/     { mt = $2 }
+    /^MemAvailable:/ { ma = $2 }
+    /^SwapTotal:/    { st = $2 }
+    /^SwapFree:/     { sf = $2 }
+    END { printf "gpu=%s pow=%s temp=%s mem=%d swap=%d\n",
+          g, p, t, (mt ? (mt - ma) * 100 / mt : 0), (st - sf) / 1024 }
+' /proc/meminfo
+PAYLOAD
+
+# THE SAMPLER IS SHIPPED over stdin rather than installed on each node - one
+# file to deploy, and a local column can never disagree with a stale copy some
+# older run left on a peer. Same bargain gx10-top makes.
+# Multiplexed, because this runs once per node PER FRAME. Without a shared
+# connection every frame pays a full TCP and auth handshake, which at a 1 s
+# interval is both slow and a lot of sshd churn for a machine that is supposed
+# to be busy serving the benchmark. Same options gx10-top uses.
+SSHOPTS=(-o BatchMode=yes -o ConnectTimeout=4 -o ControlMaster=auto
+         -o "ControlPath=$CTL/%r@%h:%p" -o ControlPersist=30)
+
+declare -A NODE=() SWAP0=()
+NODES=()
+SELF=$(hostname -s 2>/dev/null || hostname)
+
+discover_nodes() {
+    local f=${GX10_PEERS_FILE:-/etc/gx10/interconnect.peers} h
+    NODES=("$SELF")
+    [[ -r $f ]] || return 0
+    while read -r h; do
+        [[ -z $h || $h == "$SELF" ]] && continue
+        NODES+=("$h")
+    done < <(awk '!/^#/ && NF { print $1 }' "$f" | sort -u)
+}
+
+# Fire-and-forget, one collector per node, at most one in flight each. The
+# render loop must NEVER block on a peer: a node that is rebooting or has lost
+# its cable would otherwise freeze the whole view mid-benchmark, which is the
+# moment you least want to lose it. A slow node just shows its previous sample.
+poll_nodes() {
+    local h
+    for h in "${NODES[@]}"; do
+        [[ -e "$CTL/$h.busy" ]] && continue
+        (
+            : > "$CTL/$h.busy"
+            if [[ $h == "$SELF" ]]; then
+                bash -c "$SAMPLER" > "$CTL/$h.new" 2>/dev/null
+            else
+                # NO -n. It redirects stdin from /dev/null, which silently
+                # eats the here-string carrying the sampler - the peer then
+                # runs an empty program, exits 0, and prints nothing, so the
+                # node reads as unreachable when it is perfectly healthy.
+                ssh "${SSHOPTS[@]}" "$h" bash -s <<< "$SAMPLER" \
+                    > "$CTL/$h.new" 2>/dev/null
+            fi
+            [[ -s "$CTL/$h.new" ]] && mv -f "$CTL/$h.new" "$CTL/$h"
+            rm -f "$CTL/$h.busy" "$CTL/$h.new"
+        ) &
+    done
+}
+
+read_nodes() {
+    local h k v
+    for h in "${NODES[@]}"; do
+        [[ -r "$CTL/$h" ]] || continue
+        while IFS='"'"'='"'"' read -r k v; do
+            [[ -n ${k:-} ]] && NODE["$h|$k"]=$v
+        done < <(tr '"'"' '"'"' '"'"'\n'"'"' < "$CTL/$h")
+    done
+}
+
+# --- the bench itself ------------------------------------------------------
+bench_args() {  # $1 concurrency  $2 num_prompts  $3 filename  $4 result dir
+    printf '%s\n' \
+        bench serve \
+        --backend "$BACKEND" \
+        --base-url "$BASE_URL" \
+        --model "$MODEL" \
+        --tokenizer "$TOKENIZER" \
+        --dataset-name random \
+        --random-input-len "$INPUT_LEN" \
+        --random-output-len "$OUTPUT_LEN" \
+        --num-prompts "$2" \
+        --max-concurrency "$1" \
+        --request-rate inf \
+        --ignore-eos \
+        --percentile-metrics ttft,tpot,itl,e2el \
+        --save-result --save-detailed \
+        --plot-timeline \
+        --result-dir "$4" \
+        --result-filename "$3"
+}
+
+start_bench() {  # $1 concurrency  $2 num_prompts  $3 filename -> BENCH_PID
+    local args=()
+    if (( USE_DOCKER )); then
+        mapfile -t args < <(bench_args "$1" "$2" "$3" /results)
+        docker rm -f "$RUN_NAME" >/dev/null 2>&1
+        # --entrypoint vllm, because the image's entrypoint is `vllm serve` and
+        # we want a different subcommand of the same binary. --network host so
+        # 127.0.0.1 means the same thing inside as out; a bridge would make the
+        # obvious BASE_URL wrong in a way that reads as "server is down".
+        docker run --rm --name "$RUN_NAME" --network host \
+            --entrypoint vllm \
+            -e "HF_TOKEN=${HF_TOKEN:-}" -e HF_HOME=/hf \
+            -v "${HF_HOME:-$HOME/.cache/huggingface}:/hf" \
+            -v "$RESULT_DIR:/results" \
+            "$IMAGE" "${args[@]}" >>"$LOGFILE" 2>&1 &
+    else
+        mapfile -t args < <(bench_args "$1" "$2" "$3" "$RESULT_DIR")
+        vllm "${args[@]}" >>"$LOGFILE" 2>&1 &
+    fi
+    BENCH_PID=$!
+}
+
+read_result() {  # $1 file -> "outtps ttft itl reqps completed" or ""
+    [[ -f $1 ]] || return 1
+    python3 - "$1" <<'PY' 2>/dev/null
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+
+def g(*keys):
+    for k in keys:
+        v = d.get(k)
+        if v is not None:
+            return v
+    return 0
+
+# Median, not mean, for the latencies. TTFT distributions here are strongly
+# right-skewed - one cold prefill drags a mean somewhere no request went.
+print("%.1f %.1f %.2f %.2f %d" % (
+    g("output_throughput"),
+    g("median_ttft_ms", "mean_ttft_ms"),
+    g("median_itl_ms", "mean_itl_ms"),
+    g("request_throughput"),
+    g("completed"),
+))
+PY
+}
+
+# --- the view --------------------------------------------------------------
+ROWS=()          # completed sweep points, pre-formatted
+PEAK_TPS=0       # for scaling the throughput bars, since the ceiling is unknown
+STATUS="starting"
+POINT=0
+
+render() {
+    local total=$1 conc=$2 prompts=$3
+    printf '\033[H\033[2J'
+
+    printf ' %sbench-tui%s  %s · %s\n' "$c_bold" "$c_off" "$MODEL" "$ROOT_URL"
+    printf ' %sin %s / out %s tok · %s · q quits%s  %s\n\n' \
+        "$c_dim" "$INPUT_LEN" "$OUTPUT_LEN" "$BACKEND" "$c_off" "$(date +%H:%M:%S)"
+
+    if [[ $STATUS == "done" ]]; then
+        printf '  %ssweep complete%s  %d point(s)\n' "$c_bold" "$c_off" "$total"
+        # and NO live pane below: every gauge in it would be describing a
+        # server that stopped being loaded seconds ago. A stale gauge that
+        # looks live is worse than no gauge.
+        render_table
+        return
+    fi
+
+    if (( POINT > 0 )); then
+        printf '  %spoint %d/%d%s  concurrency %s%s%s · %s prompts · %s\n\n' \
+            "$c_bold" "$POINT" "$total" "$c_off" "$c_cyn" "$conc" "$c_off" "$prompts" "$STATUS"
+    fi
+
+    # --- live half: what the machine is doing RIGHT NOW ---
+    printf '  %sLIVE%s\n' "$c_bold" "$c_off"
+    if [[ -n $M_run ]]; then
+        # Against the concurrency ASKED FOR, so a bar short of full means
+        # the client is not managing to keep the server fed - which is a
+        # client-side result, and a different problem from a slow model.
+        local busy=$(( conc > 0 ? M_run * 100 / conc : 0 ))
+        (( busy > 100 )) && busy=100
+        bar "$busy" util
+        printf '    streams in flight     %s   %s%d%s of %s, %s%d queued%s\n' \
+            "$RET" "$c_bold" "$M_run" "$c_off" "$conc" \
+            "$( (( M_wait > 0 )) && printf '%s' "$c_yel" || printf '%s' "$c_dim")" \
+            "$M_wait" "$c_off"
+        bar "$M_kv" cap
+        printf '    KV cache              %s\n' "$RET"
+        spark "kv"
+        printf '                          %s%s%s\n' "$c_dim" "$RET" "$c_off"
+    else
+        printf '    %s/metrics unreadable - is this vLLM? (llama.cpp has no such endpoint)%s\n' \
+            "$c_dim" "$c_off"
+    fi
+
+    printf '    decode tok/s                        %s%8s%s' \
+        "$c_bold" "${M_tps:--}" "$c_off"
+    spark "tps"; printf '  %s%s%s\n' "$c_dim" "$RET" "$c_off"
+
+    render_nodes
+
+    # --- accumulated half: the sweep so far ---
+    render_table
+}
+
+render_nodes() {
+    local h gpu mem swap w=0 base
+    for h in "${NODES[@]}"; do (( ${#h} > w )) && w=${#h}; done
+
+    printf '\n  %sNODES%s %s(all %d - a peer that swaps invalidates the run too)%s\n' \
+        "$c_bold" "$c_off" "$c_dim" "${#NODES[@]}" "$c_off"
+    for h in "${NODES[@]}"; do
+        gpu=${NODE["$h|gpu"]:-}
+        if [[ -z $gpu ]]; then
+            # No sample yet, or the node did not answer. Say which node, rather
+            # than leaving a gap that reads as "idle".
+            printf '    %-*s  %sno sample%s\n' "$w" "$h" "$c_red" "$c_off"
+            continue
+        fi
+        mem=${NODE["$h|mem"]:-0}
+        swap=${NODE["$h|swap"]:-0}
+        bar "$gpu" util;  printf '    %-*s  gpu %s' "$w" "$h" "$RET"
+        bar "$mem" cap;   printf '   mem %s' "$RET"
+        printf '  %5sW %3sC' "${NODE["$h|pow"]:--}" "${NODE["$h|temp"]:--}"
+        # SWAP IS JUDGED ON GROWTH, NOT ON PRESENCE - the same call gx10-top
+        # makes (docs/decisions.md#gx10-top). A box that swapped 120 MB days
+        # ago and never touched it since is fine, and flagging that trains you
+        # to ignore the one row that matters. Swap that grows DURING a bench is
+        # the cliff: on coherent memory the result stops being a throughput
+        # figure and becomes a paging figure, on any node in the group.
+        local base=${SWAP0["$h"]:-}
+        if [[ -z $base ]]; then
+            SWAP0["$h"]=$swap; base=$swap
+        fi
+        if (( swap > base )); then
+            printf '  %sswap +%s MB SINCE START - NOT A VALID RESULT%s\n' \
+                "$c_red" "$(( swap - base ))" "$c_off"
+        elif (( swap > 0 )); then
+            printf '  %sswap %s MB, not growing%s\n' "$c_dim" "$swap" "$c_off"
+        else
+            printf '  %sno swap%s\n' "$c_dim" "$c_off"
+        fi
+    done
+}
+
+render_table() {
+    local line
+    printf '\n  %s%-5s %-*s %10s %9s %8s %7s%s\n' "$c_bold" CONC $((BW + 2)) "OUT TOK/S" \
+        "tok/s" "TTFT ms" "ITL ms" "req/s" "$c_off"
+    if (( ${#ROWS[@]} == 0 )); then
+        printf '  %sno point has completed yet%s\n' "$c_dim" "$c_off"
+    else
+        for line in "${ROWS[@]}"; do printf '  %s\n' "$line"; done
+    fi
+}
+
+add_row() {  # $1 concurrency  $2..: parsed result fields
+    local conc=$1 tps=$2 ttft=$3 itl=$4 rps=$5 done=$6 pct f txt
+    # Bars are scaled to the best point SEEN, not to an absolute ceiling: the
+    # ceiling for a given model on this box is exactly the thing being
+    # measured, so assuming one would beg the question.
+    PEAK_TPS=$(awk -v a="$PEAK_TPS" -v b="$tps" 'BEGIN { print (b > a) ? b : a }')
+    pct=$(awk -v v="$tps" -v p="$PEAK_TPS" 'BEGIN { printf "%d", (p > 0) ? v * 100 / p : 0 }')
+    f=$(( pct * BW / 100 ))
+    txt="["
+    (( f > 0 )) && txt+=$(printf '#%.0s' $(seq 1 "$f"))
+    (( BW - f > 0 )) && txt+=$(printf -- '-%.0s' $(seq 1 $((BW - f))))
+    txt+="]"
+    ROWS+=("$(printf '%-5s %s%s%s %10s %9s %8s %7s  %s%s ok%s' \
+        "$conc" "$c_grn" "$txt" "$c_off" "$tps" "$ttft" "$itl" "$rps" "$c_dim" "$done" "$c_off")")
+}
+
+add_failed_row() {  # $1 concurrency
+    ROWS+=("$(printf '%-5s %s%-*s%s  %sfailed - see %s%s' \
+        "$1" "$c_red" $((BW + 2)) "[ FAILED ]" "$c_off" "$c_dim" "$LOGFILE" "$c_off")")
+}
+
+# --- main ------------------------------------------------------------------
+LOGFILE=$RESULT_DIR/bench-$(date +%Y%m%d-%H%M%S).log
+STAMP=$(date +%Y%m%d-%H%M%S)
+IFS=',' read -r -a LADDER <<< "$CONCURRENCY"
+TOTAL=${#LADDER[@]}
+
+printf '\033[?25l'
+discover_nodes
+poll_nodes
+
+for conc in "${LADDER[@]}"; do
+    conc=${conc//[[:space:]]/}
+    [[ $conc =~ ^[0-9]+$ ]] || continue
+    POINT=$(( POINT + 1 ))
+
+    prompts=$(( conc * PROMPTS_PER_STREAM ))
+    (( prompts < MIN_PROMPTS )) && prompts=$MIN_PROMPTS
+    fname="c${conc}-${STAMP}.json"
+
+    # Re-baseline the swap watermark per point. Growth during point 1 must not
+    # keep condemning points 2..N - each rung is its own measurement.
+    SWAP0=()
+
+    STATUS="running"
+    start_bench "$conc" "$prompts" "$fname"
+
+    while kill -0 "$BENCH_PID" 2>/dev/null; do
+        poll_metrics
+        poll_nodes; read_nodes
+        spark_push "kv"  "${M_kv:-}"
+        # The decode-rate sparkline is scaled against the best rate seen so
+        # far. Same argument as the throughput bars: there is no known ceiling.
+        if [[ -n ${M_tps:-} ]]; then
+            PEAK_TPS=$(awk -v a="$PEAK_TPS" -v b="$M_tps" 'BEGIN { print (b > a) ? b : a }')
+            spark_push "tps" "$(awk -v v="$M_tps" -v p="$PEAK_TPS" \
+                'BEGIN { printf "%d", (p > 0) ? v * 100 / p : 0 }')"
+        else
+            spark_push "tps" ""
+        fi
+        render "$TOTAL" "$conc" "$prompts"
+        # Doubles as the frame delay, so q is answered immediately rather than
+        # at the end of the next interval.
+        pace "$INTERVAL" || exit 0
+    done
+    wait "$BENCH_PID" 2>/dev/null
+    BENCH_PID=""
+
+    STATUS="reading result"
+    render "$TOTAL" "$conc" "$prompts"
+    # The JSON is written after the process exits, and on a slow filesystem
+    # "exited" and "file is complete" are not the same instant.
+    for _ in 1 2 3 4 5; do
+        [[ -s "$RESULT_DIR/$fname" ]] && break
+        pace 1 || exit 0
+    done
+
+    if fields=$(read_result "$RESULT_DIR/$fname"); then
+        # shellcheck disable=SC2086  # deliberate word split of the parsed row
+        add_row "$conc" $fields
+    else
+        add_failed_row "$conc"
+    fi
+done
+
+STATUS="done"
+render "$TOTAL" 0 0
+
+printf '\n  %sresults%s  %s\n' "$c_bold" "$c_off" "$RESULT_DIR"
+printf '  %sJSON per point, plus an HTML timeline each - open one to see the%s\n' "$c_dim" "$c_off"
+printf '  %sper-request picture this view deliberately does not try to draw:%s\n' "$c_dim" "$c_off"
+printf '    xdg-open %s/*.html\n\n' "$RESULT_DIR"
+printf '  %sa point whose KV bar pegged at 100%% measured preemption, not%s\n' "$c_dim" "$c_off"
+printf '  %sthroughput. So did any point that showed swap growing.%s\n' "$c_dim" "$c_off"

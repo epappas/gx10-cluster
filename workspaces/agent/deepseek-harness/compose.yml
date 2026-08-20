@@ -1,0 +1,81 @@
+# DeepSeek Harness (`dsh`) - an agent harness, pointed at a model this cluster
+# is serving rather than at DeepSeek's API.
+#
+# THE FIRST WORKSPACE HERE THAT IS A CLIENT. Everything under inference/ starts
+# a model; this consumes one. That is why `kind: agent` exists and why the
+# manifest requires almost nothing of the machine.
+services:
+  dsh:
+    # Official multi-arch node image, so this is one of the few things in this
+    # repo that needs no aarch64 caveat at all. Pin the digest yourself if you
+    # want reproducibility - `latest` is chosen here because dsh is a developer
+    # preview whose own README warns of ongoing compatibility changes, and a
+    # month-old pin of a preview is its own kind of broken.
+    image: ${NODE_IMAGE:-node:22-slim}
+    container_name: ws-deepseek-harness
+    restart: unless-stopped
+
+    # HOST NETWORKING, and it does two jobs that are easy to miss.
+    #
+    # 1. `dsh web` serves on 127.0.0.1:3080. Inside a bridge network that is the
+    #    CONTAINER's loopback, so `-p 3080:3080` publishes a port nothing is
+    #    listening on and the UI appears dead. Documented flags to change the
+    #    bind address are not something we could confirm, so rather than invent
+    #    one, host networking makes the container's loopback the host's.
+    # 2. The model server it talks to is also on loopback - 127.0.0.1:8888 or
+    #    :8890. On host networking that address means the same thing in both
+    #    places, so the URL in settings.yaml is the URL you would curl.
+    #
+    # The cost is real and worth stating: this container has the host's whole
+    # network namespace. It is an agent harness, so treat what you mount into
+    # it with the same care.
+    network_mode: host
+
+    # NO CUDA AND NO `runtime: nvidia`. The harness does no inference of its
+    # own - it sends requests to a server that does. If this container ever
+    # looks like it wants a GPU, something is misconfigured.
+
+    # Run as YOU, not as root. A container writing into ./dsh-home as root
+    # leaves root-owned config in your tree that you then cannot edit without
+    # sudo - and .credentials.yaml is exactly the file you will want to edit.
+    # node:22-slim ships uid 1000 as `node`, which is the common case here.
+    user: "${DSH_UID:-1000}:${DSH_GID:-1000}"
+
+    environment:
+      - DSH_HOME=/dsh
+      # npx wants a writable HOME for its package cache. Pointing it at the
+      # mount keeps the download out of the container layer, so a restart does
+      # not re-fetch the whole tree.
+      - HOME=/dsh
+      # Whatever settings.yaml names in `apiKeyEnv`. A locally served model
+      # accepts any non-empty string; the value only has to exist.
+      - LOCAL_API_KEY=${LOCAL_API_KEY:-gx10}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+
+    volumes:
+      # Config and credentials, kept next to the workspace and gitignored -
+      # .credentials.yaml holds real keys.
+      - ./dsh-home:/dsh
+      # What the agent is allowed to see. This is the security boundary that
+      # actually matters: an agent harness with tool access can read and write
+      # whatever you hand it, so hand it a project directory rather than $HOME.
+      - ${DSH_WORKSPACE:-./work}:/work
+
+    working_dir: /work
+
+    # npx resolves and downloads on every start, which is slow but avoids
+    # shipping a Dockerfile for a preview tool that changes weekly. Pin
+    # DSH_VERSION in .env once you have a version that works for you.
+    command: >
+      npx -y @deepseek-ai/dsh@${DSH_VERSION:-latest}
+      web --no-open
+
+    healthcheck:
+      # A node image has no curl. Using node itself avoids installing anything
+      # into a container whose whole point is that it is disposable.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3080').then(()=>process.exit(0)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      # First start downloads the package tree before it binds anything.
+      start_period: ${START_PERIOD:-3m}

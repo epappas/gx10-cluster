@@ -1,0 +1,83 @@
+name: llamacpp-deepseek-v4-pro-gguf
+kind: inference
+engine: llama.cpp
+provenance: unverified
+summary: DeepSeek-V4-Pro 1.65T at 1-bit, mmapped from NVMe - runs, slowly
+
+# THE PUBLISHED V4-PRO LADDER, from the repos' own file listings. Sizes are the
+# sum of every shard, which is what actually has to land on the disk:
+#
+#   IQ1_S     337 GB   6block            <- the default, and the only one that
+#   IQ1_M     372 GB   6block               leaves real room on a 1 TB node
+#   Q2_K      569 GB   DevQuasar
+#   Q2_K-XL   574 GB   teamblobfish
+#   Q2_K      587 GB   6block
+#   IQ3_XXS   620 GB   6block
+#   Q3_K_M    652 GB   6block
+#   NVFP4     913 GB   nvidia            <- for vLLM, not llama.cpp
+#   Q4_K_M    951 GB   DevQuasar
+#   UD-Q4_K_XL 850 GB  unsloth           <- unsloth publish no 2-bit V4-Pro
+#   Q8_0     1672 GB   teamblobfish
+#   native   1650 GB   deepseek-ai       <- I8 + FP8 mixed, per the safetensors index
+#
+# NOTHING HERE FITS IN MEMORY. 121 GB per node against 337 GB of weights is
+# 2.8x oversubscribed at the smallest build, and 4.7x at 2-bit. llama.cpp mmaps
+# the file and the page cache holds what it can, so the model runs; the NVMe is
+# the bottleneck from the first token to the last.
+#
+# WHAT CHANGED BY PICKING IQ1_S. At 574 GB (2-bit) this workspace could not
+# even be stored on a stock node - ~515 GB free once the usual HF cache is
+# accounted for - so `ws check` refused and that was the whole answer. At
+# 337 GB it fits with ~175 GB to spare, and the per-token disk traffic drops
+# with it: ~48B active params at ~1.63 bits is ~10 GB touched per token rather
+# than ~17 GB. Still seconds per token. That figure is ARITHMETIC, not a
+# measurement, and `provenance: unverified` means what it says.
+#
+# THE COST, stated plainly: this is a 1-bit quantisation. Dynamic 1-bit builds
+# of very large MoE models hold up far better than the name suggests, but
+# nobody here has measured THIS one, and a 1.65T model at 1.63 bits/param is
+# the most aggressive trade in this repo. If output quality matters more than
+# running it at all, the answer is not a different quant - it is V4-Flash.
+#
+# WHY MEMORY WILL NEVER BE THE ANSWER ON TWO NODES:
+#
+#   nodes   unified    smallest V4-Pro that fits in RAM
+#   2        242 GB    none
+#   3        363 GB    IQ1_S (337), with nothing left for KV
+#   4        484 GB    IQ1_S / IQ1_M - the first sane configuration
+#   5        605 GB    Q2_K (569), tight
+#
+# The binding constraint is NODE COUNT, not quantisation
+# ([the arithmetic](../../../docs/decisions.md#deepseek-v4)). And llama.cpp's
+# multi-node path is RPC over TCP, which does not use the RoCE fabric this
+# cluster is built around - so more nodes changes the memory answer without
+# changing the "this is not how you serve V4-Pro" answer.
+#
+# WHAT TO RUN INSTEAD, and it is not a consolation prize: DeepSeek-V4-Flash-0731
+# beats V4-Pro on every published agentic benchmark despite 13B active
+# parameters against 48B, and two GB10s serve it properly at full precision:
+#   ws up vllm-2node-deepseek-v4-flash
+requires:
+  gpu_arch: "12.1"
+  # NOT the size of the model. This is the working set - shared weights, the KV
+  # cache, and enough page cache for mmap to be worth anything. No amount of
+  # memory on this box makes 337 GB resident.
+  min_unified_gb: 32
+  # 337 GB of weights plus room for the download to land. This is the check
+  # that decides whether the workspace is usable at all.
+  min_disk_gb: 360
+  docker: false
+
+models:
+  - 6block/DeepSeek-V4-Pro-0813-GGUF
+
+endpoints:
+  - "http://127.0.0.1:8892/v1  (OpenAI-compatible)"
+
+sources:
+  - https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-0813
+  - https://huggingface.co/6block/DeepSeek-V4-Pro-0813-GGUF
+  - https://huggingface.co/teamblobfish/DeepSeek-V4-Pro-GGUF
+  - https://huggingface.co/unsloth/DeepSeek-V4-Pro-0813-GGUF
+  - https://huggingface.co/nvidia/DeepSeek-V4-Pro-NVFP4
+  - https://unsloth.ai/docs/models/deepseek-v4

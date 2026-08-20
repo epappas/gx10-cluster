@@ -90,6 +90,23 @@ ws_preflight() {
         else bad "unified memory: needs ${need} GB, ${have} GB available"; fail=1; fi
     fi
 
+    need=$(ws_req "$m" min_disk_gb)
+    if [[ -n $need ]]; then
+        # Free space where the WEIGHTS land, not where you happen to be stood.
+        # A 1 TB NVMe sounds like plenty until a 500 GB checkpoint meets a HF
+        # cache that already holds 133 GB, and a download that fills the root
+        # filesystem takes the box down rather than just failing.
+        local cache=${HF_HOME:-$HOME/.cache/huggingface}
+        # Walk up to something that exists rather than creating the cache dir:
+        # `ws check` is a question, and a question should not leave anything
+        # behind on a machine it decided was unsuitable.
+        local probe=$cache
+        while [[ ! -d $probe && $probe == */* ]]; do probe=${probe%/*}; done
+        have=$(df -BG --output=avail "${probe:-/}" 2>/dev/null | awk 'NR==2 {gsub(/G/,""); print $1+0}')
+        if (( ${have:-0} >= need )); then ok "disk ${have} GB free at $cache (needs ${need})"
+        else bad "disk: needs ${need} GB free at $cache, has ${have:-0} GB"; fail=1; fi
+    fi
+
     if [[ $(ws_req "$m" docker) == "true" ]]; then
         if docker ps -q >/dev/null 2>&1; then ok "docker usable without sudo"
         else bad "docker not usable - re-login for the docker group, or: make apply TAGS=docker"; fail=1; fi

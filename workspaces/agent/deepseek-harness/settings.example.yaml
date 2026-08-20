@@ -1,0 +1,44 @@
+# Copy to dsh-home/settings.yaml (gitignored) before the first `ws up`.
+#
+#   mkdir -p dsh-home work
+#   cp settings.example.yaml dsh-home/settings.yaml
+#
+# This is the whole reason the workspace exists: a custom provider pointed at a
+# model THIS CLUSTER is serving, instead of at DeepSeek's API.
+#
+# `llm-pi-ai` is dsh's model plugin, and the key is not a typo - providers live
+# under the plugin that owns them, because in dsh everything is a plugin.
+
+llm-pi-ai:
+  providers:
+    # Lowercase id, yours to choose. It is what the UI lists.
+    gx10:
+      # dsh reads the key from an ENVIRONMENT VARIABLE named here, rather than
+      # storing it in this file. compose.yml sets LOCAL_API_KEY; a locally
+      # served model ignores the value, but something non-empty must exist or
+      # the client library refuses to send a request at all.
+      apiKeyEnv: LOCAL_API_KEY
+      api: openai-completions
+
+      # Host networking means this address means the same thing inside the
+      # container as it does in your shell - so if `curl` works, this works.
+      #   8888  vllm-qwen3.8-27b-nvfp4, vllm-2node-tp2
+      #   8890  vllm-2node-deepseek-v4-flash
+      #   8891  llamacpp-deepseek-v4-flash-gguf
+      #   8899  llamacpp-qwen3.8-27b-gguf
+      baseURL: http://127.0.0.1:8890/v1
+
+      models:
+        # The SERVED name, which is what --served-model-name set - not the HF
+        # repo id. `curl -s localhost:8890/v1/models` prints exactly this.
+        - id: deepseek-v4-flash
+
+    # DeepSeek's hosted API, for comparison against what the cluster produces.
+    # Leave it out entirely if you would rather nothing could reach outward.
+    # deepseek:
+    #   apiKeyEnv: DEEPSEEK_API_KEY
+    #   api: openai-completions
+    #   baseURL: https://api.deepseek.com/v1
+    #   models:
+    #     - id: deepseek-v4-flash
+    #     - id: deepseek-v4-pro
