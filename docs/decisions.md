@@ -905,3 +905,216 @@ the first thing to check.
 Their published throughput, for calibration rather than as our target: ~62–83
 decode tok/s single-stream and ~160–190 tok/s aggregate across six streams, for
 a much larger model than anything measured here.
+
+## <a name="serving-bench"></a>"Bench" means two different things here, and the new one needed a live view
+
+`make bench` already existed and measures the **hardware**: nccl-tests,
+perftest, iperf3, fio, DCGM. It answers *is this cluster fit to run work*.
+
+`ws up vllm-bench-serve` measures a **model server**: `vllm bench serve`
+against a running endpoint, swept across a concurrency ladder. It answers *how
+many concurrent streams does this model hold on this box before latency falls
+over*. Same word, no overlap in what they run, and
+[#benchmark-tooling](#benchmark-tooling)'s rule still applies to both — the
+numbers come out of an upstream tool, not out of something invented here.
+
+### Why a TUI, when `vllm bench serve` already has `--plot-timeline`
+
+The timeline is good and the workspace turns it on. It is also a **post-mortem**
+— an HTML file you open once the run is over.
+
+On unified memory that is not enough, for a specific reason. The numbers that
+decide whether a benchmark result is *valid at all* are transient:
+
+| Signal | Where it comes from | What it means if you miss it |
+|---|---|---|
+| KV cache occupancy | `vllm:kv_cache_usage_perc` | Pegged at 100% → you measured **preemption**, not throughput |
+| Queue depth | `vllm:num_requests_waiting` | Deep → the server never got to steady state |
+| Swap growth | `/proc/meminfo` | Growing → you measured **paging**. On coherent memory this is a cliff |
+
+A run that swapped and a run that did not produce the *same shaped summary
+table*. Nothing in the JSON says which one you have. So the sweep is driven by
+a view that reads the server's own `/metrics` while the run is in flight, and
+the honest conclusion — *this point is not a measurement* — is visible at the
+time rather than inferred later.
+
+Both `vllm:kv_cache_usage_perc` and the older `vllm:gpu_cache_usage_perc` are
+accepted. V1 renamed it, and which one a given nightly emits is not something a
+benchmark should have an opinion about.
+
+### It watches every node, because a two-node server has one endpoint
+
+A tensor-parallel vLLM server exposes **one** endpoint: rank 0 serves, rank 1 is
+`--headless`. So two of the three signal sources already describe the whole
+deployment without doing anything special:
+
+| Source | Scope | Why |
+|---|---|---|
+| Load generation | whole cluster | One endpoint. The client does not need to be distributed |
+| `/metrics` | whole cluster | Rank 0 exposes the *engine's* counters, and the engine spans both nodes |
+| Host telemetry | **one node** ← the gap | `nvidia-smi` and `/proc/meminfo` are per-machine |
+
+That third row mattered more than it looks. **Rank 1 swapping invalidates a
+benchmark exactly as much as rank 0 swapping does**, and watching only the node
+you happened to type on is how you publish a number the cluster did not produce.
+
+So the host pane samples every node — this host plus everything in
+`/etc/gx10/interconnect.peers` — which means it picks up a third and fourth
+Spark with no configuration. Three details are load-bearing:
+
+- **The sampler is shipped over stdin**, not installed on each node. One file to
+  deploy, and a local row can never disagree with a stale copy an older run left
+  on a peer. Same bargain [#gx10-top](#gx10-top) makes.
+- **Collection never blocks the render loop.** Collectors are fire-and-forget,
+  at most one in flight per node; a node that is rebooting shows its previous
+  sample and then `no sample`, rather than freezing the view mid-benchmark —
+  the moment you least want to lose it.
+- **`ssh -n` is wrong here** and cost an hour of "the peer is unreachable". It
+  redirects stdin from `/dev/null`, which silently eats the here-string carrying
+  the sampler; the peer then runs an empty program, exits 0 and prints nothing.
+  A healthy node reads as dead. The connection is multiplexed
+  (`ControlMaster`/`ControlPersist`) because this runs per node *per frame*.
+
+**Swap is judged on growth, not on presence** — again as [#gx10-top](#gx10-top)
+does, and the first real run proved why: a peer held 120 MB of swap from days
+earlier. Flagging that trains you to ignore the one row that matters. The
+watermark re-baselines per sweep point, so growth during point 1 does not keep
+condemning points 2..N — each rung is its own measurement.
+
+### The one methodological choice worth defending
+
+`num_prompts` scales with concurrency (`concurrency * PROMPTS_PER_STREAM`)
+rather than being fixed. A fixed count measures a different thing at each rung:
+64 prompts at concurrency 1 is 64 sequential requests; at concurrency 32 it is
+two batches, most of which is ramp. Ramp is exactly what a steady-state
+throughput number must not contain.
+
+## <a name="twonode-lib"></a>The two-node launcher is a library, and it is the only recipe here that is not standalone
+
+Every workspace is deliberately readable, copyable and runnable by hand
+([#workspaces](#workspaces)). `workspaces/lib/twonode.sh` breaks that, once, on
+purpose.
+
+The argument is the one `vllm-2node-tp2` already made about its two *ranks*:
+the failure mode of a mismatch is **silent**. Ranks that disagree hang at init
+with no error. A container missing `/dev/infiniband` runs at TCP speed and
+looks like a slow model. A `GLOO_SOCKET_IFNAME` set in one place and forgotten
+in another gives you a cluster that works on Tuesday and not on Wednesday.
+
+That argument does not stop at two ranks of one workspace. Two *workspaces*
+each carrying their own copy of the wiring drift the same way — just slower,
+and with nobody watching. Adding `vllm-2node-deepseek-v4-flash` would have
+meant a second copy of the RDMA device nodes, the memlock ulimit, the gloo
+variables and the rendezvous split.
+
+So the wiring lives once and each workspace supplies only `MODEL_ARGS`. The
+test of the split: **anything whose value depends on the model stays in the
+workspace; anything whose value depends on the topology moves to the library.**
+
+## <a name="deepseek-v4"></a>DeepSeek-V4 on GB10: the quant is chosen by the memory budget, and for V4-Pro by the node count
+
+DeepSeek-V4 ships two models and this cluster's relationship to them is not
+symmetric. Every size below is the sum of a repo's shards, from its own file
+listing — not an estimate, and not a vendor's round number.
+
+### V4-Flash (284B, 13B active) — fits, and the ladder is the whole decision
+
+| Build | Size | Left of a ~112 GB budget |
+|---|---|---|
+| UD-IQ1_S | 82.5 GB | ~29 GB |
+| UD-IQ1_M | 86.9 GB | ~25 GB |
+| UD-IQ2_XXS | 90.9 GB | ~21 GB |
+| **UD-IQ2_M** | **90.9 GB** | **~21 GB** ← single-node default |
+| UD-Q2_K_XL | 96.8 GB | ~15 GB |
+| UD-IQ3_XXS | 104.2 GB | ~8 GB |
+| UD-IQ3_S and up | ≥116.1 GB | does not fit |
+| *dspark draft (Q8_0)* | *10.9 GB* | *needs one of the top four* |
+| *FP8 checkpoint* | *~149 GiB* | *two nodes, TP=2* |
+
+**UD-IQ2_M is the default for what it leaves behind, not for what it costs.**
+~21 GB of headroom fits the DSpark draft model *and* a desktop session;
+UD-IQ3_XXS leaves ~8 GB, which fits neither. Speculative decoding is worth more
+than one rung of quantisation on a memory-bound box, and IQ2_M is the largest
+build where weights and draft both fit at once (90.9 + 10.9 = 101.8 GB).
+
+UD-IQ2_M and UD-IQ2_XXS are the same size to a tenth of a gigabyte, so IQ2_M is
+strictly the better of those two.
+
+### V4-Pro (1.57T, 48B active) — the binding constraint is node count
+
+| Build | Size | Source |
+|---|---|---|
+| **IQ1_S** | **337 GB** | 6block ← default |
+| IQ1_M | 372 GB | 6block |
+| Q2_K | 569 GB | DevQuasar |
+| Q2_K-XL | 574 GB | teamblobfish |
+| IQ3_XXS | 620 GB | 6block |
+| Q3_K_M | 652 GB | 6block |
+| UD-Q4_K_XL | 850 GB | unsloth — their *smallest*; they publish no 2-bit |
+| NVFP4 | 913 GB | nvidia — for vLLM, not llama.cpp |
+| Q8_0 | 1672 GB | teamblobfish |
+| native (I8 + FP8) | ~1650 GB | deepseek-ai, per the safetensors index |
+
+Against unified memory:
+
+| Nodes | Unified | Smallest V4-Pro that fits in RAM |
+|---|---|---|
+| 2 | 242 GB | **none** |
+| 3 | 363 GB | IQ1_S (337), with nothing left for KV |
+| 4 | 484 GB | IQ1_S / IQ1_M — the first sane configuration |
+| 5 | 605 GB | Q2_K (569), tight |
+
+**No quantisation makes V4-Pro fit two GB10s.** Even 1-bit is 337 GB against
+242 GB. Adding nodes moves that line; picking a different quant does not. And
+llama.cpp's multi-node path is RPC over TCP, which does not use the RoCE fabric
+this cluster is built around — so more nodes changes the *memory* answer without
+changing the "this is not how you serve V4-Pro" answer.
+
+### So the V4-Pro workspace runs it from NVMe, and the quant choice is the disk
+
+337 GB fits a stock 1 TB node with ~175 GB to spare; 569 GB does not fit at all
+(~515 GB free once the usual HF cache is accounted for). That single fact is
+why the default is 1-bit rather than the more comfortable quantisation you would
+pick anywhere else — the alternative is a workspace that cannot be stored.
+
+It also sets the performance ceiling, since mmap means the disk is read per
+token: **~48B active params × ~1.63 bits / 8 ≈ 10 GB touched per token** against
+an NVMe that reads a few GB/s. Seconds per token. That is *arithmetic, not a
+measurement* — nobody has run it, and `provenance: unverified` means what it
+says.
+
+`min_unified_gb` is deliberately **32** there, not 337. It is the working set —
+shared weights, KV cache, enough page cache for mmap to be worth anything — not
+the model size. Writing 337 would be a lie about what the number means.
+
+The cost is stated where it is chosen: this is a 1-bit quantisation of a 1.65T
+model, the most aggressive trade in this repo, and unmeasured. **If output
+quality matters more than running it at all, the answer is not a different quant
+— it is V4-Flash**, which beats V4-Pro on every published agentic benchmark
+despite 13B active parameters against 48B.
+
+### Two flags that are load-bearing in opposite directions
+
+- **`--no-mmap`.** [hardware.md](hardware.md) records the community claim that
+  it is faster on unified memory, and for every other model here that is worth
+  testing. In the V4-Pro workspace it is **fatal**: it means "read all the
+  weights into memory", and there are 337 GB of them. mmap is not a tuning
+  choice there, it is the entire mechanism.
+- **`--n-cpu-moe` / `-ot ".ffn_.*_exps.=CPU"`.** Every x86 MoE guide recommends
+  these. They do nothing here. They exist to keep experts in system RAM when
+  VRAM is scarce; on GB10 both sides of that split are the same 121 GB.
+
+### Where the fork question landed, again
+
+[#two-node-vllm](#two-node-vllm) declined the Anemll/Stage-C fork because taking
+it means inheriting one project's release cadence for every model. That still
+holds, and `vllm-2node-deepseek-v4-flash` defaults to upstream — vLLM gained a
+dedicated `deepseek_v4` package with NVFP4 fused MoE in 0.22.0 and DSpark
+speculative decoding in 0.25.0, so the model no longer *needs* a fork.
+
+What upstream does not have is **`nvfp4_ds_mla`**, the sparse-MLA KV dtype whose
+584-byte per-token envelope is the only thing that makes 1M context fit on two
+nodes. So the default is 128K on `fp8`, and the 1M path is documented in
+`.env.example` as a switch with a stated cost. Asking for 1M on `fp8` does not
+fail at startup — it fails later, as preemption, which reads as "the model got
+slow" rather than "the context was a lie".

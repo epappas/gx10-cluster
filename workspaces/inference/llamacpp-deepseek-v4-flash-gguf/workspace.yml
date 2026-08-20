@@ -1,0 +1,46 @@
+name: llamacpp-deepseek-v4-flash-gguf
+kind: inference
+engine: llama.cpp
+provenance: unverified
+summary: DeepSeek-V4-Flash UD-IQ2_M on ONE node, with room for DSpark drafts
+
+# THE QUANT IS CHOSEN AGAINST THE MEMORY BUDGET, not against the model. From
+# unsloth's own file listing, with what each leaves on a ~112 GB budget:
+#
+#   UD-IQ1_S     82.5 GB   ~29 GB left      UD-Q3_K_M    128.1 GB   does not fit
+#   UD-IQ1_M     86.9 GB   ~25 GB left      UD-Q3_K_XL   128.2 GB   does not fit
+#   UD-IQ2_XXS   90.9 GB   ~21 GB left      UD-IQ4_NL    136.7 GB   does not fit
+#   UD-IQ2_M     90.9 GB   ~21 GB left  <-  UD-IQ4_XS    136.7 GB   does not fit
+#   UD-Q2_K_XL   96.8 GB   ~15 GB left      UD-Q4_K_XL   155.1 GB   does not fit
+#   UD-IQ3_XXS  104.2 GB    ~8 GB left      UD-Q8_K_XL   161.9 GB   does not fit
+#   UD-IQ3_S    116.1 GB   does not fit     dspark draft  10.9 GB
+#
+# UD-IQ2_M is the default for what it leaves behind. ~21 GB of headroom is
+# enough for the DSpark draft model (10.9 GB) AND a desktop session; UD-IQ3_XXS
+# leaves ~8 GB, which is enough for neither. Speculative decoding is worth more
+# than one rung of quantisation on a memory-bound box, and it is the only
+# configuration here where both fit at once (90.9 + 10.9 = 101.8 GB).
+#
+# UD-IQ2_M and UD-IQ2_XXS are the SAME SIZE to a tenth of a gigabyte, so IQ2_M
+# is strictly the better pick between those two.
+#
+# The un-compromised way to run this model is both nodes at FP8:
+#   ws up vllm-2node-deepseek-v4-flash
+requires:
+  gpu_arch: "12.1"
+  # 90.9 GB of weights plus working space. Add ~11 GB if you enable the DSpark
+  # draft - up.sh raises its own guard to 108 when DRAFT_FILE is set.
+  min_unified_gb: 96
+  min_disk_gb: 110
+  docker: false
+
+models:
+  - unsloth/DeepSeek-V4-Flash-0731-GGUF
+
+endpoints:
+  - "http://127.0.0.1:8891/v1  (OpenAI-compatible)"
+
+sources:
+  - https://unsloth.ai/docs/models/deepseek-v4
+  - https://huggingface.co/unsloth/DeepSeek-V4-Flash-0731-GGUF
+  - https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731

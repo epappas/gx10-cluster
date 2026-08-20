@@ -1,0 +1,38 @@
+name: vllm-bench-serve
+kind: bench
+engine: vllm
+provenance: unverified
+summary: Concurrency sweep with `vllm bench serve`, rendered live in the terminal
+
+# THE FIRST WORKSPACE THAT NEEDS A SERVER RATHER THAN A GPU. Every other recipe
+# here starts a model; this one measures one that is already up, which is why
+# `requires:` is almost empty and why `kind: bench` exists. The check that
+# matters for it - "is anything answering on $BASE_URL" - is not a property of
+# the machine, so `ws check` cannot ask it and up.sh asks it instead.
+#
+# NOT THE SAME THING AS `make bench`. That playbook measures the HARDWARE with
+# NCCL, perftest, fio and DCGM, and answers "is this cluster fit to run work".
+# This measures a MODEL SERVER and answers "how many concurrent streams does
+# this model hold on this box before latency falls over". Same word, different
+# question, no overlap in what they run.
+#
+# The visualisation is the point. `vllm bench serve` already writes an HTML
+# timeline (--plot-timeline, and this workspace turns it on), but that is a
+# post-mortem. On unified memory the numbers that decide whether a result is
+# even VALID - KV cache occupancy, queue depth, swap growth - are transient and
+# absent from the summary. bench-tui puts them on screen while the run is in
+# flight, off the server's own /metrics endpoint.
+requires:
+  docker: true
+
+images:
+  - vllm/vllm-openai:nightly-aarch64
+
+endpoints:
+  - "reads http://127.0.0.1:8888/v1 by default - set BASE_URL for anything else"
+  - "results land in ~/.local/state/gx10-bench (JSON + HTML timeline per point)"
+
+sources:
+  - https://docs.vllm.ai/en/latest/cli/bench/serve/
+  - https://docs.vllm.ai/en/latest/benchmarking/cli/
+  - https://docs.vllm.ai/en/latest/design/metrics/

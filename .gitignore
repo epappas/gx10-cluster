@@ -35,3 +35,12 @@ inventory.yml
 # The tracked .env.example files are the documented template.
 workspaces/**/.env
 workspaces/**/.pid
+
+# deepseek-harness keeps its config and CREDENTIALS here (.credentials.yaml is
+# a real key store), and `work/` is whatever the agent has been pointed at -
+# someone else's source tree, not ours to publish. settings.example.yaml is the
+# tracked template.
+workspaces/agent/*/dsh-home/*
+!workspaces/agent/*/dsh-home/.gitkeep
+workspaces/agent/*/work/*
+!workspaces/agent/*/work/.gitkeep

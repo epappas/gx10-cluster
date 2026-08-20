@@ -90,7 +90,12 @@ cmd_check() {
     if ws_preflight "$d/workspace.yml"; then
         ok "ready"
     else
-        die "requirements not met - see above. Ansible owns these: make apply"
+        # Not every requirement is Ansible's. GPU, docker and RDMA are;
+        # free memory and free disk are things running on the box right now,
+        # and telling someone to run a playbook at those wastes their time.
+        die "requirements not met - see above.
+  GPU / docker / RDMA / peers  -> ansible owns these: make apply
+  memory / disk                -> something is using them: gx10-top, df -h"
     fi
 }
 
@@ -120,7 +125,13 @@ cmd_down() {
 cmd_logs() {
     need_name "${1:-}"; local d; d=$(resolve "$1"); shift
     load_env "$d"
-    [[ -f "$d/compose.yml" ]] || die "no compose.yml - this workspace logs elsewhere, see its README"
+    # Only compose workspaces have logs to tail. The rest write to a file and
+    # print its path on start - pointing at a README they do not have was worse
+    # than saying nothing.
+    [[ -f "$d/compose.yml" ]] || die "no compose.yml - this workspace logs to a file, and
+its up.sh printed the path when it started. Common ones:
+  ~/.local/state/ws-*.log          llama.cpp workspaces
+  ~/.local/state/gx10-bench/       vllm-bench-serve"
     compose "$d" logs "$@"
 }
 

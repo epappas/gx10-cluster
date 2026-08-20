@@ -1,0 +1,40 @@
+name: deepseek-harness
+kind: agent
+engine: dsh
+provenance: unverified
+summary: DeepSeek Harness web UI, pointed at a model this cluster is serving
+
+# WHAT THIS IS FOR. The inference workspaces give you an OpenAI-compatible
+# endpoint; nothing here has ever given you something to USE it with. dsh is
+# DeepSeek's own agent harness - plugin-based, MIT, a local web UI - and it
+# takes a custom OpenAI-compatible provider, which is exactly what a GB10
+# running vLLM is.
+#
+# So the pairing is the point:
+#   ws up vllm-2node-deepseek-v4-flash    # the model, on the cluster
+#   ws up deepseek-harness                # the agent, talking to it
+# and no token leaves the house.
+#
+# `kind: agent`, not `inference`, and the distinction is not bookkeeping: this
+# runs no model, claims no GPU, and needs no unified memory. It coexists with a
+# serving workspace, which no two inference workspaces do.
+#
+# TWO HONEST WARNINGS.
+# 1. It is a DEVELOPER PREVIEW by its own README, with compatibility changes
+#    ongoing. `latest` is unpinned here deliberately; see compose.yml.
+# 2. It is an AGENT HARNESS. It executes tool calls against whatever you mount
+#    at /work, on host networking. The default mount is ./work - a directory
+#    that starts empty - rather than $HOME, and that default is the security
+#    design, not an inconvenience to route around.
+requires:
+  docker: true
+
+images:
+  - node:22-slim
+
+endpoints:
+  - "http://127.0.0.1:3080  (web UI)"
+
+sources:
+  - https://github.com/deepseek-ai/deepseek-harness
+  - https://deepseek-harness.github.io/deepseek-harness/en/guide/providers

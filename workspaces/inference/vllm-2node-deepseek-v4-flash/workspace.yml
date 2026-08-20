@@ -1,0 +1,53 @@
+name: vllm-2node-deepseek-v4-flash
+kind: inference
+engine: vllm
+provenance: unverified
+summary: DeepSeek-V4-Flash (284B/13B) across both nodes, DSpark spec decoding
+
+# THE ARITHMETIC, because it is the whole design:
+#
+#   FP8 checkpoint            ~149 GiB
+#   split TP=2                 ~75 GiB of weights per node
+#   claimable at 0.80          ~97 GiB per node (of 121 GiB unified)
+#   left for KV                ~22 GiB per node
+#
+# Every non-obvious default in up.sh falls out of that last line. --max-num-seqs
+# is 6, not 256. --max-model-len is 128K, not the 1M the model supports. Both
+# look timid and both are the honest numbers for 22 GiB of KV.
+#
+# 1M context is real, but it rests on `nvfp4_ds_mla` - a KV dtype with a
+# 584-byte sparse-MLA envelope per token, from the fork lineage rather than
+# upstream. See .env.example for how to switch to it, and what you take on.
+#
+# WHY THIS EXISTS ALONGSIDE vllm-2node-tp2: that one is the GENERIC two-node
+# recipe and deliberately refused everything DeepSeek-specific
+# (docs/decisions.md#two-node-vllm). This is where that refused half lives.
+# They share the launcher (workspaces/lib/twonode.sh) and nothing else.
+#
+# `ws check` can only measure THIS node. The peer needs the same ~100 GiB free
+# and nothing here can confirm that - run `ws check` on both, or `gx10-top`.
+requires:
+  gpu_arch: "12.1"
+  min_unified_gb: 100
+  # ~149 GiB of weights have to land somewhere before they can be loaded, and
+  # the HF cache is on the same 1 TB NVMe as everything else.
+  min_disk_gb: 170
+  docker: true
+  rdma: true
+  peers: 1
+
+images:
+  - vllm/vllm-openai:nightly-aarch64
+
+models:
+  - deepseek-ai/DeepSeek-V4-Flash-DSpark
+
+endpoints:
+  - "http://127.0.0.1:8890/v1  (OpenAI-compatible, on the rank-0 node)"
+
+sources:
+  - https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-DSpark
+  - https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731
+  - https://recipes.vllm.ai/deepseek-ai/DeepSeek-V4-Flash
+  - https://github.com/MiaAI-Lab/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark
+  - https://github.com/tonyd2wild/DeepSeek-v4-Flash-0731-DSpark-1M-NVFP4-KV-2x-DGX-Spark

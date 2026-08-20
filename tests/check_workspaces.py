@@ -17,10 +17,12 @@ import yaml
 REPO = pathlib.Path(__file__).resolve().parent.parent
 WS = REPO / "workspaces"
 
-KINDS = {"inference", "cluster", "rl"}
+# `bench` and `agent` are clients, not servers: they need a RUNNING endpoint
+# rather than a free GPU, which is why they carry almost no `requires:`.
+KINDS = {"inference", "cluster", "rl", "bench", "agent"}
 PROVENANCE = {"verified", "unverified"}
 REQUIRED = ("name", "kind", "engine", "provenance", "summary")
-KNOWN_REQUIRES = {"gpu_arch", "min_unified_gb", "docker", "rdma", "peers"}
+KNOWN_REQUIRES = {"gpu_arch", "min_unified_gb", "min_disk_gb", "docker", "rdma", "peers"}
 
 
 def main() -> int:
