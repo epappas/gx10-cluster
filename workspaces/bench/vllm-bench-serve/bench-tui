@@ -195,7 +195,12 @@ spark() {  # $1 key -> RET. Padded BY HAND: these glyphs are 3 bytes and 1
 # KV cache came to full. A run whose KV cache pegged at 100% was measuring
 # preemption, not throughput, and the summary table will not say so.
 M_run=""; M_wait=""; M_kv=""; M_gen=""; M_tps=""
-_prev_gen=""; _prev_t=""
+M_acc=""; M_perstep=""
+# Declared here although the awk below assigns them through eval: shellcheck
+# cannot see an eval'd assignment, and silencing that with a directive would
+# also silence a genuine typo in the same three names.
+M_nd=""; M_dt=""; M_at=""
+_prev_gen=""; _prev_t=""; _prev_dtok=""; _prev_acc=""; _prev_drafts=""
 
 poll_metrics() {
     local body now
@@ -212,13 +217,21 @@ poll_metrics() {
         /^vllm:kv_cache_usage_perc/     { k += $NF; kn++ }
         /^vllm:gpu_cache_usage_perc/    { gk += $NF; gkn++ }
         /^vllm:generation_tokens_total/ { g += $NF }
+        # Speculative decoding. The `_total` suffix is added by the Python
+        # client in the exposition format and omitted in vLLM own dashboard
+        # queries, so match both. The trailing [ {] anchor is load-bearing:
+        # without it num_accepted_tokens also swallows the per-position
+        # histogram num_accepted_tokens_per_pos and every rate doubles.
+        /^vllm:spec_decode_num_drafts(_total)?[ {]/            { nd += $NF }
+        /^vllm:spec_decode_num_draft_tokens(_total)?[ {]/      { dt += $NF }
+        /^vllm:spec_decode_num_accepted_tokens(_total)?[ {]/   { at += $NF }
         END {
             # V1 renamed gpu_cache_usage_perc -> kv_cache_usage_perc. Which one
             # a given nightly emits is not something a benchmark should have an
             # opinion about, so accept either.
             if (kn == 0) { k = gk; kn = gkn }
-            printf "M_run=%d; M_wait=%d; M_kv=%d; M_gen=%.0f\n",
-                   r + 0, w + 0, (kn ? k / kn : 0) * 100, g + 0
+            printf "M_run=%d; M_wait=%d; M_kv=%d; M_gen=%.0f; M_nd=%.0f; M_dt=%.0f; M_at=%.0f\n",
+                   r + 0, w + 0, (kn ? k / kn : 0) * 100, g + 0, nd + 0, dt + 0, at + 0
         }' <<< "$body")"
 
     # Decode rate from the counter delta rather than from anything the client
@@ -229,7 +242,23 @@ poll_metrics() {
         M_tps=$(awk -v g="$M_gen" -v p="$_prev_gen" -v n="$now" -v o="$_prev_t" \
             'BEGIN { d = n - o; if (d > 0 && g >= p) printf "%.0f", (g - p) / d; else print "" }')
     fi
+    # ACCEPTANCE, WHEN THE SERVER IS SPECULATING. This is the number that
+    # explains a speculative server's throughput, and the one whose absence
+    # sends people looking in the wrong place: a broken draft path - weights
+    # the draft loader silently skipped, a draft length the runtime clamps -
+    # costs acceptance AND NOTHING ELSE. The target model still verifies every
+    # token, so output stays perfectly correct while decode halves. "Correct
+    # but half speed" reads as a hardware or config problem; acceptance names
+    # it in one line. Reported over the poll interval, not cumulatively, so it
+    # tracks the rung being measured rather than averaging in the warm-up.
+    if [[ -n ${M_dt:-} && -n ${_prev_dtok:-} ]] && (( ${M_dt%.*} > ${_prev_dtok%.*} )); then
+        M_acc=$(awk -v a="$M_at" -v pa="$_prev_acc" -v d="$M_dt" -v pd="$_prev_dtok" \
+            'BEGIN { printf "%.0f", 100 * (a - pa) / (d - pd) }')
+        M_perstep=$(awk -v a="$M_at" -v pa="$_prev_acc" -v n="$M_nd" -v pn="$_prev_drafts" \
+            'BEGIN { if (n > pn) printf "%.2f", 1 + (a - pa) / (n - pn) }')
+    fi
     _prev_gen=$M_gen; _prev_t=$now
+    _prev_dtok=${M_dt:-}; _prev_acc=${M_at:-}; _prev_drafts=${M_nd:-}
     return 0
 }
 
@@ -246,18 +275,18 @@ poll_metrics() {
 # Quoted delimiter, so NOTHING here expands locally - this is a program to be
 # run on another machine, and $line/$g/$2 must reach that shell intact.
 read -r -d '' SAMPLER <<'PAYLOAD' || true
-line=$(nvidia-smi --query-gpu=utilization.gpu,power.draw,temperature.gpu \
+line=$(nvidia-smi --query-gpu=utilization.gpu,power.draw,temperature.gpu,clocks.sm \
        --format=csv,noheader,nounits 2>/dev/null | head -1)
-IFS=", " read -r g p t <<< "$line"
+IFS=", " read -r g p t c <<< "$line"
 # Unified memory: this IS the GPU memory budget. nvidia-smi reports [N/A] for
 # framebuffer on GB10 and cannot answer it, so /proc/meminfo does.
-awk -v g="${g:-?}" -v p="${p:-?}" -v t="${t:-?}" '
+awk -v g="${g:-?}" -v p="${p:-?}" -v t="${t:-?}" -v c="${c:-?}" '
     /^MemTotal:/     { mt = $2 }
     /^MemAvailable:/ { ma = $2 }
     /^SwapTotal:/    { st = $2 }
     /^SwapFree:/     { sf = $2 }
-    END { printf "gpu=%s pow=%s temp=%s mem=%d swap=%d\n",
-          g, p, t, (mt ? (mt - ma) * 100 / mt : 0), (st - sf) / 1024 }
+    END { printf "gpu=%s pow=%s temp=%s clk=%s mem=%d swap=%d\n",
+          g, p, t, c, (mt ? (mt - ma) * 100 / mt : 0), (st - sf) / 1024 }
 ' /proc/meminfo
 PAYLOAD
 
@@ -447,6 +476,21 @@ render() {
         "$c_bold" "${M_tps:--}" "$c_off"
     spark "tps"; printf '  %s%s%s\n' "$c_dim" "$RET" "$c_off"
 
+    # Only when the server is actually speculating - the counters do not exist
+    # otherwise, and a permanent "- %" row invites people to go looking for a
+    # setting that is not missing.
+    if [[ -n $M_acc ]]; then
+        local acc_col=$c_bold
+        # Acceptance is CONTENT-DRIVEN: structured output accepts far more than
+        # prose, so there is no universal good number and this does not pretend
+        # otherwise. Very low is different - below ~25% the drafter is losing
+        # more than it wins, which on a correctly configured runtime means the
+        # draft path itself, not the prompt.
+        (( M_acc < 25 )) && acc_col=$c_yel
+        printf '    draft accepted        %s%3s%%%s   %s tok/step   %sbelow ~25%%%% -> draft path, not config%s\n' \
+            "$acc_col" "$M_acc" "$c_off" "${M_perstep:--}" "$c_dim" "$c_off"
+    fi
+
     render_nodes
 
     # --- accumulated half: the sweep so far ---
@@ -454,7 +498,8 @@ render() {
 }
 
 render_nodes() {
-    local h gpu mem swap w=0 base
+    local h gpu mem swap w=0 base clk
+    local slow_clk=0 fast_clk=0 slow_h="" fast_h=""
     for h in "${NODES[@]}"; do (( ${#h} > w )) && w=${#h}; done
 
     printf '\n  %sNODES%s %s(all %d - a peer that swaps invalidates the run too)%s\n' \
@@ -469,6 +514,16 @@ render_nodes() {
         fi
         mem=${NODE["$h|mem"]:-0}
         swap=${NODE["$h|swap"]:-0}
+        # Clock is collected but not given a column - it is only interesting
+        # RELATIVE to the other nodes, and one number per row invites you to
+        # compare it against a figure you do not have. The comparison is done
+        # once, below. Only BUSY nodes are compared: an idle peer clocking
+        # down is correct behaviour, not a fault.
+        clk=${NODE["$h|clk"]:-}
+        if [[ $clk =~ ^[0-9]+$ ]] && (( gpu >= 50 )); then
+            (( slow_clk == 0 || clk < slow_clk )) && { slow_clk=$clk; slow_h=$h; }
+            (( clk > fast_clk )) && { fast_clk=$clk; fast_h=$h; }
+        fi
         bar "$gpu" util;  printf '    %-*s  gpu %s' "$w" "$h" "$RET"
         bar "$mem" cap;   printf '   mem %s' "$RET"
         printf '  %5sW %3sC' "${NODE["$h|pow"]:--}" "${NODE["$h|temp"]:--}"
@@ -491,6 +546,30 @@ render_nodes() {
             printf '  %sno swap%s\n' "$c_dim" "$c_off"
         fi
     done
+
+    # A TENSOR-PARALLEL PAIR RUNS AT THE SLOWEST NODE'S CLOCK, because every
+    # step is a collective and a collective is lockstep. So one node that came
+    # back from a reboot in a low power state halves the whole deployment -
+    # and it does it while looking innocent: the model is correct, speculative
+    # acceptance is unchanged, the config is identical, only the wall clock is
+    # wrong. That reads as a bad benchmark or a bad recipe, and people go
+    # rewrite flags. The tell is asymmetry BETWEEN nodes under the same load,
+    # which is visible here and nowhere else in the run.
+    #
+    # 12% is comfortably outside the few-percent jitter of two healthy nodes
+    # and far inside the ~20% reported for the degraded case. Reported, not
+    # fixed: `nvidia-smi -lgc` is the documented remedy elsewhere and this repo
+    # has not measured whether it is even settable on GB10, where -pl and -ac
+    # are not (docs/hardware.md).
+    # [[ ]] for the hostnames, NOT (( )): inside an arithmetic context a bare
+    # string is read as a VARIABLE NAME, both sides evaluate to 0, and the
+    # guard silently never fires.
+    if (( slow_clk > 0 && fast_clk > 0 )) && [[ $slow_h != "$fast_h" ]] \
+       && (( (fast_clk - slow_clk) * 100 / fast_clk >= 12 )); then
+        printf '    %sclock asymmetry: %s %s MHz vs %s %s MHz - TP is lockstep, so the\n' \
+            "$c_red" "$slow_h" "$slow_clk" "$fast_h" "$fast_clk"
+        printf '    pair runs at the slower one. Not a model or config fault.%s\n' "$c_off"
+    fi
 }
 
 render_table() {

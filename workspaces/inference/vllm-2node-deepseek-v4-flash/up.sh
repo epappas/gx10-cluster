@@ -41,6 +41,14 @@ MODEL_ARGS=(
     --trust-remote-code
     --tensor-parallel-size 2 --pipeline-parallel-size 1
     --distributed-executor-backend mp
+    # THE ONE VALUE HERE THAT CANNOT BE VALIDATED BY STARTING THE SERVER.
+    # Speculative decoding allocates its verify buffers on the FIRST REAL
+    # REQUEST, not at boot - so a utilisation that is slightly too high boots
+    # cleanly, passes a smoke test, serves a few requests and then dies under
+    # traffic. Every quick check you would run says it is fine. If that is the
+    # shape of your failure, this is the first knob, not the last: the
+    # published 2x Spark profile moved 0.80 -> 0.78 for exactly this, on a
+    # 1M-context nvfp4 config that reserves more than this one does.
     --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.80}"
 
     # 256, not the default 16. DeepSeek's MLA attention reads a compressed
@@ -84,7 +92,25 @@ MODEL_ARGS=(
     # DSpark is why the -DSpark checkpoint exists: a draft module shipped in
     # the same repo. 5 tokens, not the model card's 7 - the card is written for
     # a 4xGB300 node, and rejected drafts are wasted compute that a GB10 has
-    # much less of to waste.
+    # much less of to waste. On the fork lineage 5 is also the only safe value
+    # for a different reason: the draft block is sized from the checkpoint's
+    # dspark_block_size=5, so 7 is rejected at boot there, and patching the
+    # guard out moves the failure to the first generation. Reported on that
+    # runtime, not measured here.
+    #
+    # `draft_sample_method` is carried because the published recipes carry it,
+    # NOT because it is doing anything: the DSpark proposer only populates
+    # draft probabilities under VLLM_DSPARK_EXPORT_DRAFT_PROBS=1, so greedy and
+    # probabilistic take the same rejection-sampler path. The claim that
+    # probabilistic is worth ~50% more throughput circulated widely and was
+    # withdrawn by its authors after a re-measurement. Do not spend a day here.
+    #
+    # WHETHER ANY OF IT IS WORKING is one number, and it is on the bench view:
+    # `ws up vllm-bench-serve` reports draft acceptance live. A draft path that
+    # is silently broken - skipped weights, a clamped draft length - costs
+    # acceptance and nothing else, because the target model still verifies
+    # every token. Output stays perfectly correct at half the speed, which is
+    # the most misleading failure in this file.
     --speculative-config "${SPEC_CONFIG:-{\"method\":\"dspark\",\"num_speculative_tokens\":5,\"draft_sample_method\":\"greedy\"}}"
 
     # Prefer vLLM's sampling defaults over the checkpoint's generation_config.
@@ -101,3 +127,8 @@ echo "downloads them. Expect tens of minutes before /health answers."
 echo
 echo "sampling: temperature 1.0, top_p 1.0 (0.95 for agentic). Reasoning effort"
 echo "is a request field: --chat-template-kwargs '{\"reasoning_effort\":\"high\"}'"
+echo
+echo "once /health answers, ask whether it is answering CORRECTLY - this model"
+echo "is the one in this repo most exposed to cold-prefill and concurrency"
+echo "faults, and they do not move a tok/s number:"
+echo "  ws up vllm-quality-gate     # BASE_URL=http://127.0.0.1:$PORT/v1"

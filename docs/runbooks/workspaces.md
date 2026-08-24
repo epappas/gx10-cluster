@@ -145,6 +145,38 @@ minutes in with a HF 404.
 Results land in `~/.local/state/gx10-bench`: JSON per point plus an HTML
 timeline, which is better than the TUI at per-request forensics.
 
+**On a speculative server, read the acceptance row.** A broken draft path costs
+acceptance and nothing else — the target model still verifies every token — so
+the server stays perfectly correct at half the speed, which reads as bad
+hardware rather than a bad draft.
+
+## Gating a server: right, not just fast
+
+```bash
+ws up vllm-quality-gate                 # BASE_URL, or the default :8888
+ws up vllm-quality-gate -c 1,8 -n 8     # wider ladder, more requests per rung
+ws up vllm-quality-gate --warm          # the control run, which should pass
+```
+
+Different question from the benchmark above: not *how fast*, but *is the answer
+usable*. It looks for serving-layer faults that move no tok/s number — replies
+that open mid-word or echo the prompt, replies that are empty while the whole
+budget was billed, script drift, reasoning that never terminates.
+
+**It forces the conditions a smoke test cannot.** These failures need a cold
+prefill (a prefix-cache hit never fails, so asking twice looks self-healing) or
+concurrency. So every request carries a unique nonce at the *front* of the
+prompt to invalidate the cache chain behind it, and the run climbs a ladder.
+It then checks it really was cold, off `vllm:prefix_cache_hits`.
+
+It **exits non-zero** if anything tripped a detector, so it belongs in front of
+a deployment: `ws up vllm-quality-gate && <promote>`.
+
+If a run comes back all-empty, raise `MAX_TOKENS` before believing it — with
+reasoning on, a budget that expires before `</think>` yields an empty reply and
+a full bill. Below ~1024 you are measuring your own cap
+([detail](serve-models.md#the-answers-are-wrong-not-slow)).
+
 ## Using it: the agent harness
 
 ```bash
@@ -164,6 +196,10 @@ token leaves the house.
 It is an **agent harness on host networking**: it executes tool calls against
 whatever is mounted at `/work`. The default is an empty `./work` directory.
 Point `DSH_WORKSPACE` at a project, not at `$HOME`.
+
+If the UI sits on "Thinking…" until the whole answer lands, that is a field
+name, not a stall: these runtimes stream the trace as `reasoning` while
+OpenAI-compatible clients read `reasoning_content`.
 
 ## Memory: one pool, and everything shares it
 

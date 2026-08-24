@@ -206,6 +206,57 @@ matters.
 The HTML timeline (`--plot-timeline`) is still written per point — it is better
 than this at per-request forensics, and this is better at watching the machine.
 
+**On a speculative server, watch acceptance.** It is the number that explains
+the throughput, and its absence is what makes the worst failure here so hard to
+place: a broken draft path costs acceptance and *nothing else*, because the
+target model still verifies every token. Output stays perfectly correct at half
+the speed — which reads as bad hardware or a bad recipe, and sends people to
+rewrite flags.
+
+## Fast is not the same as correct: `vllm-quality-gate`
+
+| | `vllm-bench-serve` | `vllm-quality-gate` |
+|---|---|---|
+| Asks | how many streams before latency falls over | is it answering **correctly** |
+| Fails when | throughput collapses | a reply is garbled, empty, looping or off-contract |
+| Exit status | informational | **non-zero if any request tripped a detector** |
+
+The failures it looks for are serving-layer, not model quality — scheduler,
+speculative decoder, reasoning parser — and none of them moves a tok/s number:
+replies that open mid-word or echo the prompt, replies that are empty while the
+whole budget was billed, script drift, reasoning that never terminates.
+
+**A five-prompt smoke test cannot find them**, and that is the whole design:
+
+- **Cold prefill.** The corruption attaches to the last chunk of a long *first*
+  prefill. A prefix-cache hit never fails, so asking twice makes it look
+  self-healing — and the clean second answer is the one you believe.
+- **Concurrency.** Several appear only with more than one sequence in flight.
+
+So every request carries a unique nonce as the *first* thing in the prompt,
+which invalidates the whole prefix-cache block chain behind it, the filler is
+long enough to be genuinely chunk-prefilled, and the gate runs a concurrency
+ladder. Then it checks it got the cold run it claims, off
+`vllm:prefix_cache_hits` — an assertion nobody verifies is a comment.
+
+```bash
+ws up vllm-2node-deepseek-v4-flash
+BASE_URL=http://127.0.0.1:8890/v1 ws up vllm-quality-gate
+ws up vllm-quality-gate --warm      # the control run, which should pass
+```
+
+Two things it does that are easy to get wrong by hand. It reads
+`usage.completion_tokens` from a **non-streamed** reply, because under
+speculative decoding a server emits at most one SSE chunk per decode *step*
+carrying every token accepted in it — counting streamed deltas measures
+steps/s and under-reports by the acceptance length. And it reads `reasoning`
+**or** `reasoning_content`, because this family of runtimes returns the first
+and OpenAI-compatible clients expect the second.
+
+The detectors are pure functions over text, so they are tested offline in
+`make check` ([why](../docs/decisions.md#quality-gate)) — a gate that has
+quietly stopped being able to fail is worse than no gate.
+
 ## Then use it: `deepseek-harness`
 
 `kind: agent`. DeepSeek's own agent harness (`dsh`), configured against a model

@@ -415,6 +415,31 @@ render() {
         m1=$(awk -F: 'NR==1{print $5}' <<< "${D["${nodes[1]}|roce"]:-}")
         # Asymmetric MTU drops packets silently instead of failing loudly.
         [[ -n $m0 && -n $m1 && $m0 != "$m1" ]] && warn+=("RoCE MTU $m0 vs $m1")
+
+        # DISTRIBUTED WORK IS LOCKSTEP, so a pair runs at the SLOWEST node's
+        # clock: every step ends in a collective, and a collective waits. One
+        # node that came back from a reboot in a low power state therefore
+        # halves the whole job while looking innocent - same config, same
+        # image, correct output, and on a speculative server even unchanged
+        # draft acceptance. Only the wall clock is wrong, which reads as a bad
+        # model or a bad recipe and sends people to rewrite flags.
+        #
+        # Compared only across BUSY nodes: an idle peer clocking down is
+        # correct behaviour and flagging it would make this row noise. 12% is
+        # outside the jitter of two healthy nodes and well inside the ~20%
+        # reported for the degraded case.
+        local ch cclk cutil lo=0 hi=0 lo_h="" hi_h=""
+        for ch in "${nodes[@]}"; do
+            cclk=${D["$ch|gpu_clock"]:-}; cutil=${D["$ch|gpu_util"]:-0}
+            [[ $cclk =~ ^[0-9]+$ && $cutil =~ ^[0-9]+$ ]] || continue
+            (( cutil >= 50 )) || continue
+            (( lo == 0 || cclk < lo )) && { lo=$cclk; lo_h=$ch; }
+            (( cclk > hi )) && { hi=$cclk; hi_h=$ch; }
+        done
+        if (( lo > 0 && hi > 0 )) && [[ $lo_h != "$hi_h" ]] \
+           && (( (hi - lo) * 100 / hi >= 12 )); then
+            warn+=("clock $lo_h ${lo}MHz vs $hi_h ${hi}MHz - both run at the slower")
+        fi
     fi
     for h in "${nodes[@]}"; do
         [[ ${D["$h|ok"]:-0} == 1 ]] || warn+=("$h UNREACHABLE")

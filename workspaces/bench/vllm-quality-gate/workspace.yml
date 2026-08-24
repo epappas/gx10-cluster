@@ -1,0 +1,41 @@
+name: vllm-quality-gate
+kind: bench
+engine: any
+provenance: unverified
+summary: Is the server answering CORRECTLY - cold-prefill and concurrency failures
+
+# THE THIRD QUESTION. `make bench` asks whether the HARDWARE is fit to run
+# work. `vllm-bench-serve` asks how FAST a model server is. Neither notices a
+# server that is fast and wrong, and a serving stack can be exactly that:
+# garbled openings, script drift, replies that are empty while the whole token
+# budget was billed, reasoning that never terminates. Those are scheduler,
+# speculative-decode and reasoning-parser faults - not model quality - and
+# none of them moves a tok/s number.
+#
+# WHY A SMOKE TEST MISSES THEM. Both conditions that produce these failures are
+# ones a smoke test does not create:
+#
+#   cold prefill   corruption attaches to the last chunk of a long FIRST
+#                  prefill. A prefix-cache hit never fails, so asking the same
+#                  question twice makes it look self-healing.
+#   concurrency    several appear only with more than one sequence in flight.
+#
+# So every request is forced cold - a unique nonce as the first thing in the
+# prompt, which invalidates the whole prefix-cache block chain behind it - the
+# filler is long enough to be genuinely chunk-prefilled, and the gate runs a
+# concurrency ladder. It then CHECKS it got the cold run it claims, off
+# vllm:prefix_cache_hits, because an assertion nobody verifies is a comment.
+#
+# Like every `bench` and `agent` workspace this is a CLIENT: it needs a running
+# endpoint rather than a free GPU, so `requires:` is empty and it coexists with
+# the serving workspace it is pointed at.
+requires: {}
+
+endpoints:
+  - "reads http://127.0.0.1:8888/v1 by default - set BASE_URL for anything else"
+  - "exit status 0 only if every request passed every detector"
+
+sources:
+  - https://github.com/tonyd2wild/DeepSeek-v4-Flash-0731-DSpark-1M-NVFP4-KV-2x-DGX-Spark
+  - https://docs.vllm.ai/en/latest/design/metrics/
+  - https://docs.vllm.ai/en/latest/features/spec_decode/

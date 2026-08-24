@@ -1118,3 +1118,198 @@ nodes. So the default is 128K on `fp8`, and the 1M path is documented in
 `.env.example` as a switch with a stated cost. Asking for 1M on `fp8` does not
 fail at startup — it fails later, as preemption, which reads as "the model got
 slow" rather than "the context was a lie".
+
+## <a name="quality-gate"></a>"Is it up" and "is it fast" are not "is it right", so there is a third check
+
+`make bench` measures the hardware. `ws up vllm-bench-serve` measures a model
+server's throughput ([#serving-bench](#serving-bench)). Both can be green on a
+server that is returning garbage, because the failures that produce garbage are
+in the *serving* layer — the scheduler, the speculative decoder, the reasoning
+parser — and none of them moves a tok/s number:
+
+| Symptom | Layer |
+|---|---|
+| Reply opens mid-word, or reproduces prompt/tool text | Spec-decode placeholders attached to the last chunk of a cold chunked prefill |
+| `""` returned, the whole token budget billed | Reasoning outran `max_tokens` before `</think>`; the parser emits neither field |
+| Output drifts into another script, or recycles a phrase forever | A reasoning runaway |
+| `<｜begin▁of▁sentence｜>` in the content | Detokenizer or template fault |
+
+Everything below follows from one observation, which is the reason this is a
+workspace and not a `curl` in a runbook.
+
+### A smoke test cannot find any of them, and the reason is structural
+
+Both conditions that produce these failures are ones a smoke test does not
+create:
+
+- **Cold prefill.** The corruption attaches to the final chunk of a long
+  *first* prefill. **A prefix-cache hit never fails.** So asking the same
+  question twice makes the problem look self-healing — and the clean second
+  answer is the one you believe.
+- **Concurrency.** Several appear only with more than one sequence in flight,
+  because that is when the scheduler does the thing that breaks.
+
+So the gate manufactures both. A unique nonce goes at the **front** of every
+prompt, which invalidates the whole prefix-cache block chain behind it; the
+filler is long enough to be genuinely chunk-prefilled rather than swallowed in
+one pass; and the whole thing runs a concurrency ladder.
+
+Order is the entire trick, and the natural way to write it is wrong: the same
+nonce appended at the *end* shares every block but the last, which is a warm
+request wearing a disguise. The nonce doubles as the prompt-echo sentinel,
+which is one fewer string to keep in step.
+
+**And then it checks.** The run reads `vllm:prefix_cache_hits` and says so if
+the hit rate was not near zero, because a gate whose central claim — *these
+were cold* — is never verified is a comment. The same pass reports
+`vllm:num_preemptions` (the timings describe a server under memory pressure)
+and speculative acceptance.
+
+### Two directions of failure, and the second one is why the detectors are tested
+
+A detector that stops catching things turns the gate green forever, which is
+worse than not having a gate, because a green gate is trusted. A detector that
+starts flagging clean output gets the gate muted, and a muted gate catches
+nothing. `tests/check_detectors.py` asserts both directions — including that an
+ordinary lowercase opening is *not* reported as a truncated word.
+
+That test is in `make check` and CI. It fits the existing tier
+([#testing-is-tiered-because-the-hardware-cannot-be-faked](#testing-is-tiered-because-the-hardware-cannot-be-faked))
+exactly: the serving half needs a GB10 and a loaded model, the detectors are
+pure functions over text and need neither.
+
+### The empty reply is checked first and separately
+
+Empty text contains no special tokens, no non-Latin script and no leaked
+markup, so it passes every other detector *trivially*. A gate without an
+explicit check reports success on a server that answers nothing.
+
+It is also not usually an empty generation. With reasoning enabled and a budget
+that runs out before `</think>` arrives, the reasoning parser emits neither
+content nor reasoning, and the caller is billed for the lot. The rate is a
+function of the budget — reported at temperature 0.5 with thinking on: 256
+tokens → 83% empty, 512 → 50%, 768 → 17%, 1024 → 0 of 18. So `MAX_TOKENS`
+here is a **detector setting**: below ~1024 the gate is measuring its own cap.
+
+### Loop or heavy tail — same symptom, opposite fixes
+
+`finish_reason=length` with nothing useful in `content` has two causes:
+
+| | What it is | Fix |
+|---|---|---|
+| heavy tail | still saying new things, just a lot of them | raise `max_tokens` |
+| loop | recycling what it already said, forever | raising `max_tokens` changes the bill and nothing else |
+
+They are indistinguishable to the caller, so the verdict is computed: the
+fraction of word 8-grams in each window that have not appeared earlier in the
+same trace, judged over the reasoning stream where a runaway actually lives.
+
+**Not block uniqueness**, which is the instrument everyone reaches for first
+and which reports these loops as healthy text. The loops that matter are
+*templated* rather than verbatim — a small set of stock phrases recombined with
+one element varying each pass. On the traces this method comes from, unique
+120-character blocks read 22% / 92% / 66% while unique word 8-grams read 3.4% /
+4.0% / 2.8% on the same text. Recycled phrases are the signal; recycled bytes
+are not.
+
+Two calibration details are load-bearing and both are in the test fixture. The
+verdict requires novelty to collapse **and stay collapsed to the end** — a
+single low window is a long verbatim quote, and calling that a loop teaches
+people to ignore the verdict. And the varying element must come from a small
+pool: a fixture with a monotonically increasing counter mints a genuinely novel
+8-gram every pass and never converges, which is also the correct answer, since
+a model still producing values it has never produced before is not looping.
+
+## <a name="dspark-1m-recipe"></a>What was ported from the 1M/NVFP4 DSpark recipe, and what was not
+
+[tonyd2wild/DeepSeek-v4-Flash-0731-DSpark-1M-NVFP4-KV-2x-DGX-Spark](https://github.com/tonyd2wild/DeepSeek-v4-Flash-0731-DSpark-1M-NVFP4-KV-2x-DGX-Spark)
+is the second published two-node GB10 serving configuration this repo has taken
+from, after [#two-node-vllm](#two-node-vllm). The split is different this time.
+Its *configuration* is a fork-pinned, model-specific stack this repo already
+declined once. Its **operational findings** are not model-specific at all —
+they are about what a serving benchmark fails to notice, and they are the most
+valuable thing in it.
+
+### Taken
+
+| From them | Why it matters |
+|---|---|
+| **The cold-prefill reproducer method** — bust the prefix cache with a per-request nonce, then score the output | The whole basis of `vllm-quality-gate`. Their measurement is the argument: 11 of 12 cold prefills failed on a config where **0 of 19 warm requests** did. A gate that does not force cold is testing the case that never fails |
+| **The failure taxonomy** — special-token leak, mid-word start, prompt echo, script drift, empty-with-tokens-billed, templated loop | Each is a named, cheap, textual check. Together they are the difference between "the server is up" and "the server is right" |
+| **Loop vs heavy tail from novelty**, and the warning that block uniqueness gets it backwards | Recorded in full at [#quality-gate](#quality-gate). The trap is the valuable half: their first instrument said the runaways were not loops, and it was wrong |
+| **`empty` is a separate check**, with the max-tokens ladder behind it | It passes every other detector trivially. 256 → 83% empty, 1024 → 0 of 18 |
+| **Read `usage.completion_tokens` from a non-streamed reply** | Under spec decode a server emits at most one SSE chunk per decode *step*. Counting streamed deltas measures steps/s and under-reports by the acceptance length — they measured 14.7 vs 60.1 tok/s on the identical request |
+| **Draft acceptance as the first diagnostic**, now live in `bench-tui` | A broken draft path costs acceptance and *nothing else* — the target still verifies every token, so output stays correct at half speed. They spent the investigation proving it was not the weights, not the config, not contention: 25.7% → 60.2% acceptance, 32.7 → 55.4 tok/s, from twelve draft tensors a loader silently skipped |
+| **Cross-node clock asymmetry**, now flagged by `gx10-top` and `bench-tui` | A rebooted node sat at 22 W / 2086 MHz beside a healthy one at 42 W / 2502 MHz; TP is lockstep, so the pair ran at 42 tok/s instead of 83 with *acceptance and config unchanged*. Detection is ported; the `nvidia-smi -lgc` remedy is not, because `-pl`/`-ac` are `N/A` on GB10 ([hardware](hardware.md)) and this repo has not measured whether `-lgc` differs |
+| **`reasoning` vs `reasoning_content`** | The runtime emits the first, OpenAI-compatible clients read the second. A client that knows only one renders "Thinking…" forever and reports zero reasoning |
+| **The `num_speculative_tokens` traps** | On the fork lineage, omitting it yields `k=1` rather than the checkpoint's 5 — a server that boots, speculates one token per step and says nothing. And `k=7` from the model card is rejected at boot on one image and crashes on first generation once that guard is patched out |
+| **Speculative buffers are allocated on the first real request**, not at boot | So a `--gpu-memory-utilization` slightly too high boots, passes a smoke test, serves a few requests and then dies under traffic. Every quick check says it is fine. Noted at the flag in `vllm-2node-deepseek-v4-flash` |
+
+### Not taken
+
+- **The patch stack** (five numbered patches, a three-stage NVFP4 image, a vLLM
+  overlay tree). Fork- and version-specific, against a vLLM this repo does not
+  run. [#two-node-vllm](#two-node-vllm) already declined that trade and nothing
+  here changes it.
+- **The bind-mount patching pattern** — injecting a patched `.py` over the
+  container's site-packages. It has a failure mode their own README documents:
+  the launcher syncs the compose and env files to the worker but *not* the
+  mounted file, so the worker silently runs unpatched and you debug a
+  half-fixed cluster. This repo's launcher builds both ranks' argv in one place
+  ([#twonode-lib](#twonode-lib)) precisely to avoid that class of bug; adding a
+  host path that must exist identically on both nodes puts it straight back.
+- **`draft_sample_method`.** Carried in the flags because the published recipes
+  carry it, documented as doing nothing. Their own correction: the DSpark
+  proposer only populates draft probabilities under
+  `VLLM_DSPARK_EXPORT_DRAFT_PROBS=1`, so greedy and probabilistic take the same
+  rejection-sampler path. The widely-repeated "probabilistic beats greedy, 49
+  vs 32 tok/s" claim was withdrawn by its authors after re-measurement — worth
+  recording so nobody re-derives it here.
+- **`k=3` as the garble fix.** Also widely repeated, also withdrawn: measured,
+  `k=3` failed 10 of 10 cold prefills. It costs ~24% of decode and fixes
+  nothing. This is the strongest argument for owning a reproducer rather than
+  inheriting a folk remedy.
+- **`NCCL_IB_MERGE_NICS=1` and a pinned dual-HCA list.** Their measurement is
+  98 → 161 Gb/s, +64%, and it does not apply here: this cluster already
+  measures **22.7 GB/s ≈ 181 Gb/s** with the device list *unpinned*
+  ([#one-cable-two-partitions](#one-cable-two-partitions)). Their 98 Gb/s is
+  almost exactly the "one partition only" row in
+  [connect-cluster](runbooks/connect-cluster.md#reading-the-result) — so this
+  is the same finding from the other side, and useful as corroboration rather
+  than as a knob to add. [#no-speculative-roce-tuning](#no-speculative-roce-tuning)
+  still applies to the pinning half.
+- **Their context and concurrency numbers** (1M/1.5M, `max_num_seqs` 12,
+  `nvfp4_ds_mla`). They belong to the fork image; ours are derived from the
+  KV arithmetic of an fp8 checkpoint on two nodes and are documented where
+  they are used.
+
+### Improved on
+
+Their gate scripts are separate one-off tools (`agent_sanity_bench.py`,
+`replay_hermes.py`, `loop_detector.py`, `garble_tap.py`), each pointed at a
+hardcoded lane and each carrying its own copy of the detectors. Here it is one
+workspace with one detector set, a discovered model id, and an exit status —
+so it composes with `ws` like everything else and can gate a deployment.
+
+The detectors also gained an offline test in CI, which the originals do not
+have. That matters more than it sounds: a text detector is exactly the kind of
+code that keeps running and quietly stops matching.
+
+### Recorded, not acted on
+
+- **Reasoning quality is a measurement setting, not a model property.** On
+  their execution-graded harness, thinking off scored 12/20 one-shot and
+  thinking on scored **11/20** — worse — because every one of the nine failures
+  was `finish_reason=length` at an 8K cap. Retried with 32K, thinking on scored
+  **20/20**. Any evaluation run here must report the thinking setting and retry
+  length-capped failures, or it is measuring its own cap. This is why the gate
+  treats `max_tokens` as a detector setting.
+- **`sm_121a` again.** They compile with `TORCH_CUDA_ARCH_LIST=12.1a`, as
+  MiaAI-Lab did. [#two-node-vllm](#two-node-vllm) already recorded it; a second
+  independent recipe using the `a` suffix strengthens it as the first thing to
+  check if a FlashInfer or CUTE-DSL kernel ever misbehaves here.
+- **Acceptance is content-driven, so a single headline number is not a
+  measurement.** Measured on one patched server: structured/repetitive 78.3%,
+  code 68.7%, prose 33.7%. This is why `vllm-quality-gate` sends three prompt
+  shapes rather than one, and why the bench view flags only *very* low
+  acceptance rather than pretending there is a universal good value.

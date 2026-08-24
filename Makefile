@@ -51,7 +51,7 @@ help:  ## Show this help
 # --- Checks that run anywhere (and in CI) ----------------------------------
 
 .PHONY: check
-check: lint syntax smoke render handlers optional-tags workspaces docs lockfile shellcheck  ## Every offline check (what CI runs)
+check: lint syntax smoke render handlers optional-tags workspaces detectors docs lockfile shellcheck  ## Every offline check (what CI runs)
 
 .PHONY: deps
 deps:  ## Install the pinned collections
@@ -116,6 +116,13 @@ workspaces:  ## Workspace manifests are well-formed and runnable
 .PHONY: docs
 docs:  ## Directory indexes must list every role, runbook and vars file
 	@python3 tests/check_docs.py
+
+# The quality gate needs a running model; its DETECTORS do not, and they are
+# the half that fails silently. A regex that quietly stops matching turns the
+# gate green forever, which is worse than not having one.
+.PHONY: detectors
+detectors:  ## The serving quality gate's detectors catch what they claim to
+	@python3 tests/check_detectors.py
 
 # The ML lockfile is one resolution and only means anything whole. Two ways it
 # silently stops being that: regenerated without --index-strategy (the cu130

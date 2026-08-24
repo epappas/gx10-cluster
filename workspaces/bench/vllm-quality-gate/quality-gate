@@ -1,0 +1,492 @@
+#!/usr/bin/env python3
+"""Does this server answer CORRECTLY - not how fast does it answer.
+
+`make bench` measures the hardware. `ws up vllm-bench-serve` measures a model
+server's throughput. Neither of them notices a server that is answering
+nonsense, and a server can do that while every number on both of those looks
+healthy: garbled openings, script drift, reasoning that never terminates, and
+replies that are empty while the full token budget was billed. Those are
+SERVING-layer failures - scheduler, speculative decoding, reasoning parser -
+not model quality, and they do not show up in tok/s.
+
+WHY A FIVE-PROMPT SMOKE TEST PASSES ANYWAY
+
+The two failure classes that matter here are conditional, and a smoke test
+meets neither condition:
+
+  COLD PREFILL   Corruption of the prompt tail happens while a long prompt is
+                 being chunk-prefilled for the first time. A prefix-cache HIT
+                 never fails. Type the same question twice and the second one
+                 is clean, which reads as "it fixed itself".
+  CONCURRENCY    Several of these appear only with more than one sequence in
+                 flight, because that is when the scheduler does the thing that
+                 breaks.
+
+So every request here is forced cold (a unique nonce as the FIRST thing in the
+prompt, which invalidates the whole prefix-cache block chain behind it), the
+prompts are long enough to be genuinely chunk-prefilled, and the whole thing
+runs up a concurrency ladder. The gate then CHECKS that it got what it asked
+for, off the server's own prefix-cache counters, rather than assuming the
+cache-busting worked.
+
+Detectors are deliberately cheap and textual. Each one is a failure we can
+name; none of them is "the answer was not very good", which this cannot judge
+and does not try to.
+
+  python3 quality-gate                 the default ladder
+  python3 quality-gate -c 1,4 -n 4     explicit ladder, 4 requests per rung
+  python3 quality-gate --warm          keep the prefix cache (the control run)
+
+Exit status is 0 only if every request passed every detector, so this is usable
+as a gate in front of a deployment and not only as something to read.
+
+Sources for the failure taxonomy and the cold-prefill reproducer method:
+  https://github.com/tonyd2wild/DeepSeek-v4-Flash-0731-DSpark-1M-NVFP4-KV-2x-DGX-Spark
+    (AGENT_GARBLE_FIX.md, benchmarks/replay_hermes.py, scripts/loop_detector.py)
+  https://docs.vllm.ai/en/latest/design/metrics/
+"""
+
+from __future__ import annotations
+
+import argparse
+import concurrent.futures
+import json
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.request
+
+BASE_URL = os.environ.get("BASE_URL", "http://127.0.0.1:8888/v1").rstrip("/")
+ROOT_URL = BASE_URL[: -len("/v1")] if BASE_URL.endswith("/v1") else BASE_URL
+MODEL = os.environ.get("MODEL", "")
+TIMEOUT = float(os.environ.get("TIMEOUT", "600"))
+MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "1024"))
+PREFILL_WORDS = int(os.environ.get("PREFILL_WORDS", "1800"))
+
+c_red, c_grn, c_yel, c_dim, c_bold, c_off = (
+    "\033[31m", "\033[32m", "\033[33m", "\033[2m", "\033[1m", "\033[0m"
+)
+
+
+# --- the prompts -----------------------------------------------------------
+# Three shapes, because both acceptance and garble are CONTENT-DRIVEN: a
+# structured/repetitive answer and a prose one are different workloads for a
+# speculative drafter, and a single headline number over one shape is not
+# meaningful. Each prompt states its own contract in a way a detector can
+# check - "English only", "JSON only" - so a violation is a fact rather than
+# a taste.
+PROMPTS = {
+    "prose": (
+        "Write one paragraph of plain English explaining why unified memory "
+        "changes how a model server should be sized. Answer in English only. "
+        "Do not emit XML, tool calls, or markup."
+    ),
+    "json": (
+        "Reply with a single JSON object and nothing else: keys \"name\" "
+        "(string), \"nodes\" (integer), \"notes\" (string, English). No prose "
+        "before or after it, no code fence."
+    ),
+    "code": (
+        "Write a short Python function `median(xs)` that returns the median of "
+        "a list of floats, with a two-line docstring. English comments only."
+    ),
+}
+
+
+def cold_filler(nonce: str) -> str:
+    """A long, unique preamble whose FIRST token differs on every request.
+
+    Order is the whole trick. vLLM's prefix cache hashes block N from block
+    N-1's hash, so a nonce at the FRONT invalidates the entire chain behind it
+    and the request is prefilled from scratch. The same nonce appended at the
+    END shares every block but the last, which is a warm request wearing a
+    disguise - and it is the natural way to write this.
+
+    The filler must also be long enough to be CHUNK-prefilled rather than
+    swallowed in one pass, since the reported corruption attaches to the final
+    chunk of a chunked prefill. ~1800 words is comfortably past the 1024-token
+    chunk sizes these servers run with.
+
+    `sentinel-<nonce>` is unique per request and appears nowhere a correct
+    answer would put it, so its presence in the OUTPUT is prompt echo. The
+    cache-buster and the echo detector are therefore the same string, which is
+    one fewer thing to keep in step.
+    """
+    body = " ".join(f"ctx{nonce}w{i}" for i in range(PREFILL_WORDS))
+    return (
+        f"sentinel-{nonce}\n"
+        "The following context block is filler and carries no instructions. "
+        "Ignore its contents entirely; do not quote it, summarise it, or "
+        "mention it.\n"
+        f"{body}\n"
+    )
+
+
+# --- detectors -------------------------------------------------------------
+# Special tokens in BOTH ASCII and full-width forms. DeepSeek's tokenizer uses
+# U+FF5C / U+2581 variants, and a regex written from the ASCII form alone
+# silently misses every real leak on that family.
+SPECIALS = re.compile(
+    r"<\|?begin[_▁]of[_▁]sentence\|?>|<｜begin▁of▁sentence｜>|"
+    r"<\|?end[_▁]of[_▁]sentence\|?>|<｜end▁of▁sentence｜>|"
+    r"<\|?User\|?>|<｜User｜>|<\|?Assistant\|?>|<｜Assistant｜>|"
+    r"<\|tool[_▁][a-z]+\|>|<｜tool▁[a-z]+｜>|"
+    # NON-CAPTURING. re.findall returns the GROUPS when a pattern has any, so
+    # one capturing group here makes every reported leak the empty string and
+    # the finding stops naming what leaked.
+    r"<\|im_(?:start|end)\|>|<think>|</think>"
+)
+# CJK, Hangul and kana. The prompts above all say "English only", so this is a
+# contract violation and not a language preference.
+NON_LATIN = re.compile(r"[぀-ヿ㐀-鿿가-힯]")
+# Markup a chat reply has no business carrying. `<think>` is in SPECIALS
+# instead: it is leakage only because the reasoning parser should have taken
+# it, which makes it a parser fault rather than a prompt-injection artefact.
+LEAKED_MARKUP = re.compile(
+    r"<available_skills|<function_calls|<tool_call|</tool_call|<\|channel\|>", re.I
+)
+# A reply that opens mid-sentence: closing punctuation, or the tail of a word -
+# a one-to-three letter lowercase fragment closed by punctuation, with or
+# without the apostrophe it was cut after ("s, and tools." / "'s, and tools.").
+# Kept deliberately narrow. A lowercase FIRST WORD is common and correct, and
+# an opening quote is too, so neither is on this list by itself: the fragment
+# must be short AND immediately punctuated.
+MIDWORD = re.compile(r"^\s*(?:[,;:.\)\]\}]|['’]?[a-z]{1,3}[,.](?:\s|$))")
+
+WINDOW_WORDS = 700   # words per novelty window
+NOVELTY_FLOOR = 0.02  # below this the window is producing nothing new
+CONSECUTIVE = 3      # windows in a row before it counts as a loop
+
+
+def novelty(text: str) -> list[float]:
+    """Per-window fraction of word 8-grams never seen earlier in the text.
+
+    WHY 8-GRAMS OF WORDS AND NOT UNIQUE BLOCKS. The obvious instrument -
+    "what fraction of 120-character blocks are unique" - reports a real loop as
+    healthy text, because the loops that matter are TEMPLATED rather than
+    verbatim: a small set of stock phrases recombined with one element varying
+    each pass. On the traces this method was calibrated against, block
+    uniqueness read 22-92% while word-8-gram novelty read 3-4% on the same
+    text. Recycled phrases are the signal; recycled bytes are not.
+
+    Windowing over the WORD sequence rather than the character stream matters
+    for the same reason: character windows cut words at both ends, and on a
+    short verbatim loop those few novel boundary fragments are enough to hold
+    a small window's novelty above any threshold forever.
+    """
+    words = re.findall(r"\w+", text.lower())
+    seen: set[tuple[str, ...]] = set()
+    out: list[float] = []
+    for start in range(0, len(words), WINDOW_WORDS):
+        chunk = words[start : start + WINDOW_WORDS]
+        if len(chunk) < WINDOW_WORDS // 2:
+            break  # a short tail window is noise, not a measurement
+        grams = [tuple(chunk[i : i + 8]) for i in range(max(0, len(chunk) - 7))]
+        if not grams:
+            break
+        fresh = sum(1 for g in grams if g not in seen)
+        seen.update(grams)
+        out.append(fresh / len(grams))
+    return out
+
+
+def length_verdict(text: str) -> str:
+    """`finish_reason=length` has two causes that want opposite fixes.
+
+      heavy tail  the model is still saying new things, there are just a lot of
+                  them. Raise max_tokens.
+      loop        the model is recycling what it already said, and will do so
+                  forever. Raising max_tokens changes the bill and nothing else.
+
+    Both present identically to the caller, which is why this is worth
+    computing rather than eyeballing. A loop is called only when novelty
+    collapses AND STAYS collapsed to the end - a single low window is a long
+    verbatim quote, and reporting that as a loop teaches people to ignore the
+    verdict.
+    """
+    rows = novelty(text)
+    if len(rows) < CONSECUTIVE:
+        return "short"  # too little text to distinguish; not a claim either way
+    for i in range(len(rows) - CONSECUTIVE + 1):
+        if all(v < NOVELTY_FLOOR for v in rows[i:]) and len(rows) - i >= CONSECUTIVE:
+            return "loop"
+    return "heavy-tail"
+
+
+def detect(nonce: str, shape: str, content: str, reasoning: str, finish: str,
+           completion_tokens: int) -> list[str]:
+    """Every reason this response is not acceptable. Empty list = clean."""
+    bad: list[str] = []
+
+    # FIRST, AND SEPARATELY FROM EVERYTHING ELSE. Empty text contains no
+    # special tokens, no non-Latin script and no markup, so it passes every
+    # other detector trivially - a gate without this check reports success on a
+    # server that answers nothing. The usual cause is not an empty generation:
+    # it is reasoning that ran past max_tokens before `</think>` arrived, so
+    # the reasoning parser emits neither content nor reasoning while the whole
+    # budget was billed.
+    if completion_tokens > 0 and not content.strip():
+        why = "reasoning never closed" if reasoning else "no text at all"
+        bad.append(f"empty-with-{completion_tokens}-tokens-billed ({why})")
+
+    hits = sorted(set(SPECIALS.findall(content)))
+    if hits:
+        bad.append(f"special-token-leak {hits[:3]}")
+    if LEAKED_MARKUP.search(content):
+        bad.append("prompt/tool markup in the reply")
+    if f"sentinel-{nonce}" in content or f"ctx{nonce}" in content:
+        bad.append("prompt echo (filler text reproduced in the answer)")
+    if MIDWORD.match(content):
+        bad.append(f"starts mid-sentence: {content[:40]!r}")
+    n_nonlatin = len(NON_LATIN.findall(content))
+    if n_nonlatin:
+        bad.append(f"script drift: {n_nonlatin} non-Latin chars, prompt said English only")
+
+    if finish == "length":
+        # Judged on the reasoning stream when there is one - that is where a
+        # runaway lives, and scoring the (often empty) content instead reports
+        # every runaway as "short".
+        verdict = length_verdict(reasoning or content)
+        if verdict == "loop":
+            bad.append("reasoning loop (novelty collapsed and never recovered)")
+        elif verdict == "heavy-tail":
+            bad.append(f"hit max_tokens={MAX_TOKENS} on a HEALTHY tail - raise the budget")
+        else:
+            bad.append(f"hit max_tokens={MAX_TOKENS}, too short to classify")
+
+    if shape == "json" and content.strip() and not bad:
+        body = content.strip().removeprefix("```json").removeprefix("```").removesuffix("```")
+        try:
+            json.loads(body)
+        except ValueError as exc:
+            bad.append(f"asked for JSON only, got something else ({exc.args[0][:40]})")
+    return bad
+
+
+# --- the client ------------------------------------------------------------
+def chat(nonce: str, shape: str, warm: bool) -> dict:
+    """One request. NOT streamed, and that is a measurement decision.
+
+    Under speculative decoding a server emits at most one SSE chunk per decode
+    STEP, carrying every token accepted in that step. Counting streamed content
+    deltas therefore measures steps per second, not tokens per second, and
+    under-reports by exactly the acceptance length - a factor of four is
+    routine. `usage.completion_tokens` on a non-streamed reply is the server's
+    own count and cannot drift that way.
+    """
+    prompt = PROMPTS[shape]
+    if not warm:
+        prompt = cold_filler(nonce) + "\n" + prompt
+    payload = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": MAX_TOKENS,
+        "temperature": 0,
+        "stream": False,
+    }
+    req = urllib.request.Request(
+        f"{BASE_URL}/chat/completions",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    t0 = time.perf_counter()
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            data = json.load(resp)
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        return {"shape": shape, "seconds": time.perf_counter() - t0, "tokens": 0,
+                "bad": [f"request failed: {exc}"], "sample": ""}
+    dt = time.perf_counter() - t0
+
+    choice = data["choices"][0]
+    message = choice.get("message") or {}
+    content = message.get("content") or ""
+    # This family of runtimes returns the reasoning trace in `reasoning`, while
+    # OpenAI-compatible clients look for `reasoning_content`. Reading only one
+    # of them reports zero reasoning on half the servers in this repo - and
+    # "no reasoning" silently turns a runaway into an unexplained empty reply.
+    reasoning = message.get("reasoning") or message.get("reasoning_content") or ""
+    tokens = (data.get("usage") or {}).get("completion_tokens") or 0
+    return {
+        "shape": shape,
+        "seconds": dt,
+        "tokens": tokens,
+        "tok_s": tokens / dt if dt else 0,
+        "finish": choice.get("finish_reason") or "",
+        "bad": detect(nonce, shape, content, reasoning, choice.get("finish_reason") or "", tokens),
+        "sample": " ".join(content.split())[:110],
+    }
+
+
+# --- server-side counters --------------------------------------------------
+def metrics() -> dict[str, float]:
+    """The counters that say whether the run measured what it claimed to.
+
+    Prefix-cache hits are the interesting pair: this gate ASSERTS it forced
+    cold prefills, and an assertion nobody checks is a comment. If the hit rate
+    over the run is not near zero, the nonce is not busting the cache and every
+    "clean" verdict below is a verdict about warm requests, which never fail.
+    """
+    try:
+        with urllib.request.urlopen(f"{ROOT_URL}/metrics", timeout=5) as resp:
+            body = resp.read().decode()
+    except (urllib.error.URLError, TimeoutError):
+        return {}
+    # Counters are summed, not last-one-wins: a data-parallel server emits one
+    # line per engine and taking the last reports one engine as the whole
+    # server. Names carry a `_total` suffix in the exposition format that the
+    # Python client adds and vLLM's own dashboards omit, so accept both.
+    want = ("vllm:prefix_cache_queries", "vllm:prefix_cache_hits",
+            "vllm:num_preemptions", "vllm:spec_decode_num_drafts",
+            "vllm:spec_decode_num_draft_tokens", "vllm:spec_decode_num_accepted_tokens")
+    out: dict[str, float] = {}
+    for line in body.splitlines():
+        if line.startswith("#") or not line:
+            continue
+        name, _, rest = line.partition("{" if "{" in line else " ")
+        name = name.removesuffix("_total")
+        if name in want:
+            try:
+                out[name] = out.get(name, 0.0) + float(line.rsplit(None, 1)[-1])
+            except ValueError:
+                continue
+    return out
+
+
+def report_counters(before: dict[str, float], after: dict[str, float], warm: bool) -> list[str]:
+    """Deltas over the run, and the two conclusions they license."""
+    lines: list[str] = []
+
+    def d(key: str) -> float:
+        return after.get(key, 0.0) - before.get(key, 0.0)
+
+    q, h = d("vllm:prefix_cache_queries"), d("vllm:prefix_cache_hits")
+    if q > 0:
+        rate = 100 * h / q
+        if warm:
+            lines.append(f"prefix cache   {rate:.0f}% hits  (warm control run)")
+        elif rate > 20:
+            lines.append(
+                f"{c_yel}prefix cache   {rate:.0f}% hits - THE RUN WAS NOT COLD. "
+                f"Warm requests do not reproduce these failures; a clean result "
+                f"here means little.{c_off}"
+            )
+        else:
+            lines.append(f"prefix cache   {rate:.0f}% hits  (cold, as intended)")
+
+    if d("vllm:num_preemptions") > 0:
+        lines.append(
+            f"{c_yel}preemptions    {d('vllm:num_preemptions'):.0f} - the KV cache ran out "
+            f"mid-run. Timings below are of a server under memory pressure.{c_off}"
+        )
+
+    drafts, draft_tok = d("vllm:spec_decode_num_drafts"), d("vllm:spec_decode_num_draft_tokens")
+    accepted = d("vllm:spec_decode_num_accepted_tokens")
+    if draft_tok > 0:
+        # THE FIRST NUMBER TO LOOK AT WHEN A SPECULATIVE SERVER IS HALF SPEED.
+        # A broken draft path - weights the loader skipped, a mismatched draft
+        # length - costs acceptance and NOTHING ELSE: the target model still
+        # verifies every token, so output stays perfectly correct while
+        # throughput halves. That combination sends people looking at configs
+        # and hardware. Acceptance names it in one line.
+        rate = 100 * accepted / draft_tok
+        per_step = 1 + accepted / drafts if drafts else 0
+        note = f"{c_yel}  <- low; suspect the DRAFT path, not the config{c_off}" if rate < 40 else ""
+        lines.append(f"spec decode    {rate:.0f}% accepted, {per_step:.2f} tok/step{note}")
+    return lines
+
+
+# --- the run ---------------------------------------------------------------
+def main() -> int:
+    global MODEL, MAX_TOKENS
+    ap = argparse.ArgumentParser(description="Correctness gate for an OpenAI-compatible server")
+    ap.add_argument("-c", "--concurrency", default=os.environ.get("CONCURRENCY", "1,2,4"))
+    ap.add_argument("-n", "--per-rung", type=int, default=int(os.environ.get("PER_RUNG", "6")))
+    ap.add_argument("--max-tokens", type=int, default=MAX_TOKENS)
+    ap.add_argument("--warm", action="store_true",
+                    help="keep the prefix cache - the control run, which should pass")
+    ap.add_argument("--json", action="store_true", help="machine-readable summary on stdout")
+    args = ap.parse_args()
+    MAX_TOKENS = args.max_tokens
+
+    if not MODEL:
+        try:
+            with urllib.request.urlopen(f"{BASE_URL}/models", timeout=10) as resp:
+                MODEL = json.load(resp)["data"][0]["id"]
+        except Exception as exc:  # noqa: BLE001 - any failure here is the same failure
+            print(f"{c_red}no server answering at {BASE_URL}/models: {exc}{c_off}", file=sys.stderr)
+            print("start one first, or set BASE_URL in .env", file=sys.stderr)
+            return 2
+
+    ladder = [int(x) for x in args.concurrency.split(",") if x.strip()]
+    print(f"{c_bold}{MODEL}{c_off}  at {BASE_URL}")
+    print(f"{c_dim}{'warm (control)' if args.warm else 'cold prefill forced'} · "
+          f"{args.per_rung} requests per rung · max_tokens {MAX_TOKENS} · "
+          f"~{PREFILL_WORDS} words of filler{c_off}\n")
+
+    before = metrics()
+    rows: list[dict] = []
+    print(f"{c_bold}{'CONC':>5}  {'OK':>7}  {'TOK/S':>7}  {'SHAPE':<7} {'DETAIL'}{c_off}")
+    for conc in ladder:
+        shapes = list(PROMPTS)
+        jobs = [(f"{conc}x{i}{int(time.time()*1000)%100000}", shapes[i % len(shapes)])
+                for i in range(args.per_rung)]
+        t0 = time.perf_counter()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=conc) as pool:
+            res = list(pool.map(lambda j: chat(j[0], j[1], args.warm), jobs))
+        wall = time.perf_counter() - t0
+        for r in res:
+            r["concurrency"] = conc
+        rows += res
+
+        clean = sum(1 for r in res if not r["bad"])
+        # Aggregate over the rung's WALL time, not over the sum of per-request
+        # times divided by the concurrency. The latter is the same number only
+        # when every stream stays busy for the whole rung, which is exactly the
+        # assumption a concurrency ladder exists to test.
+        agg = sum(r["tokens"] for r in res) / max(wall, 1e-6)
+        colour = c_grn if clean == len(res) else c_red
+        print(f"{conc:>5}  {colour}{clean:>3}/{len(res):<3}{c_off}  {agg:>7.0f}", end="")
+        first = True
+        for r in res:
+            if not r["bad"]:
+                continue
+            # 23 = the width of the three columns above, so a second finding
+            # lines up under the first rather than under the concurrency.
+            pad = "" if first else " " * 23
+            print(f"{'' if first else chr(10)}{pad}  {r['shape']:<7} {c_red}{r['bad'][0]}{c_off}", end="")
+            first = False
+        if first:
+            print(f"  {c_dim}-{c_off}", end="")
+        print()
+
+    print()
+    for line in report_counters(before, metrics(), args.warm):
+        print(f"  {line}")
+
+    failed = [r for r in rows if r["bad"]]
+    print()
+    if failed:
+        # One example in full. The point of a gate is to hand you the thread to
+        # pull, and a truncated sample of the actual bad output is more use
+        # than another count.
+        worst = failed[0]
+        print(f"{c_red}{c_bold}{len(failed)}/{len(rows)} requests failed.{c_off}  "
+              f"first, {worst['shape']} at concurrency {worst['concurrency']}:")
+        for reason in worst["bad"]:
+            print(f"    - {reason}")
+        print(f"  {c_dim}reply: {worst['sample'] or '(empty)'}{c_off}")
+        print(f"\n  {c_dim}next: docs/runbooks/serve-models.md#the-answers-are-wrong-not-slow{c_off}")
+    else:
+        print(f"{c_grn}{c_bold}{len(rows)}/{len(rows)} clean{c_off} across "
+              f"concurrency {','.join(map(str, ladder))}.")
+
+    if args.json:
+        print(json.dumps({"model": MODEL, "cold": not args.warm, "rows": rows}, indent=2))
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
