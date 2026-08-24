@@ -835,7 +835,7 @@ here is NVFP4, SGLang is the one engine that cannot use it. This is recorded in
 `workspaces/README.md`, in the runbook and in the SGLang manifest itself,
 because it is discoverable only by trying and failing.
 
-**All six workspaces ship `provenance: unverified`.** They are written from
+**Every workspace ships `provenance: unverified`.** They are written from
 vendor documentation and the sources cited in each manifest, not from a
 completed run on this hardware — `ws list` renders that in yellow. Publishing
 them unverified but labelled is the same trade the runbooks make; publishing

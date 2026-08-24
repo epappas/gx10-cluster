@@ -14,6 +14,19 @@ the unified pool, and two of them at once will not fit.
 ./workspaces/ws down  vllm-qwen3.8-27b-nvfp4
 ```
 
+**This runbook is the cross-cutting view — how to choose between workspaces and
+what they share.** Each workspace also has its own README with its flags, its
+tuning knobs and its own failure table; the
+[catalogue](../../workspaces/README.md) links all of them.
+
+Two questions have their own runbooks because they are bigger than any one
+recipe:
+
+| | |
+|---|---|
+| **Will this model fit?** | [capacity-planning](capacity-planning.md) |
+| **How do I run one across both nodes?** | [two-node-serving](two-node-serving.md) |
+
 ## The split, in one line
 
 **Ansible makes the machine ready; workspaces run things on it.** The only
@@ -46,6 +59,9 @@ adds three requirements that all fail *quietly*: the container needs
 Confirm the transport with
 `docker logs ws-vllm-2node 2>&1 | grep -E 'NET/IB|NET/Socket'`
 ([what was ported and why](../decisions.md#two-node-vllm)).
+
+**The full procedure — prerequisites, the mechanism, verification and the three
+quiet failures — is in [two-node-serving](two-node-serving.md).**
 
 Rough guidance:
 

@@ -35,10 +35,18 @@ Provisioning is **applied end-to-end on both nodes** — `make verify` passes an
 a full `make diff` reports zero changes. The GB10 facts in `hardware.md` and the
 interconnect measurements in `decisions.md` are first-hand.
 
-Two things are deliberately not proven: the **benchmark suite has never been
+Three things are deliberately not proven: the **benchmark suite has never been
 run** (statically checked only, and [labelled as such](runbooks/benchmark.md)),
-and the tier-2 items in [tune-network](runbooks/tune-network.md) are unmeasured
-hypotheses rather than results.
+the tier-2 items in [tune-network](runbooks/tune-network.md) are unmeasured
+hypotheses rather than results, and **every workspace is `unverified`** —
+written from vendor documentation and the sources cited in each manifest, not
+from a completed run. `ws list` renders that in yellow.
+
+The serving runbooks inherit that split. The **fabric** measurements they quote
+are first-hand; the **serving** numbers are not. That is stated in
+[two-node-serving](runbooks/two-node-serving.md#provenance) and
+[capacity-planning](runbooks/capacity-planning.md) rather than left to be
+inferred.
 
 The top-level [README](../README.md#status) is the single source of truth for
 this; if the two ever disagree, that one is right.

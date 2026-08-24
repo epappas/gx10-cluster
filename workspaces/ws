@@ -82,6 +82,12 @@ cmd_show() {
     cat "$d/workspace.yml"
     printf '\n%s--- files ---%s\n' "$c_dim" "$c_off"
     ls -1 "$d"
+    # The manifest says what it NEEDS; the README says when to reach for this
+    # one instead of the one next to it. Point at it rather than assuming
+    # anyone browses the directory.
+    [[ -f "$d/README.md" ]] && printf '\n%sdocs: %s/README.md%s\n' \
+        "$c_dim" "${d#"$WS_ROOT"/}" "$c_off"
+    return 0
 }
 
 cmd_check() {

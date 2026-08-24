@@ -10,6 +10,46 @@ Runnable recipes for inference, cluster and RL environments. **Not Ansible.**
 ./workspaces/ws down  vllm-qwen3.8-27b-nvfp4
 ```
 
+## The catalogue
+
+**Every workspace has its own README** answering what it is, why it exists, when
+to reach for it and how to run it. Start there — this page is the map, those are
+the territory.
+
+### `inference` — these start a model, and no two co-exist
+
+| Workspace | Nodes | Memory | Port | For |
+|---|---|---|---|---|
+| [`vllm-qwen3.8-27b-nvfp4`](inference/vllm-qwen3.8-27b-nvfp4/README.md) | 1 | ~40 GB | 8888 | **The single-node default.** NVFP4, the format this hardware exists for |
+| [`llamacpp-qwen3.8-27b-gguf`](inference/llamacpp-qwen3.8-27b-gguf/README.md) | 1 | ~24 GB | 8899 | Cheapest here. No container, host binary, starts in seconds |
+| [`sglang-qwen3.8-27b-gguf`](inference/sglang-qwen3.8-27b-gguf/README.md) | 1 | ~28 GB | 8900 | SGLang's scheduler — on GGUF, because it **cannot** load NVFP4 |
+| [`vllm-2node-tp2`](inference/vllm-2node-tp2/README.md) | **2** | ~40 GB/node | 8888 | The **generic** two-node recipe. Bring your own model |
+| [`vllm-2node-deepseek-v4-flash`](inference/vllm-2node-deepseek-v4-flash/README.md) | **2** | ~100 GB/node | 8890 | **The DeepSeek default.** FP8 across the cable, DSpark drafts |
+| [`llamacpp-deepseek-v4-flash-gguf`](inference/llamacpp-deepseek-v4-flash-gguf/README.md) | 1 | ~96 GB | 8891 | V4-Flash on one node at 2-bit, with room for drafts |
+| [`llamacpp-deepseek-v4-pro-gguf`](inference/llamacpp-deepseek-v4-pro-gguf/README.md) | 1 | ~32 GB + **360 GB disk** | 8892 | V4-Pro at 1-bit, mmapped off NVMe. Seconds per token |
+
+### `bench` and `agent` — clients, which **do** co-exist with a server
+
+| Workspace | For |
+|---|---|
+| [`vllm-bench-serve`](bench/vllm-bench-serve/README.md) | How many streams before latency falls over — rendered **live**, because the numbers that invalidate a run are transient |
+| [`vllm-quality-gate`](bench/vllm-quality-gate/README.md) | Is it answering **correctly**? Exits non-zero if not |
+| [`deepseek-harness`](agent/deepseek-harness/README.md) | An agent harness pointed at your own server. **Then use the thing you built** |
+
+### `cluster` and `rl`
+
+| Workspace | For |
+|---|---|
+| [`ray`](cluster/ray/README.md) | An **ephemeral** containerised Ray cluster. Not `roles/ray` |
+| [`slurm`](cluster/slurm/README.md) | Job scripts for the Slurm Ansible installs. Daemons stay with Ansible |
+| [`ray-verl`](rl/ray-verl/README.md) | RL post-training (GRPO/PPO). The tightest memory fit in this repo |
+
+**Running across two nodes?** The mechanism, the prerequisites and the three
+things that fail *quietly* are in
+[the two-node serving runbook](../docs/runbooks/two-node-serving.md).
+**Not sure it will fit?**
+[capacity-planning](../docs/runbooks/capacity-planning.md).
+
 ## Why this is separate from `roles/`
 
 Two different jobs on two different clocks:
@@ -289,9 +329,17 @@ recipe, flip `provenance`, and say what changed.
 ```
 workspaces/<kind>/<name>/
   workspace.yml     required — manifest
+  README.md         required — what / why / when / how, and the failure table
   compose.yml       or up.sh/down.sh
   .env.example      optional; the real .env is gitignored
 ```
+
+`README.md` is not decoration. A manifest says *what* a recipe needs and a
+script says *what it does*; neither says **when you should reach for this one
+instead of the one next to it**, and that is the question people actually
+arrive with. `make check` fails if a workspace has no README, or if
+`workspaces/README.md` does not link it — a catalogue that has gone stale
+denies the existence of a recipe, confidently.
 
 `<kind>` is a directory and a manifest field, and they must agree with the set
 `ws` colours: `inference`, `cluster`, `rl`, `bench`, `agent`. Shared code lives

@@ -89,6 +89,45 @@ while lint and syntax-check both passed. Never trust those two alone.
    without one.
 7. If the choice was non-obvious, add an entry to [decisions.md](decisions.md).
 
+## Adding a workspace
+
+A workspace is a **recipe**, not a role. It runs on a machine Ansible already
+made ready, and the only thing it may assume about that machine is what its
+`requires:` block declares ([why](decisions.md#workspaces)).
+
+1. `workspaces/<kind>/<name>/` — `<kind>` is one of `inference`, `cluster`,
+   `rl`, `bench`, `agent`, and the directory and the manifest field must agree.
+2. `workspace.yml`. The `name` must equal the directory name, `provenance`
+   starts at `unverified`, and `sources:` is **required in practice** — flags
+   come from somewhere, and citing it is what keeps these recipes from drifting
+   into folklore.
+3. Something that runs: `compose.yml`, or `up.sh` + `down.sh` (executable).
+   `kind: cluster` is exempt — Slurm ships job scripts and nothing to start.
+4. `README.md`. **What / why / when / how**, plus a failure table and the
+   sources. This is not decoration: a manifest says what a recipe *needs* and a
+   script says what it *does*; neither says **when you should reach for this one
+   instead of the one next to it**, which is the question people arrive with.
+5. Add it to the catalogue in
+   [workspaces/README.md](../workspaces/README.md). `make check` fails if a
+   workspace has no README, or if the catalogue does not link it.
+6. `.env.example` if it has any knobs. The real `.env` is gitignored; never
+   commit one ([tiers](runbooks/manage-secrets.md)).
+
+Two things to get right that the checks cannot see for you:
+
+- **Keep it standalone.** Every recipe here should be readable, copyable and
+  runnable by hand without `ws`. The one exception is `workspaces/lib/`, and it
+  is an exception with a written argument
+  ([why](decisions.md#twonode-lib)) — read it before adding to it.
+- **Pick a free port.** 8888, 8890, 8891, 8892, 8899, 8900, 3080 and 8265 are
+  taken. Two serving workspaces cannot run at once anyway, but a collision
+  fails in a way that reads as a broken recipe.
+
+`tests/check_workspaces.py` rejects a name/directory mismatch, an unknown
+`requires:` key (awk silently returns nothing for one, so the check would never
+run and preflight would report ready), a missing `sources:`, a non-executable
+script, and a missing or unlinked README.
+
 ## Adding or changing a Python package
 
 The ML venv is not a package list any more. `roles/ml/files/requirements-ml.in`
@@ -208,13 +247,16 @@ example for anything you would otherwise have to guess at.
 - **Runbooks** are task-oriented: what, when, the mechanism in two or three
   sentences, then numbered steps with expected output and a failure table. If
   you worked something out at 2am, it belongs in a runbook.
+- **A workspace README** is the same shape, scoped to one recipe, and its job is
+  the comparison: why this one and not the one next to it.
 - `decisions.md` is append-mostly. Edit an entry when a decision changes;
   do not delete it.
 - `hardware.md` is verified facts only. If you cannot produce the command that
   proves it, it does not belong there.
 
 `make docs` enforces the mechanical half: every role, runbook, reference doc and
-`vars/` file is indexed, and every relative link and `#anchor` resolves. A dead
+`vars/` file is indexed, and every relative link and `#anchor` resolves.
+`make workspaces` does the same for the recipe catalogue. A dead
 anchor is otherwise silent — the page loads and ignores the fragment. Give a
 `decisions.md` entry an explicit `<a name="…">` if you intend to link to it;
 heading slugs are long and they move when you reword the heading.

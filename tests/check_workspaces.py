@@ -27,6 +27,7 @@ KNOWN_REQUIRES = {"gpu_arch", "min_unified_gb", "min_disk_gb", "docker", "rdma",
 
 def main() -> int:
     problems: list[str] = []
+    catalogue = (WS / "README.md").read_text() if (WS / "README.md").exists() else ""
     manifests = sorted(WS.glob("*/*/workspace.yml"))
     if not manifests:
         print("workspaces: no manifests found", file=sys.stderr)
@@ -77,6 +78,20 @@ def main() -> int:
             if doc.get("kind") != "cluster":
                 problems.append(f"{rel}: no compose.yml and no up.sh - nothing to run")
 
+        # A manifest says what a recipe NEEDS and a script says what it DOES.
+        # Neither says when you should reach for this one instead of the one
+        # next to it, which is the question people actually arrive with. So a
+        # README is required, and it has to be reachable from the catalogue -
+        # an index that has gone stale denies a recipe exists, confidently.
+        if not (d / "README.md").exists():
+            problems.append(
+                f"{rel.parent}: no README.md - see 'Adding one' in workspaces/README.md"
+            )
+        elif f"{d.parent.name}/{d.name}/README.md" not in catalogue:
+            problems.append(
+                f"{rel.parent}: README.md is not linked from workspaces/README.md"
+            )
+
         for script in d.glob("*.sh"):
             if not script.stat().st_mode & 0o111:
                 problems.append(f"{rel.parent}/{script.name}: not executable")
@@ -87,7 +102,10 @@ def main() -> int:
         return 1
 
     kinds = sorted({(yaml.safe_load(m.read_text()) or {}).get("kind") for m in manifests})
-    print(f"workspaces: {len(manifests)} manifests valid across {len(kinds)} kinds")
+    print(
+        f"workspaces: {len(manifests)} manifests valid across {len(kinds)} kinds, "
+        f"each with a README linked from the catalogue"
+    )
     return 0
 
 

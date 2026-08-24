@@ -11,15 +11,20 @@ table. If you worked something out at 2am, it belongs here.
 | Cable two boxes and verify the interconnect | [connect-cluster](connect-cluster.md) |
 | Work out what the fabric is and whether it works | [diagnose-interconnect](diagnose-interconnect.md) |
 | Tune host network settings for the interconnect | [tune-network](tune-network.md) |
+| Work out whether a model will fit at all | [capacity-planning](capacity-planning.md) |
 | Run or serve a model | [serve-models](serve-models.md) |
 | Spin up inference, Ray or RL environments | [workspaces](workspaces.md) |
+| **Serve one model across BOTH nodes** | [two-node-serving](two-node-serving.md) |
 | Download or clean up model weights | [manage-models](manage-models.md) |
 | Run a job across both nodes | [run-distributed](run-distributed.md) |
 | Measure the cluster and prove it performs | [benchmark](benchmark.md) |
 | See what the machine is doing | [monitoring](monitoring.md) |
 | Watch both nodes live in one screen | [monitoring](monitoring.md#cluster-wide) |
 | Find which container or process is using the GPU | [monitoring](monitoring.md#who-is-on-the-gpu) |
+| Add a third node, or replace one | [add-a-node](add-a-node.md) |
+| Put a token somewhere safe, or rotate one | [manage-secrets](manage-secrets.md) |
 | Update packages without breaking CUDA | [upgrade-drivers](upgrade-drivers.md) |
+| Bring the cluster back after a reboot or power loss | [reboot-recover](reboot-recover.md) |
 | Get back in after an SSH lockout | [recover-ssh-lockout](recover-ssh-lockout.md) |
 | Diagnose anything else | [troubleshoot](troubleshoot.md) |
 
@@ -46,6 +51,13 @@ fixes it. Otherwise:
 | Interconnect at ~13 Gbps instead of 200 | [connect-cluster](connect-cluster.md#the-13-gbps-trap) |
 | Interconnect at half speed | [connect-cluster](connect-cluster.md#reading-the-result) |
 | Model OOMs or the box crawls | [serve-models](serve-models.md#when-it-fails) |
+| Unsure whether a model fits before downloading it | [capacity-planning](capacity-planning.md) |
+| Throughput collapses as concurrency rises | [capacity-planning](capacity-planning.md) — you are measuring preemption |
+| A two-node server hangs at init, or is quietly on TCP | [two-node-serving](two-node-serving.md#the-three-things-that-fail-quietly) |
+| Memory is gone right after a reboot | [reboot-recover](reboot-recover.md) — a container restarted itself |
+| `Attempting to decrypt but no vault secrets found` | [manage-secrets](manage-secrets.md) |
+| A `local.yml` or vault override does nothing | [manage-secrets](manage-secrets.md) — the directory form |
+| Collectives hang after adding a node | [add-a-node](add-a-node.md) — ufw on the *other* nodes |
 | `No space left on device` pulling weights | [manage-models](manage-models.md#failure-modes) |
 | The models role aborts before downloading anything | [manage-models](manage-models.md#the-disk-guard-projects-it-does-not-check-a-floor) |
 | 401/403 downloading a model | [manage-models](manage-models.md#gated-models) |
