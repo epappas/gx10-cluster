@@ -1313,3 +1313,98 @@ code that keeps running and quietly stops matching.
   code 68.7%, prose 33.7%. This is why `vllm-quality-gate` sends three prompt
   shapes rather than one, and why the bench view flags only *very* low
   acceptance rather than pretending there is a universal good value.
+
+## <a name="persistence-latch"></a>Persistence mode turns an OOM-killed CUDA process into a permanently wedged counter
+
+`nvidia-smi` on one node reported **96% GPU utilisation for six days with no
+compute process on the GPU**. `--query-compute-apps` was empty, `pmon` listed
+nothing, `docker ps -a` was empty, and the only process holding `/dev/nvidia*`
+was `nvidia-persistenced` itself. The number was not describing anything.
+
+**How to tell a wedged counter from real load**, because "96%" is exactly what
+a busy GPU looks like:
+
+- **It does not move.** `nvidia-smi -q -d UTILIZATION` reported 71 samples over
+  14 s with min = max = avg = 96%. Real load varies sample to sample — the
+  two-node training run measured later on the same hardware swung 33→48 W in
+  step with 90–96%.
+- **The power does not match.** 18.5 W at a claimed 96%. The idle baseline
+  recorded in [#history-timer](#history-timer) — 0%, ~5.3 W, 208 MHz — is what
+  the box actually returned to once the latch was cleared: 4.8 W, 208 MHz.
+- **The clock is pinned high anyway.** 2528 MHz with `Idle: Not Active`. The
+  driver believed the device was in use, which is why DVFS never wound it down.
+
+So the tell is the *pair*: a utilisation figure that never varies, next to
+power and clocks that disagree with it. Either number alone is unremarkable.
+
+### What put it there
+
+From `kern.log`, which survived because it had not rotated — the journal had
+not, so `journalctl` alone would have shown nothing:
+
+- **day 1, 20:51** — the driver starts failing allocations: `NVRM: Check
+  failed: Out of memory [NV_ERR_NO_MEMORY] returned from
+  _memdescAllocInternal(pMemDesc) @ mem_desc.c:1359`. Thirty of these follow
+  over the next thirteen hours.
+- **day 1, 21:34 and day 2, 09:00** — two `python3` processes, each inside a
+  container (`task_memcg=/system.slice/docker-<id>.scope`), killed by the
+  global OOM killer. The second was 307 GB virtual, **41.7 GB resident**, on a
+  124 GB box.
+- **day 2, 10:06–10:08** — the storm continues and takes the desktop session
+  with it: `pipewire`, `dbus-daemon`, `wireplumber`, `systemd --user`.
+
+Host memory *is* GPU memory here, so a container's CUDA allocations do not hit
+a framebuffer ceiling and fail politely — they drive the **whole box** out of
+memory, and the kernel resolves that with `SIGKILL`. A process killed that way
+never tears down its CUDA context.
+
+### Why it survived six days, and why that is our own setting
+
+Normally the driver deinitialises the device when its last client closes, and
+whatever a dead client left behind goes with it. `nvidia-persistenced
+--persistence-mode` exists precisely to stop that from happening — and the
+drop-in at `/etc/systemd/system/nvidia-persistenced.service.d/` sets it,
+overriding the `--no-persistence-mode` in NVIDIA's own unit.
+
+That is the right default (it keeps device init off the critical path of every
+job) and it is also the mechanism that made a dead container's state permanent.
+Persistence mode does not distinguish "keep the device warm for the next job"
+from "keep the wreckage of the last one".
+
+### The fix is a daemon restart, not a GPU reset
+
+```
+sudo systemctl restart nvidia-persistenced
+```
+
+The journal shows the whole cycle, and the last line is the one that matters:
+
+```
+device 000f:01:00.0 - persistence mode disabled.
+device 000f:01:00.0 - NUMA memory offlined.
+...
+device 000f:01:00.0 - registered
+device 000f:01:00.0 - persistence mode enabled.
+device 000f:01:00.0 - NUMA memory onlined.
+```
+
+Releasing the handle forces the deinit the OOM kill never got. Utilisation went
+to 0%, clocks 2528 → 208 MHz, power 18.5 → 4.8 W. Note that on GB10 this is a
+NUMA operation: the device's memory is host memory, so persistenced onlines and
+offlines a memory node rather than touching a framebuffer.
+
+**`nvidia-smi -r` is the wrong reflex here** and is what most search results
+will tell you to run. This GPU is part of the SoC, not a resettable PCIe card:
+the driver does not expose `GPU Reset Status` in `nvidia-smi -q` at all, and
+`gpu_reset_status.reset_required` comes back as *"not a valid field to query"*.
+Do not go looking for a reset path that the hardware does not have.
+
+### What it costs to not notice
+
+Roughly 14 W burned continuously at idle, and — worse — every tool that reads
+`utilization.gpu` lies for as long as it lasts. `gx10-top`, `gx10-status` and
+any dashboard built on NVML all report a busy GPU, so the one signal you would
+use to ask "is anything running on this node?" is the signal that is broken.
+The `on-GPU` row is the cross-check: it reads `idle, no GPU procs` from
+`--query-compute-apps`, which stays honest because per-process accounting is
+unaffected.

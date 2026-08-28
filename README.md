@@ -218,6 +218,7 @@ debugging time, each measured on the hardware:
 |---|---|
 | **There is no InfiniBand.** The ConnectX-7 runs Ethernet and carries RDMA as RoCE v2 | `ibhosts`, `iblinkinfo` and `ibnetdiscover` all fail with `can't open UMAD port` on a *perfectly healthy* cluster, and "nothing" reads as "not connected" ([why](docs/decisions.md#roce-not-ib)) |
 | **`nvidia-smi` cannot report GPU memory** | Host memory *is* GPU memory. `free -h` is your VRAM monitor; imported dashboards show blank tiles ([detail](docs/runbooks/monitoring.md)) |
+| **`nvidia-smi` can report 96% utilisation with nothing on the GPU** | An OOM-killed CUDA process leaves state that persistence mode then keeps alive indefinitely. Cleared by restarting `nvidia-persistenced` — *not* `nvidia-smi -r`, which this SoC has no path for ([why](docs/decisions.md#persistence-latch)) |
 | **`SW Power Cap` is "Active" ~46% of the time at idle** | It is DVFS, not a fault. Alarming on it fires on every other glance and buries a real thermal slowdown ([measurements](docs/decisions.md#history-timer)) |
 | **One cable, two PCIe partitions — not two cables** | Two netdevs on two PCIe roots look like two ports until you check `phys_port_name` ([how to tell](docs/decisions.md#one-cable-two-partitions)) |
 | **Jumbo frames buy ~3.3%, and 9000 is the wrong number to care about** | RoCE quantises to powers of two and caps at 4096; above that is inert for RDMA ([measurements](docs/decisions.md#jumbo-mtu)) |
