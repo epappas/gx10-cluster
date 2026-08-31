@@ -46,9 +46,11 @@ Two container decisions worth knowing:
 | You are about to benchmark or gate a server | The model does not fit one node → [two-node serving](../../../docs/runbooks/two-node-serving.md) |
 
 **SGLang cannot serve this checkpoint.** Its `lm_head` is quantised and SGLang
-does not support that — so on Blackwell hardware, whose entire advantage here is
-NVFP4, SGLang is the one engine that cannot use it. That is not a bug to work
-around; it is why there is no SGLang variant of *this* workspace.
+does not support that, which is why there is no SGLang variant of *this*
+workspace. It is a fact about **this checkpoint**: SGLang serves NVIDIA's
+Nemotron 3.5 Lightning NVFP4 on day 0
+([`sglang-nemotron35-lightning-nvfp4`](../sglang-nemotron35-lightning-nvfp4/README.md)),
+so do not read this row as "SGLang cannot do NVFP4".
 
 ## How
 

@@ -196,8 +196,8 @@ for it and how to run it — the [catalogue](workspaces/README.md) is the map.
 
 | Kind | Workspaces | Note |
 |---|---|---|
-| `inference` | 7 — vLLM, llama.cpp, SGLang; one node and two | These start a model. **No two co-exist** — one memory pool |
-| `bench` | 2 — a concurrency sweep, and a correctness gate | Clients. They **do** co-exist with a server |
+| `inference` | 10 — vLLM, llama.cpp, SGLang; one node and two | These start a model. **No two co-exist** — one memory pool |
+| `bench` | 4 — a concurrency sweep, a correctness gate, a draft-acceptance probe and a cold-prefill ladder | Clients. They **do** co-exist with a server |
 | `agent` | 1 — DeepSeek's harness, pointed at your own server | So no token leaves the house |
 | `cluster` / `rl` | 3 — ephemeral Ray, Slurm job scripts, verl GRPO | |
 
@@ -208,6 +208,8 @@ Three questions the catalogue answers that nothing else does:
 | **Will this model even fit?** | [capacity-planning](docs/runbooks/capacity-planning.md) — the arithmetic, before you download 150 GB |
 | **How do I run one model across both nodes?** | [two-node-serving](docs/runbooks/two-node-serving.md) — and the three things that fail *quietly* |
 | **Is my server fast, or is it fast and wrong?** | [`vllm-quality-gate`](workspaces/bench/vllm-quality-gate/README.md) — a third check, which exits non-zero |
+| **Is it slow because the drafter is broken?** | [`spec-decode-accept`](workspaces/bench/spec-decode-accept/README.md) — acceptance per draft *position*, the one failure that costs speed and nothing else |
+| **How long until the first character — really?** | [`vllm-prefill-ladder`](workspaces/bench/vllm-prefill-ladder/README.md) — cold prefill *proven* cold, because a rerun hits the prefix cache and looks like an optimisation |
 
 ## What GB10 teaches you the hard way
 
@@ -226,6 +228,14 @@ debugging time, each measured on the hardware:
 | **NCCL logs `NET/IB` on a RoCE fabric** | That is its name for ibverbs. It is *not* evidence of InfiniBand ([detail](docs/runbooks/connect-cluster.md#no-infiniband)) |
 | **Swap is a cliff, not a slope** | On coherent memory, paging does not degrade gracefully. `gx10-top` judges swap on *growth*, not presence ([why](docs/runbooks/capacity-planning.md)) |
 | **`--n-cpu-moe` and friends do nothing here** | Every x86 MoE guide recommends them. They keep experts in system RAM when *VRAM* is scarce; both sides of that split are the same 121 GB |
+| **Every RoCE IPv4 GID is published twice, and the index everyone pins is the wrong one** | v1 and v2 sit at adjacent indices and only v2 routes; the widely-copied `NCCL_IB_GID_INDEX=3` is a *populated but link-local* entry here, so a "is it empty" preflight passes and the remote rank dies a minute in ([`--gids`](docs/runbooks/two-node-serving.md#gid-index)) |
+| **A core dump here is a RAM image, and RAM is 121 GB** | One crashed process wrote a **41 GB** core to the disk holding the weights and the swap file. `ulimit -c` says 0 and is irrelevant — systemd's `DefaultLimitCORE` is `infinity`, and what crashes here is a unit or a container ([detail](docs/runbooks/manage-storage.md#core-dumps)) |
+| **`/var/tmp` never expires on Ubuntu** | The 30-day rule ships commented out, and it is where training jobs write checkpoints — measured **303 GB** there, invisible to `du ~/.cache` and to `hf cache scan` ([detail](docs/runbooks/manage-storage.md#var-tmp)) |
+| **A broken speculative drafter is invisible** | It costs acceptance and nothing else — the target still verifies every token, so the answers stay correct at half the speed ([`spec-decode-accept`](workspaces/bench/spec-decode-accept/README.md)) |
+| **"Engine X cannot do quantisation Y" is usually a claim about a checkpoint** | This repo told people for months that SGLang cannot serve NVFP4 on Blackwell. It cannot serve *one* NVFP4 checkpoint — a quantised `lm_head` — and serves NVIDIA's Nemotron 3.5 Lightning NVFP4 on day 0 ([the correction](docs/decisions.md#nemotron35-lightning)) |
+| **NVFP4 on `sm_121` is a claim about size, not about FP4 silicon** | Native FP4 tensor-core execution is GB200; NVIDIA's own hardware table routes DGX Spark through a W4A16 **Marlin** kernel. Still the right default here — it is what fits — but not for the reason usually given |
+| **A hybrid model's 1M window can fit one node** | 6 attention layers of 52 pay a growing K/V cost; the mamba state is a flat 716 MiB. ~4.93M pool tokens in ~14.1 GiB, and a *speculative drafter's* separate KV is the biggest allocation in the server ([arithmetic](docs/runbooks/capacity-planning.md)) |
+| **Re-running a prompt is not a second measurement** | Prefix caching makes the rerun a cache hit: 10.3 s → 1.9 s for free, which reads exactly like a flag that worked. Salt the prompt and read the hit counter ([`vllm-prefill-ladder`](workspaces/bench/vllm-prefill-ladder/README.md)) |
 
 Measured here: **22.7 GB/s** busbw on a two-node NCCL all-reduce, ~91% of the
 200 Gb/s cable. If your number is half that, you have one partition addressed.
@@ -255,6 +265,7 @@ and a failure table. Start here.
 | Spin up inference, Ray, RL or agent environments | [workspaces](docs/runbooks/workspaces.md) |
 | **Serve one model across both nodes** | [two-node-serving](docs/runbooks/two-node-serving.md) |
 | Download or clean up model weights | [manage-models](docs/runbooks/manage-models.md) |
+| Work out where the disk went, and get it back | [manage-storage](docs/runbooks/manage-storage.md) |
 | Run a training job across both nodes | [run-distributed](docs/runbooks/run-distributed.md) |
 | Measure the cluster and prove it performs | [benchmark](docs/runbooks/benchmark.md) |
 
@@ -279,7 +290,8 @@ every resident MB is a MB the model cannot use.
 |---|---|
 | `gx10-status` | What is this box doing right now? |
 | `gx10-top` | What is every node doing, and where do they disagree? |
-| `gx10-interconnect` | Is the fabric up, and what is it? (`--peer` proves RDMA end to end) |
+| `gx10-interconnect` | Is the fabric up, and what is it? (`--peer` proves RDMA end to end, `--gids` names the routable GID index) |
+| `gx10-storage` | Where did the 916 GB go, and what is safe to delete? (`--reclaim` plans it, `--top` ranks it, `-c` does both nodes) |
 | `gx10-sample -r` | What happened at 03:00? (systemd timer, ~1 MB/day of CSV) |
 | `ws` | What can I run, will it fit, and is it running? |
 
@@ -308,7 +320,7 @@ Makefile            every command you need
 inventory.yml       your nodes, interconnect index and rank  (gitignored)
 group_vars/all.yml  every tunable
 roles/              16 roles, 11 of them in site.yml   -> roles/README.md
-workspaces/         13 runnable recipes + the `ws` runner
+workspaces/         18 runnable recipes + the `ws` runner
                                                       -> workspaces/README.md
 vars/               playbook-scoped data              -> vars/README.md
 tests/              render, handler, tag, detector and docs checks

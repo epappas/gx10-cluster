@@ -20,6 +20,23 @@
     mode: "0755"
   become: true
 
+# gx10-status prints free space and the size of the HF cache, which on a real
+# box accounts for a minority of what is used - MEASURED here, 175 GB of 660.
+# The rest sits in /var/tmp and /var/lib, which nobody thinks to du, so the
+# first anyone knows about it is `make models` refusing or a job dying on ENOSPC.
+#
+# /usr/local/bin, not ~/.local/bin beside gx10-status: it is invoked over SSH by
+# its own --cluster fan-out, and a non-login shell never gets ~/.local/bin on
+# PATH. Same reasoning as gx10-top.
+- name: Install the storage tool
+  ansible.builtin.copy:
+    src: gx10-storage
+    dest: /usr/local/bin/gx10-storage
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
 # ---------------------------------------------------------------------------
 # History, still with no resident cost.
 #
@@ -154,6 +171,8 @@
     msg: >-
       `gx10-status` shows GPU, throttling, unified memory, swap and disk with
       no daemon. `gx10-status -w` watches.
+      `gx10-storage` says where the disk went and what is safe to reclaim;
+      `gx10-storage --reclaim` shows the plan without running it.
       {{ '`gx10-sample -r` shows recorded history from '
          ~ monitoring_history_dir ~ '/metrics.csv (sampled every '
          ~ monitoring_history_interval ~ ', no resident cost).'

@@ -15,7 +15,7 @@ and run only from `optional.yml`. Each row's tag is what you pass to
 | `dev_rust` | `rust`, `dev` | rustup pinned to `rust_toolchain`, plus `bat` / `fd-find` / `zoxide` from apt |
 | `ml` | `ml` | NCCL, cuDNN, the pinned venv from `requirements-ml.txt`, ollama, llama.cpp built for sm_121 |
 | `inference` | `inference`, `serving` | vLLM container, `vllm-serve`, templated systemd unit |
-| `monitoring` | `monitoring` | `gx10-status` (live), `gx10-top` (all nodes at once), `gx10-sample` (history, systemd timer). **No daemons, nothing resident** |
+| `monitoring` | `monitoring` | `gx10-status` (live), `gx10-top` (all nodes at once), `gx10-storage` (where the disk went, and what is safe to reclaim), `gx10-sample` (history, systemd timer). **No daemons, nothing resident** |
 | `remote` | `remote` | sshd, ufw, NordVPN Meshnet |
 | `cluster` | `cluster` | RoCE, interconnect addressing, `/etc/hosts`, inter-node SSH, `/etc/nccl.conf`, `gx10-interconnect` |
 | `models` | `models` | pre-loads open weights. **The long pole** — ~130 GB |

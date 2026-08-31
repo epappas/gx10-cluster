@@ -32,6 +32,12 @@ real and they are what you would come for.
 > **SGLang cannot serve `unsloth/Qwen3.8-27B-NVFP4`.** The checkpoint has a
 > quantised `lm_head`, which SGLang does not support. So the model that this
 > Blackwell box is otherwise ideal for is exactly the one SGLang will not load.
+>
+> **That is a fact about this checkpoint, not about SGLang.** NVIDIA's
+> Nemotron 3.5 Lightning NVFP4 loads there on day 0 —
+> [`sglang-nemotron35-lightning-nvfp4`](../sglang-nemotron35-lightning-nvfp4/README.md)
+> is the counter-example, and the matrix that used to say otherwise was
+> [corrected](../../../docs/decisions.md#nemotron35-lightning).
 > The GGUF build works, which is what this workspace uses.
 
 | Use it when | Use something else when |

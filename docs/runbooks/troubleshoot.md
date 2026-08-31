@@ -267,6 +267,90 @@ A directory index went stale, or a link or `#anchor` does not resolve. Fix the
 doc; the check exists because a stale index confidently denies that a role or
 runbook exists.
 
+## Disk
+
+### `No space left on device`, and `du ~/.cache` does not explain it
+
+Measured on odysseus at 660 GB used, the HF cache was 175 GB of it. The other
+485 GB was in directories nothing weight-aware looks at — 303 GB of checkpoints
+in `/var/tmp`, 63 GB of core dumps, 44 GB of docker.
+
+```bash
+gx10-storage             # by category, with what is safe to reclaim
+gx10-storage --top 20    # biggest directories, wherever they are
+```
+
+Full detail: [manage-storage](manage-storage.md).
+
+### Free space did not come back after deleting a large file
+
+A process still holds the descriptor. The space returns when it closes:
+
+```bash
+sudo lsof -nP +L1 | head       # NLINK 0 means deleted-but-open
+```
+
+### Tens of GB appeared in `/var/lib/apport`
+
+A core dump here is a RAM image, and RAM is 121 GB — one crash wrote 41 GB.
+Apport clears them after 3 days on its own. The dumps are a symptom; the cause
+is normally the OOM killer. See
+[manage-storage](manage-storage.md#core-dumps).
+
+## Serving
+
+### <a name="spec-decode-reports-off"></a>An acceptance probe says "no speculative decoding" on a server that clearly has it
+
+On **SGLang**, `/metrics` does not exist unless the server was started with
+`--enable-metrics`, and a probe that finds no counters reports the absence of
+the endpoint as the absence of a drafter. Confirm before believing it:
+
+```bash
+curl -s localhost:8894/metrics | head -3          # nothing at all -> the flag
+curl -s localhost:8894/server_info | head -c 400  # accept length lives here
+```
+
+`workspaces/inference/sglang-nemotron35-lightning-nvfp4` passes `--enable-metrics`
+for this reason. `/get_server_info` is the deprecated alias if `/server_info`
+404s on an older build.
+
+**There is no per-position ladder on SGLang at all**, and that is not a fault
+either — the engine publishes no such counter, so
+[`spec-decode-accept`](../../workspaces/bench/spec-decode-accept/README.md)
+degrades to accept length and says so. Serve the checkpoint under vLLM if you
+need the shape that convicts a broken draft mask.
+
+### `--reasoning-parser nemotron_3: invalid choice` (or `nemotron_v3`)
+
+The two engines spell it differently and neither is a typo: **`nemotron_3` in
+SGLang, `nemotron_v3` in vLLM**. A flag copied between the two Nemotron
+workspaces fails at startup, which is the good outcome.
+
+### A server allocated far less KV cache than the published numbers
+
+Every capacity figure for a hybrid model — pool tokens, KV size,
+`max_running_requests` — is derived **at startup** from a fraction of whatever
+memory was free at that moment. A desktop session or a resident dashboard is
+the usual difference. Read what you actually got rather than what someone else
+published:
+
+```bash
+workspaces/inference/sglang-nemotron35-lightning-nvfp4/report.sh
+gx10-top                                    # what is holding the pool
+```
+
+And on a speculative server, check the drafter before the fraction: a draft
+model's KV cache is a separate allocation and on Nemotron 3.5 Lightning it is
+**~28 GiB** — bigger than the weights. `SPEC_METHOD=none` recovers more than
+lowering `mem-fraction-static` by any safe amount
+([arithmetic](capacity-planning.md)).
+
+### The model loads as BF16 and then OOMs
+
+On GB10 the NVFP4 execution path is **Marlin** (W4A16) — native FP4 tensor-core
+execution is GB200. A MoE backend changed away from `marlin` does not fall back
+gracefully; it loads the experts unquantised.
+
 ## More detail
 
 ```bash

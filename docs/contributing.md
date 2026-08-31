@@ -119,8 +119,8 @@ Two things to get right that the checks cannot see for you:
   runnable by hand without `ws`. The one exception is `workspaces/lib/`, and it
   is an exception with a written argument
   ([why](decisions.md#twonode-lib)) — read it before adding to it.
-- **Pick a free port.** 8888, 8890, 8891, 8892, 8899, 8900, 3080 and 8265 are
-  taken. Two serving workspaces cannot run at once anyway, but a collision
+- **Pick a free port.** 8888, 8890, 8891, 8892, 8893, 8899, 8900, 3080 and 8265
+  are taken. Two serving workspaces cannot run at once anyway, but a collision
   fails in a way that reads as a broken recipe.
 
 `tests/check_workspaces.py` rejects a name/directory mismatch, an unknown

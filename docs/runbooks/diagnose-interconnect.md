@@ -198,5 +198,18 @@ tuning anything.
 
 ```bash
 gx10-interconnect --peer     # steps 1-6, exit-coded
+gx10-interconnect --gids     # which GID index is the routable RoCEv2 IPv4 one
 make verify                  # RDMA link active, RoCE fabric, both partitions
 ```
+
+`--gids` answers a seventh question this runbook does not otherwise reach:
+**which GID index addresses a queue pair between these two boxes.** Nothing
+here needs it — NCCL is asked to select the GID itself — but published recipes
+pin `NCCL_IB_GID_INDEX`, and a wrong pin kills the *remote* rank about a minute
+into a launch with `ibv_modify_qp` errno 61 while the local one looks fine.
+
+Measured here: every IPv4 address is published **twice**, at adjacent indices,
+once as RoCE v1 and once as v2 — and the commonly-pinned index 3 is a
+*link-local* entry on this hardware, populated but not routable. The one that
+works is index **5**. Full table and the argument for not pinning it at all:
+[two-node-serving](two-node-serving.md#gid-index).

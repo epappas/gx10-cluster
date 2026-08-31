@@ -16,9 +16,20 @@ of the ML venv: a bad version is a tag change, not a rebuild.
 ## What fits
 
 Sizes and the disk budget live in [manage-models](manage-models.md#what-fits).
-The short version: prefer **NVFP4** — it is the native format for GB10's
-Blackwell FP4 tensor cores, so it is smaller *and* faster here. The 120B fits
-one node at NVFP4 (74.8 GB) but not at FP8 or BF16.
+The short version: prefer **NVFP4** — it is the smallest published build of
+most models here and what every vendor recipe targets. The 120B fits one node
+at NVFP4 (74.8 GB) but not at FP8 or BF16.
+
+Two caveats this page used to skip:
+
+- **"Native format for Blackwell FP4 tensor cores" overstates it on `sm_121`.**
+  NVIDIA's hardware table gives native FP4 execution to GB200 and routes DGX
+  Spark through a **W4A16 Marlin** kernel. NVFP4 is still the right default —
+  the reason is footprint, not FP4 silicon.
+- **A small checkpoint is not a small workload.** Nemotron 3.5 Lightning is a
+  ~21 GB download that claims ~94 GiB of the pool, because its speculative
+  drafter allocates a separate ~28 GiB KV cache on top of the model's own. See
+  [capacity-planning](capacity-planning.md).
 
 ## Three ways to run a model
 
@@ -78,6 +89,21 @@ journalctl -u "vllm@$(systemd-escape 'nvidia/Qwen3.6-27B-NVFP4')" -f
 
 `systemd-escape` is not optional — model ids contain both `/` and `-`, and only
 systemd's own escaping round-trips them correctly.
+
+**SGLang** — one model here is served this way and it is worth knowing why:
+
+```bash
+ws up sglang-nemotron35-lightning-nvfp4     # :8894, 1M context, DSpark drafts
+```
+
+This repo's engine matrix said for a long time that SGLang cannot serve NVFP4
+on this hardware. That is true of one checkpoint (a quantised `lm_head`) and
+false in general — NVIDIA's Nemotron 3.5 Lightning NVFP4 has day-0 SGLang
+support on GB10 ([the correction](../decisions.md#nemotron35-lightning)).
+
+One thing that catches people: **SGLang serves no `/metrics` at all without
+`--enable-metrics`**, so a healthy speculative server reads as having no
+speculative decoding to any probe that looks there.
 
 ## Both nodes
 
@@ -163,9 +189,12 @@ they get misdiagnosed as a bad recipe:
 
 - **Draft acceptance collapsed.** On a speculative server, a broken draft path
   costs acceptance and *nothing else*: the target model still verifies every
-  token. `ws up vllm-bench-serve` shows acceptance and tokens/step live. Below
-  ~25% on a config that used to be fine, suspect the draft path — skipped
-  draft weights, or a draft length the runtime silently clamped — before you
+  token. `ws up vllm-bench-serve` shows acceptance and tokens/step live, and
+  `ws up spec-decode-accept` breaks it down **per draft position**, which is
+  what tells a weak drafter (smooth decay) from a broken attention mask
+  (position 0 healthy, the rest collapsed). Below ~25% on a config that used to
+  be fine, suspect the draft path — skipped draft weights, a draft length the
+  runtime silently clamped, or a pinned draft attention backend — before you
   touch any flag.
 - **One node is clocked down.** A tensor-parallel pair is lockstep, so it runs
   at the **slowest** node's clock; a node that came back from a reboot in a low

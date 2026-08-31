@@ -222,6 +222,39 @@ verify_checks:
     cmd: "test -x /usr/local/bin/gx10-top"
     hint: "Cluster-wide top missing. Re-run: make apply TAGS=monitoring"
 
+  - name: "gx10-storage"
+    cmd: "test -x /usr/local/bin/gx10-storage"
+    hint: "Storage tool missing. Re-run: make apply TAGS=monitoring"
+
+    # The SAME comparison the models role makes before it will download
+    # anything, asserted here so `make verify` reports the pressure BEFORE a
+    # `make models` you were relying on refuses to start, or a running job dies
+    # on ENOSPC halfway through a checkpoint.
+    #
+    # Not required: a box deliberately packed with weights is not broken, it is
+    # full, and failing the whole health check for that would train people to
+    # ignore verify. It still prints, which is the point.
+  - name: "disk above the model floor"
+    cmd: "[ \"$(df -BG --output=avail $HOME | tail -1 | tr -dc '0-9')\" -ge {{ model_min_free_gb }} ]"
+    required: false
+    hint: "Under the {{ model_min_free_gb }} GB floor - `make models` will refuse. Run `gx10-storage` for where it went; see docs/runbooks/manage-storage.md"
+
+    # Core dumps are the one storage failure unique to this hardware: unified
+    # memory means a crashed 40 GB-resident process writes a 40 GB RAM image to
+    # the same NVMe that holds the weights and the swap file. MEASURED here: 62
+    # GB in five files, one of them 41 GB. Apport clears them after 3d, so this
+    # is not a leak - it is 3 days of the disk being smaller than you think.
+  - name: "no large core dumps"
+    #
+    # awk, not `|| echo 0`: du's failure is invisible to the shell here because
+    # the pipeline's status is cut's, so a node without passwordless sudo
+    # produced an EMPTY string and `[ "" -lt 10 ]` failed - reporting core
+    # dumps on a box that has none. NR==1 with `+ 0` makes "unmeasured" read as
+    # zero, which is the honest answer when the check could not look.
+    cmd: "[ \"$(sudo -n du -sx --block-size=1G /var/lib/apport/coredump 2>/dev/null | awk 'NR == 1 { n = $1 } END { print n + 0 }')\" -lt 10 ]"
+    required: false
+    hint: "Core dumps are holding >10 GB. `gx10-storage --reclaim` shows the command; see docs/runbooks/manage-storage.md"
+
     # Tests the TIMER, not the service. The service is oneshot and is inactive
     # almost all the time by design - it runs for ~0.08 s and exits - so
     # `is-active gx10-sample.service` would report failure on a perfectly

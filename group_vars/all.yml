@@ -200,8 +200,20 @@ vllm_gpu_memory_utilization: "0.85"
 # rounded up:
 #   Nemotron-3-Super-120B  BF16 231 GB  - needs BOTH nodes (TP=2)
 #                          NVFP4 75 GB  - fits, ~39 GB headroom
-# NVFP4 is the native format for GB10's Blackwell FP4 tensor cores - the same
-# reason llama.cpp compiles for 121a. It is both smaller and faster here.
+# NVFP4 is the smallest published build of most models here and what every
+# vendor recipe targets, which is the same reason llama.cpp compiles for 121a.
+# One nuance worth not overstating: NVIDIA's own hardware table gives NATIVE FP4
+# tensor-core execution to GB200 and routes DGX Spark through a W4A16 Marlin
+# kernel, so "native format" here means small and well-supported rather than
+# executed on FP4 silicon (docs/decisions.md#nemotron35-lightning).
+#
+# AND size_gb IS NOT THE MEMORY FOOTPRINT. It is the download. A model with a
+# speculative drafter resides in far more than it occupies on disk - Nemotron
+# 3.5 Lightning is ~23 GB of weights that claims ~94 GiB of the pool, because
+# its 1.3 GB draft model keeps its own ~28 GiB bf16 KV cache on top of the
+# target's.
+# This guard protects the DISK; docs/runbooks/capacity-planning.md protects the
+# pool, and they are different questions.
 # ---------------------------------------------------------------------------
 model_sets: [smoke, nvfp4]
 
@@ -212,6 +224,21 @@ model_catalog:
     - { id: "nvidia/Qwen3.6-27B-NVFP4",                       size_gb: 21 }
     - { id: "nvidia/Qwen3.6-35B-A3B-NVFP4",                   size_gb: 22 }
     - { id: "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4", size_gb: 75 }
+  # Nemotron 3.5 Lightning and its DSpark draft model, for the two workspaces
+  # that serve it. NOT in the default model_sets: the workspaces stage their own
+  # weights on first run, so this set exists to PRE-stage them behind the disk
+  # guard rather than discovering a full disk twenty minutes into a download.
+  # Add 'nemotron35' to model_sets to pull it.
+  #
+  # The draft model is listed separately and is not optional for SPEC_METHOD
+  # dspark: without it the server starts without a speculator, which costs
+  # roughly a third of decode speed and reports nothing.
+  nemotron35:
+    # 21.6 GB and 1.3 GB from the HF API. The drafter is TINY on disk and
+    # still allocates ~28 GiB of bf16 KV at runtime - which is the clearest
+    # possible demonstration that size_gb is the download, not the footprint.
+    - { id: "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4", size_gb: 22 }
+    - { id: "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark", size_gb: 2 }
   # Unquantized, single-node. Add 'large' to model_sets to pull it. Gated on
   # HF - needs hf_token.
   large:

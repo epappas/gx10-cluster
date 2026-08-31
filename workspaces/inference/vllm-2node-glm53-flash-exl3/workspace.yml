@@ -1,0 +1,65 @@
+name: vllm-2node-glm53-flash-exl3
+kind: inference
+engine: vllm
+provenance: unverified
+summary: GLM-5.3-Flash at EXL3 4bpw across both nodes, 1M context, DFlash2 drafts
+
+# THE ARITHMETIC, because it is the whole design:
+#
+#   EXL3/TR3 4bpw checkpoint   ~164 GiB  (120 shards)
+#   split TP=2                  ~82 GiB of weights per node
+#   claimable at 0.87          ~105 GiB per node (of 121 GiB unified)
+#   left for KV                 ~19 GiB per node
+#
+# That last line is the smallest KV budget of any workspace here, and 1M
+# context still allocates on it - which looks impossible and is not. The target
+# KV is packed `fp8_ds_mla` at 656 B/token/layer over TWELVE MLA layers, and the
+# other 33 layers are mamba, whose state is mostly length-INDEPENDENT. A hybrid
+# model's pool is a large fixed floor plus a small per-token slope, so the cap
+# you ask for is much cheaper here than the same number on a dense model.
+#
+# This is also why `MAX_MODEL_LEN=256000` does not "free" KV and is the first
+# wrong move people make - see .env.example.
+#
+# WHY THIS IS NOT vllm-2node-tp2 WITH DIFFERENT FLAGS: it is, plus one thing
+# that workspace cannot express. The EXL3 quantisation method, the NoPE-MLA
+# padding into the SM120 sparse-MLA geometry and the DFlash2 drafter do not
+# exist in upstream vLLM; they come from an overlay image. One of that overlay's
+# patches is shipped-but-not-applied in the image and has to run INSIDE the
+# container before `vllm serve`, which is what PRE_EXEC in the shared launcher
+# is for (docs/decisions.md#glm53-flash).
+#
+# `ws check` can only measure THIS node. The peer needs the same ~106 GiB free
+# and its own copy of the weights - run `ws check` on both, and see
+# ./stage-weights.sh for getting 164 GiB there without a second Hub download.
+requires:
+  gpu_arch: "12.1"
+  # The tightest memory requirement in this repo, and it is not padding: the
+  # published recipe reports kits missing 0.87 by well under 1 GiB because a
+  # desktop session or a dashboard was resident. If this fails by a hair,
+  # GPU_MEM_UTIL=0.86 with MAX_MODEL_LEN=800000 is the documented fallback.
+  min_unified_gb: 106
+  # ~164 GiB of weights plus a ~2.3 GiB drafter, on the same 1 TB NVMe as
+  # everything else, and they must land on BOTH nodes.
+  min_disk_gb: 180
+  docker: true
+  rdma: true
+  peers: 1
+
+images:
+  - ghcr.io/miaai-lab/glm-5.3-flash-2x-dgx-sparks:exl3
+
+models:
+  - Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw
+  - incoai/GLM-5.3-Flash-DFlash2
+
+endpoints:
+  - "http://127.0.0.1:8893/v1  (OpenAI-compatible, on the rank-0 node)"
+
+sources:
+  - https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks
+  - https://huggingface.co/Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw
+  - https://huggingface.co/brandonmusic/GLM-5.3-Flash-tr3-4bpw
+  - https://huggingface.co/incoai/GLM-5.3-Flash-DFlash2
+  - https://huggingface.co/zai-org/GLM-5.3-Flash
+  - https://github.com/turboderp-org/exllamav3

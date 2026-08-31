@@ -22,11 +22,14 @@ the territory.
 |---|---|---|---|---|
 | [`vllm-qwen3.8-27b-nvfp4`](inference/vllm-qwen3.8-27b-nvfp4/README.md) | 1 | ~40 GB | 8888 | **The single-node default.** NVFP4, the format this hardware exists for |
 | [`llamacpp-qwen3.8-27b-gguf`](inference/llamacpp-qwen3.8-27b-gguf/README.md) | 1 | ~24 GB | 8899 | Cheapest here. No container, host binary, starts in seconds |
-| [`sglang-qwen3.8-27b-gguf`](inference/sglang-qwen3.8-27b-gguf/README.md) | 1 | ~28 GB | 8900 | SGLang's scheduler — on GGUF, because it **cannot** load NVFP4 |
+| [`sglang-qwen3.8-27b-gguf`](inference/sglang-qwen3.8-27b-gguf/README.md) | 1 | ~28 GB | 8900 | SGLang's scheduler — on GGUF, because it cannot load **this** NVFP4 build |
 | [`vllm-2node-tp2`](inference/vllm-2node-tp2/README.md) | **2** | ~40 GB/node | 8888 | The **generic** two-node recipe. Bring your own model |
 | [`vllm-2node-deepseek-v4-flash`](inference/vllm-2node-deepseek-v4-flash/README.md) | **2** | ~100 GB/node | 8890 | **The DeepSeek default.** FP8 across the cable, DSpark drafts |
 | [`llamacpp-deepseek-v4-flash-gguf`](inference/llamacpp-deepseek-v4-flash-gguf/README.md) | 1 | ~96 GB | 8891 | V4-Flash on one node at 2-bit, with room for drafts |
 | [`llamacpp-deepseek-v4-pro-gguf`](inference/llamacpp-deepseek-v4-pro-gguf/README.md) | 1 | ~32 GB + **360 GB disk** | 8892 | V4-Pro at 1-bit, mmapped off NVMe. Seconds per token |
+| [`vllm-2node-glm53-flash-exl3`](inference/vllm-2node-glm53-flash-exl3/README.md) | **2** | **~106 GB/node** | 8893 | **The GLM default.** EXL3 4bpw, **1M context**, vision, DFlash2 drafts |
+| [`sglang-nemotron35-lightning-nvfp4`](inference/sglang-nemotron35-lightning-nvfp4/README.md) | 1 | ~96 GB | 8894 | **1M context on ONE node.** NVFP4 + DSpark, as published |
+| [`vllm-nemotron35-lightning-nvfp4`](inference/vllm-nemotron35-lightning-nvfp4/README.md) | 1 | ~98 GB | 8895 | The same model where the **acceptance ladder** works |
 
 ### `bench` and `agent` — clients, which **do** co-exist with a server
 
@@ -34,6 +37,8 @@ the territory.
 |---|---|
 | [`vllm-bench-serve`](bench/vllm-bench-serve/README.md) | How many streams before latency falls over — rendered **live**, because the numbers that invalidate a run are transient |
 | [`vllm-quality-gate`](bench/vllm-quality-gate/README.md) | Is it answering **correctly**? Exits non-zero if not |
+| [`spec-decode-accept`](bench/spec-decode-accept/README.md) | Is the **speculative decoder** working? Acceptance per draft **position** — the one failure that costs speed and nothing else |
+| [`vllm-prefill-ladder`](bench/vllm-prefill-ladder/README.md) | How long until the **first** character? Cold prefill tok/s, **proven** cold — the prefix cache makes a rerun look like an optimisation |
 | [`deepseek-harness`](agent/deepseek-harness/README.md) | An agent harness pointed at your own server. **Then use the thing you built** |
 
 ### `cluster` and `rl`
@@ -76,13 +81,93 @@ The single most expensive thing to learn the hard way here:
 
 | | llama.cpp | vLLM | SGLang |
 |---|---|---|---|
-| **NVFP4** (~22.6 GB) | no | **yes** | **NO** — quantised `lm_head` |
+| **NVFP4** | no | **yes** | **checkpoint-dependent** — see below |
 | **GGUF Q4** (~17–19 GB) | **yes** | yes | yes |
 | **MixedInt4-AutoRound** (20.8 GB) | no | **yes** | no |
+| **EXL3 / TR3** (4 bpw) | no | **overlay image only** | no |
 
-GB10 is Blackwell (`sm_121`), so NVFP4 is the format this hardware exists for —
-and it is exactly the one SGLang cannot load. Pick SGLang for its scheduler,
-not to run NVFP4.
+GB10 is Blackwell (`sm_121`), so NVFP4 is the format this hardware exists for.
+**On `sm_121` that is a claim about memory footprint, not about FP4 silicon** —
+native FP4 tensor-core execution is GB200, and NVIDIA's own hardware table
+routes DGX Spark through a **W4A16 Marlin** kernel. It is still the right
+default: smaller, published everywhere, and no third-party image needed.
+
+**The SGLang cell used to read "NO — quantised `lm_head`", and that was a claim
+about the wrong noun.** It is true of `unsloth/Qwen3.8-27B-NVFP4` — which is
+why [`sglang-qwen3.8-27b-gguf`](inference/sglang-qwen3.8-27b-gguf/README.md)
+exists — and false of NVIDIA's Nemotron 3.5 Lightning NVFP4, which SGLang
+serves on day 0 on this hardware. A negative result measured on one checkpoint
+is not a capability claim about an engine
+([the correction](../docs/decisions.md#nemotron35-lightning)).
+
+| Checkpoint | SGLang | Because |
+|---|---|---|
+| `unsloth/Qwen3.8-27B-NVFP4` | **no** | quantised `lm_head` |
+| `nvidia/…-Nemotron-3.5-Lightning-30B-A3B-NVFP4` | **yes** | day-0 support, published GB10 operating point |
+
+**EXL3 is the one row upstream vLLM cannot do at all**, which is why the last
+row says *overlay image*. It is not a fallback for when NVFP4 is unavailable —
+on the one model here where both exist, a published KLD panel puts EXL3 4bpw at
+**~2.5× less divergence than NVFP4 at the same size**
+([the numbers](inference/vllm-2node-glm53-flash-exl3/README.md#why-exl3-when-this-hardware-exists-for-nvfp4)).
+NVFP4 remains the right default everywhere it is published, because it is
+native, fast and needs no third-party image; this is the exception, and it is
+the only one ([why](../docs/decisions.md#glm53-flash)).
+
+## Nemotron 3.5 Lightning: a 1M window that fits **one** node
+
+Every other 1M-context recipe here needs both nodes. This one does not, and the
+reason is architectural rather than a quantisation trick: of its 52 layers only
+**6** are full attention (23 Mamba-2 SSM + 23 MoE + 6 attention), and only those
+six pay a K/V cost that grows with sequence length. The mamba state is a fixed
+716 MiB whatever you ask for.
+
+| | On one GB10, at `mem-fraction-static 0.78` |
+|---|---|
+| Weights (NVFP4, target + DSpark draft) | ~21.0 GiB — **21.6 + 1.3 GB on disk** |
+| Target KV, **FP8 `e4m3fn`**, ~3 KB/token | ~14.1 GiB → **~4.93M pool tokens** |
+| **DSpark draft KV, `bf16`, separate** | **~28.2 GiB** |
+| Mamba/SSM cache | 716 MiB |
+| Concurrency, derived at boot | **48** |
+
+**A 1.3 GB draft model allocates a 28 GiB KV cache** — the largest single
+allocation in the server, bigger than the 30B target it drafts for. So
+`SPEC_METHOD=none` is not "give up speed", it is "recover 28 GiB", and it is
+the right first move when the pool is the binding constraint. Lowering
+`mem-fraction-static` is the second.
+
+**None of those numbers are constants.** They are startup-time outcomes of
+`mem-fraction-static` computed against whatever was free at boot, which is why
+the workspace ships `./report.sh` rather than a table to quote.
+
+### Three published speculators, and they are not interchangeable
+
+Measured on a DGX Spark, code generation, single stream / 8 concurrent:
+
+| | conc. 1 | conc. 8 | Costs |
+|---|---:|---:|---|
+| `none` | 81.3 tok/s | 241.7 tok/s | nothing. **Throughput-optimal** |
+| `dflash` | 95.5 | 268.6 | a second checkpoint |
+| `mtp` | 111.4 | 302.3 | **nothing extra** — the model's own heads |
+| `dspark` | **124.2** | **354.6** | ~28 GiB of bf16 draft KV |
+
+`dspark` wins on **both** axes, which is unusual — speculative decoding
+normally trades throughput for latency. Those are code-generation numbers with
+thinking off; acceptance is a property of the text, so re-measure before
+treating the ranking as general.
+
+### Which of the two workspaces
+
+| | Use |
+|---|---|
+| Run it the way its authors published it — 1M window, measured allocation | [`sglang-nemotron35-lightning-nvfp4`](inference/sglang-nemotron35-lightning-nvfp4/README.md) |
+| Find out **why** a speculator is underperforming | [`vllm-nemotron35-lightning-nvfp4`](inference/vllm-nemotron35-lightning-nvfp4/README.md) — the only one with the per-position ladder |
+
+SGLang publishes accept **length** and no per-position counters, so
+[`spec-decode-accept`](bench/spec-decode-accept/README.md) degrades honestly
+there: it can convict an idle drafter, not a broken draft mask. And SGLang
+serves no `/metrics` at all without `--enable-metrics`, which that workspace
+passes for exactly this reason.
 
 ## One node or two?
 
@@ -106,14 +191,16 @@ fail quietly rather than loudly:
    `torch.distributed`, and gloo does **not** read `NCCL_SOCKET_IFNAME`. Unset,
    it can pick `docker0` or the VPN and the ranks never meet.
 3. **Identical image and flags on both ranks.** Mismatched ranks hang at init.
-   Both two-node workspaces launch both ranks from one script so this cannot
+   Every two-node workspace launches both ranks from one script so this cannot
    drift.
 
 All three live in `workspaces/lib/twonode.sh`, which is the **one recipe here
 that is not standalone**. Two workspaces each carrying their own copy of this
 wiring would drift exactly the way two ranks do — slowly, and silently. A
 workspace supplies `MODEL_ARGS` and nothing else
-([why](../docs/decisions.md#twonode-lib)).
+([why](../docs/decisions.md#twonode-lib)) — plus, for the one image that needs a
+step run *inside* the container before `vllm serve`, a `PRE_EXEC` snippet the
+library splices in front of a serve line it still assembles itself.
 
 Always confirm the transport rather than assuming it:
 
@@ -193,6 +280,48 @@ Two flags that mislead in opposite directions here:
 - **`--n-cpu-moe` / `-ot ".ffn_.*_exps.=CPU"`**, which every x86 MoE guide
   recommends, do nothing on GB10. They keep experts in system RAM when VRAM is
   scarce; here both sides of that split are the same 121 GB.
+
+## GLM-5.3-Flash: 1M context on 19 GB of KV, and the one third-party image
+
+`vllm-2node-glm53-flash-exl3` is the odd one out here twice over, and both are
+worth understanding before you reach for it.
+
+**It does not run an upstream image.** Everything else in this directory runs
+`vllm/vllm-openai` or a distro binary. Upstream vLLM cannot serve this
+checkpoint at all — it has no `exl3` quantisation method, and it dies on the
+first forward with `pe_dim must be 64 for fp8_ds_mla` because GLM-5.3-Flash is
+NoPE MLA while the only SM12x sparse-MLA backend expects a record with a RoPE
+section. Neither is reachable from a flag. This repo declines forks by default
+and [says why](../docs/decisions.md#two-node-vllm); the difference here is that
+declining costs the model rather than 8% of its decode speed
+([the full argument](../docs/decisions.md#glm53-flash)).
+
+**Its context arithmetic does not work like the others.** ~164 GiB of weights
+split two ways leaves ~19 GB of KV per node — the smallest budget in this repo
+— and **1M context still allocates on it**:
+
+| Piece | Cost | Scales with context? |
+|---|---|---|
+| Target MLA, 12 layers | packed `fp8_ds_mla`, 656 B/token/layer | **yes** |
+| Mamba, 33 layers | window / state | **no** |
+| DFlash2 drafter, 5 layers | bf16, ~2 KB/token | window-bounded |
+
+A hybrid model's pool is a **large fixed floor plus a small slope**, so a big
+cap is much cheaper here than on a dense model — and shrinking the cap does not
+refund the floor. Reported occupancy: 36k → 16%, 256k → ~25%, 300k → 26%.
+
+**So `MAX_MODEL_LEN=256000` is the first wrong move.** The logged pool is
+roughly *concurrency × the cap*: a smaller cap shrinks the number it was
+supposed to grow, and everything underneath stays where it was.
+
+Two more values with no alternative on this hardware:
+
+- **`--kv-cache-dtype fp8`**, because the SM12x sparse-MLA kernel accepts only
+  packed `fp8_ds_mla`. bf16 KV has **no sparse kernel on this arch**, and NVFP4
+  KV — which does exist on SM12x — is a **dense MHA** kernel, not sparse MLA.
+- **`--max-num-batched-tokens 1024`**, because 8192-token prefill chunks
+  oversubscribe the GB10 indexer top-k's shared memory and crash a long prompt
+  around 300k tokens. That is a kernel limit, not a throughput preference.
 
 ## Benchmarking a server, which is not `make bench`
 
@@ -296,6 +425,47 @@ and OpenAI-compatible clients expect the second.
 The detectors are pure functions over text, so they are tested offline in
 `make check` ([why](../docs/decisions.md#quality-gate)) — a gate that has
 quietly stopped being able to fail is worse than no gate.
+
+## Fast, correct — and actually *drafting*: `spec-decode-accept`
+
+There is a third way for a serving stack to be wrong, and it is the quietest of
+the three. A **broken draft path costs acceptance and nothing else**: the target
+model still verifies every token, so the answers stay perfectly correct and the
+server reports no error. You get half the speed, which reads as bad hardware or
+a bad recipe.
+
+| | measures | notices a broken drafter? |
+|---|---|---|
+| `vllm-bench-serve` | throughput | it shows the aggregate number — so, partly |
+| `vllm-quality-gate` | correctness | **no** — the output is correct |
+| `spec-decode-accept` | acceptance **per draft position** | **yes, and says which kind** |
+
+The per-position ladder is the resolution the aggregate cannot give, because it
+separates the two failures that need different fixes:
+
+| Shape, **on structured output** | Means |
+|---|---|
+| Every position low, position 0 included | Weak drafter — wrong draft weights, or weights that never loaded |
+| Position 0 **healthy**, 1..k−1 **collapsed** | A causal mask inside a *non-causal* draft block |
+
+```bash
+ws up vllm-2node-glm53-flash-exl3
+BASE_URL=http://127.0.0.1:8893/v1 ws up spec-decode-accept
+```
+
+**The class qualifier in that table is load-bearing.** Acceptance is a property
+of the text, and both of these are published medians from the *same healthy
+server*:
+
+| Class | pos 0 → 6 | aggregate |
+|---|---|---:|
+| Structured | 0.98 0.98 0.94 0.94 0.91 0.83 0.83 | 0.92 |
+| Prose | 0.75 0.58 0.41 0.28 0.16 0.09 0.06 | 0.33 |
+
+A healthy **prose** ladder collapses to 0.06 — the same shape a broken mask
+makes. So the collapse convicts only on structured output, the tool returns a
+mask verdict for no other class, and `make check` asserts that the published
+healthy prose ladder comes back clean.
 
 ## Then use it: `deepseek-harness`
 

@@ -1,0 +1,72 @@
+name: sglang-nemotron35-lightning-nvfp4
+kind: inference
+engine: sglang
+provenance: unverified
+summary: Nemotron 3.5 Lightning 30B-A3B NVFP4 + DSpark, 1M context, one node
+
+# THIS WORKSPACE CONTRADICTS THE ENGINE x QUANT MATRIX, and that is the point.
+#
+# workspaces/README.md says SGLang cannot serve NVFP4. That claim came from
+# ONE checkpoint - unsloth/Qwen3.8-27B-NVFP4, whose quantised lm_head SGLang
+# does not support - and it was written as though it were a property of the
+# ENGINE. It is a property of the CHECKPOINT. NVIDIA's Nemotron 3.5 Lightning
+# NVFP4 loads in SGLang on day 0, on this exact hardware, with a published
+# DGX Spark operating point. The matrix now says "checkpoint-dependent"
+# because of this workspace (docs/decisions.md#nemotron35-lightning).
+#
+# WHY IT FITS ONE NODE WHEN NOTHING ELSE THIS BIG DOES. 30B total, ~3B active,
+# and the 52 layers are 23 Mamba-2 + 23 MoE + 6 attention. Only those SIX pay a
+# K/V cost that grows with sequence length; the mamba state is a fixed 716 MiB
+# no matter how long the context is. So a 1M-token window is not the 1M-token
+# window of a dense model:
+#
+#   weights (NVFP4, incl. DSpark draft)   ~21.0 GiB
+#   target KV, FP8 e4m3fn, ~3 KB/token    ~14.1 GiB   <- ~4.93M token pool
+#   DSpark draft KV, bf16, SEPARATE       ~28.2 GiB   <- the surprise
+#   mamba/SSM cache, float16                716 MiB
+#                                        ---------
+#                                          ~64 GiB resident, of ~94 claimed
+#
+# THE DRAFT MODEL'S KV IS THE LARGEST SINGLE ALLOCATION, and the draft model
+# itself is 1.3 GB on disk (HF API; the target is 21.6 GB). A 1.3 GB drafter
+# allocating 28.2 GiB of bf16 KV is the sharpest example in this repo of why
+# download size does not predict footprint.
+#
+# It is bf16 while the target's KV is FP8 - not a mistake to tidy up, the
+# drafter has no FP8 KV path here - and it means SPEC_METHOD=none frees ~28 GiB,
+# more than every weight in the server. If you are memory-bound, that is the
+# knob, before mem-fraction-static.
+#
+# THE MEMORY FIGURE BELOW IS THE CLAIM, NOT THE RESIDENT SET. mem-fraction-static
+# 0.78 of 121 GiB is ~94 GiB reserved up front. `ws check` measures what is free
+# now, so a desktop session or another workspace fails it correctly.
+requires:
+  gpu_arch: "12.1"
+  # 0.78 x 121 GiB = ~94 GiB claimed at startup, plus SGLang's own init.
+  # Below this the server either refuses or comes up with a near-empty pool,
+  # which reads as "the model is slow" rather than "it did not get memory".
+  min_unified_gb: 96
+  # 21.6 GB + 1.3 GB of weights in HF_HOME, plus slack. The ~20 GB Docker image
+  # is NOT counted here - it lands in /var/lib/docker, which this check does not
+  # measure.
+  min_disk_gb: 30
+  docker: true
+
+images:
+  - lmsysorg/sglang:dev-nemotron3-5-lightning
+
+models:
+  - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+  - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark
+
+endpoints:
+  - "http://127.0.0.1:8894/v1  (OpenAI-compatible)"
+  - "http://127.0.0.1:8894/server_info  (what it ACTUALLY allocated - ./report.sh)"
+
+sources:
+  - https://github.com/MiaAI-Lab/Nemotron3.5-Lightning-DGX-Spark-RTX-5090-6000-PRO
+  - https://www.lmsys.org/blog/2026-08-11-nemotron-3-5-lightning
+  - https://github.com/NVIDIA-NeMo/Nemotron/blob/main/usage-cookbook/Nemotron-3.5-Lightning/sglang_cookbook.ipynb
+  - https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+  - https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark
+  - https://docs.sglang.io/references/production_metrics.html

@@ -1,0 +1,55 @@
+name: vllm-prefill-ladder
+kind: bench
+engine: any
+provenance: unverified
+summary: Cold prefill tok/s and prefix-cache reuse - proven cold, not assumed cold
+
+# THE HALF OF A REQUEST NOTHING ELSE HERE MEASURES.
+#
+# `vllm-bench-serve` measures throughput under concurrency. `spec-decode-accept`
+# measures the drafter. Both are about DECODE, and on a long-context server
+# decode is not where the time goes: a 100k-token prompt spends roughly a
+# hundred seconds in prefill before it emits a single character, and then
+# decodes at whatever tok/s the other benches already told you. The number a
+# user actually experiences on a new conversation is TTFT, and until now this
+# repo had no way to put a figure on it.
+#
+# WHY IT IS A CHECK AND NOT JUST A TIMER. Every serving workspace here runs with
+# --enable-prefix-caching, so the second time a prompt is sent it is not a
+# prefill - it is a cache hit. Measured on the kit this protocol comes from,
+# rerunning a "cold" ladder without changing the prompt took TTFT from 10.3 s to
+# 1.9 s: a 5x improvement that is entirely an artefact of the measurement, and
+# one that looks exactly like a successful optimisation. So a cold prompt is
+# salted with a fresh UUID FIRST in the message - position matters, a salt at
+# the end shares every preceding block - and the prefix-cache counter is read
+# across each request to PROVE the rung was cold. A rung that hit the cache is
+# reported as invalid rather than as a fast result.
+#
+# AND THE REUSE ROW IS A RATIO AGAINST A PAGE MODEL, not a percentage. Hits are
+# block-aligned: a 7.7k-token conversation reuses floor(7717/3584)*3584 = 7168
+# tokens, not 7717, and the remainder is real compute on every turn. "93% hit"
+# reads as though 7% is being lost and invites somebody to go looking for it.
+# `hit_efficiency` = measured / what the page model allows says the true thing:
+# 1.0 means nothing is being lost, and a number that is not 1.0 means the page
+# size assumed here is not this server's - in which case the sizes consistent
+# with the observation are printed instead of a guess.
+#
+# WHAT IT IS FOR, concretely: A/B-ing --max-num-batched-tokens. Pass
+# --chunk-tokens and each rung also reports seconds per chunk, which is the
+# quantity that stays flat when prefill is compute-bound and moves when it is
+# not. The GLM-5.3-Flash workspace's 2048 default came from exactly this ladder
+# run at 1024 / 2048 / 3584 / 4096 (docs/decisions.md#glm53-second-pass).
+#
+# Like every `bench` workspace this is a CLIENT: it needs a running endpoint
+# rather than a free GPU, so `requires:` is empty and it coexists with the
+# serving workspace it is pointed at.
+requires: {}
+
+endpoints:
+  - "reads http://127.0.0.1:8888/v1 by default - set BASE_URL for anything else"
+  - "also reads /metrics and /tokenize off the same host, at the ROOT not /v1"
+
+sources:
+  - https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks
+  - https://docs.vllm.ai/en/latest/design/metrics/
+  - https://docs.vllm.ai/en/latest/features/automatic_prefix_caching.html

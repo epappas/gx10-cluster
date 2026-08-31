@@ -210,8 +210,55 @@ swapping is not a measurement of the model.
 | [`llamacpp-deepseek-v4-flash-gguf`](../../workspaces/inference/llamacpp-deepseek-v4-flash-gguf/README.md) | 1 | ~96 GB (108 with drafts) | ~110 GB |
 | [`vllm-2node-deepseek-v4-flash`](../../workspaces/inference/vllm-2node-deepseek-v4-flash/README.md) | 2 | ~100 GB/node | ~170 GB |
 | [`llamacpp-deepseek-v4-pro-gguf`](../../workspaces/inference/llamacpp-deepseek-v4-pro-gguf/README.md) | 1 | ~32 GB | **~360 GB** |
+| [`vllm-2node-glm53-flash-exl3`](../../workspaces/inference/vllm-2node-glm53-flash-exl3/README.md) | 2 | **~106 GB/node** | ~180 GB/node |
+| [`sglang-nemotron35-lightning-nvfp4`](../../workspaces/inference/sglang-nemotron35-lightning-nvfp4/README.md) | 1 | ~96 GB claimed | ~30 GB |
+| [`vllm-nemotron35-lightning-nvfp4`](../../workspaces/inference/vllm-nemotron35-lightning-nvfp4/README.md) | 1 | ~98 GB claimed | ~30 GB |
 
 `bench` and `agent` workspaces claim neither, by design.
+
+### Two models' arithmetic does not follow the rules above
+
+Both are **hybrids**, and a hybrid breaks the "KV scales with context ×
+concurrency" model this page is built on. Mamba state is essentially
+**length-independent**, so the pool is a large fixed floor plus a small slope.
+
+[`vllm-2node-glm53-flash-exl3`](../../workspaces/inference/vllm-2node-glm53-flash-exl3/README.md)
+— 12 MLA attention layers, 33 mamba. Two consequences, both counter-intuitive:
+
+- **1M context fits in ~19 GB of KV.** Reported occupancy on the source kit:
+  36k → 16%, 256k → ~25%, 300k → 26%. On a dense model those numbers would be
+  nowhere near each other.
+- **Lowering `--max-model-len` makes it worse, not better.** The logged pool is
+  roughly concurrency × the cap; the floor underneath does not move. The usual
+  "shrink the context to free KV" reflex shrinks the pool instead.
+
+[`sglang-nemotron35-lightning-nvfp4`](../../workspaces/inference/sglang-nemotron35-lightning-nvfp4/README.md)
+— 6 attention layers of 52, the rest 23 Mamba-2 and 23 MoE. It is the same
+inversion taken further, and it is why a **1M window fits one node**:
+
+- **~4.93M pool tokens in ~14.1 GiB**, because the target's K/V is FP8
+  `e4m3fn` at ~3 KB/token and only six layers pay it. That budget is shared
+  across every concurrent request — roughly 4–5 simultaneous *full* 1M
+  contexts, or far more short ones.
+- **The mamba cache is a flat 716 MiB** at any context length.
+- **The speculative draft model's KV is a separate ~28.2 GiB bf16
+  allocation** — larger than the weights, and the largest single item in the
+  server. On this page's terms that is a fixed cost of speculative decoding
+  that no context or concurrency setting touches. Turning the drafter off is
+  the biggest single lever on the pool.
+
+Do not generalise either way. Check whether the model is hybrid before applying
+this page's arithmetic *or* these exceptions — and on a hybrid, check whether a
+drafter is loaded before believing a KV figure.
+
+### And one number that is never a constant
+
+For both Nemotron workspaces the pool size, the KV size and
+`max_running_requests` are **derived at startup** from a fraction of whatever
+memory was free at that moment. The reference kit's "~4.93M tokens, 48
+concurrent" is what *it* got. Read your own with
+`workspaces/inference/sglang-nemotron35-lightning-nvfp4/report.sh` rather than
+planning against someone else's boot.
 
 ## Failure modes
 

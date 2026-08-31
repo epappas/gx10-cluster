@@ -30,12 +30,13 @@ across two, each node holds ~37 GB and the KV budget roughly **triples**.
 Do the arithmetic before you start:
 [capacity-planning](capacity-planning.md).
 
-## The two workspaces, and why there are two
+## The three workspaces, and why there are three
 
 | Workspace | It is |
 |---|---|
 | [`vllm-2node-tp2`](../../workspaces/inference/vllm-2node-tp2/README.md) | The **generic** recipe. Topology and RDMA only — bring your own model |
 | [`vllm-2node-deepseek-v4-flash`](../../workspaces/inference/vllm-2node-deepseek-v4-flash/README.md) | The **DeepSeek-V4** recipe. Adds the v4 tokenizer mode, parsers, FP4 indexer cache and DSpark drafts |
+| [`vllm-2node-glm53-flash-exl3`](../../workspaces/inference/vllm-2node-glm53-flash-exl3/README.md) | The **GLM-5.3-Flash** recipe. EXL3 4bpw, 1M context, vision, DFlash2 drafts — and the only one that does **not** run an upstream image |
 
 They share one launcher, `workspaces/lib/twonode.sh`, and nothing else. The test
 of that split: **anything whose value depends on the model stays in the
@@ -215,10 +216,11 @@ can be `docker0` or the VPN — and the ranks never meet.
 Different image digests, different flags, a `.env` synced on one node and not
 the other: **mismatched ranks hang at init rather than erroring.**
 
-The upstream recipe this was ported from keeps a `.env` per node and warns you
-to sync it. Both workspaces here launch both ranks from one script, so the class
-of bug does not exist rather than being documented
-([what was ported and what was not](../decisions.md#two-node-vllm)).
+The upstream recipes this was ported from keep a `.env` per node and warn you
+to sync it. Every workspace here launches both ranks from one script, so the
+class of bug does not exist rather than being documented
+([what was ported and what was not](../decisions.md#two-node-vllm), and
+[again for GLM](../decisions.md#glm53-flash)).
 
 **If you hand-roll two-node serving, this is the one to get right.**
 
@@ -241,6 +243,62 @@ Pinning a device list by hand is how you silently end up on one rail after a
 cable moves. Set `IB_HCA=` in the workspace's `.env` **only** if a log actually
 shows the wrong device chosen.
 
+## <a name="gid-index"></a>`NCCL_IB_GID_INDEX` is deliberately unset too, and this one has teeth
+
+Same shape of decision, sharper failure. The upstream recipes pin
+`NCCL_IB_GID_INDEX=3` — and then have to ship a preflight that validates it,
+because **index 3 is an all-zero entry on one card of some GB10 pairs**. When it
+is, the launch passes every check, both containers start, and about **60 seconds
+in the worker rank dies** with:
+
+```
+ibv_modify_qp ... errno 61 (No data available)
+```
+
+Rank 0 is still sitting there looking healthy, so this reads as "the peer
+crashed" rather than "the GID index was wrong".
+
+This repo does not pin it. `NCCL_IB_ROCE_VERSION_NUM=2` plus
+`NCCL_IB_ADDR_FAMILY=AF_INET` (both set by the library) ask NCCL to **select**
+the RoCEv2 IPv4 GID itself, on each card — the same answer without the failure
+mode.
+
+If you ever do need to pick one by hand, `gx10-interconnect` prints the table:
+
+```bash
+gx10-interconnect --gids
+ssh <peer> gx10-interconnect --gids     # it has to be right on BOTH
+```
+
+Measured on this cluster:
+
+```
+  rocep1s0f0  port 1  (ACTIVE)
+    gid 0   fe80:0000:0000:0000:a2ad:9fff:fedc:ce94  IB/RoCE v1  fe80::…  link-local
+    gid 1   fe80:0000:0000:0000:a2ad:9fff:fedc:ce94  RoCE v2     fe80::…  link-local
+    gid 2   fe80:0000:0000:0000:7f84:8af3:84a3:30b8  IB/RoCE v1  fe80::…  link-local
+    gid 3   fe80:0000:0000:0000:7f84:8af3:84a3:30b8  RoCE v2     fe80::…  link-local
+    gid 4   0000:0000:0000:0000:0000:ffff:c0a8:640a  IB/RoCE v1  192.168.100.10  IPv4 but RoCE v1 - does not route
+    gid 5   0000:0000:0000:0000:0000:ffff:c0a8:640a  RoCE v2     192.168.100.10  <- THIS ONE (RoCE v2, IPv4)
+    gid 6   0000:0000:0000:0000:0000:0000:0000:0000  -           EMPTY
+```
+
+**Two things in that table are the whole reason the tool prints it.**
+
+**The right index here is 5, not 3.** The upstream recipes pin 3 — and on this
+cluster index 3 is a *populated* entry, so a preflight that only asks "is it
+non-empty" **passes** and you still get a link-local GID that cannot route
+between the boxes.
+
+**Every IPv4 address appears twice**, once as RoCE v1 and once as v2, at
+adjacent indices. Choosing on the address alone picks the v1 copy half the
+time. `--gids` flags the one combination that works, which is why it prints the
+type column rather than just the address.
+
+Pick an index that is non-empty on **both** nodes *and* reads
+`RoCE v2` *and* shows an IPv4 address, then set `IB_GID_INDEX=` in the
+workspace's `.env`. Or do not pin it at all, which is the default and the point.
+
 ## Overrides, and where they live
 
 Everything below goes in the workspace's `.env`, **on rank 0 only**.
@@ -252,9 +310,20 @@ Everything below goes in the workspace's `.env`, **on rank 0 only**.
 | `MASTER_PORT` | `25000` | Collision |
 | `MGMT_IFACE` | the default-route interface | Same |
 | `IB_HCA` | *unset* | Only when a log shows the wrong device |
-| `IMAGE` | `vllm/vllm-openai:nightly-aarch64` | Pinning a digest, or taking the fork path |
+| `IB_GID_INDEX` | *unset* | Only after `ibv_modify_qp` errno 61 — [above](#gid-index) |
+| `IMAGE` | the workspace's own | Pinning a digest, or taking the fork path |
 | `SHM_SIZE` | `32g` | |
 | `EXTRA_ENV` | *unset* | A bash array of `-e VAR=value`, handed to **both** ranks |
+| `EXTRA_MOUNTS` | *unset* | A bash array of `-v host:container`, handed to **both** ranks |
+| `PRE_EXEC` | *unset* | A snippet run **inside** the container before `vllm serve`. One workspace uses it; see below |
+
+`PRE_EXEC` is the narrow escape hatch, and the narrowness is the point: it does
+**not** hand the workspace the container's argv. The library still assembles the
+serve line, still generates it identically for both ranks, and splices the
+snippet in front with `bash -c "<PRE_EXEC>; exec vllm serve \"$@\""`. Reach for
+`EXTRA_ENV` or `MODEL_ARGS` first — the only current use is an image that ships
+a patch it does not apply at build time
+([why](../decisions.md#glm53-flash)).
 
 ## Running it by hand, without `ws`
 
@@ -285,7 +354,9 @@ bash -x ./up.sh          # see exactly the two docker command lines it generates
 | One node OOMs, the other is fine | The peer had less free memory | `ws check` on **both** |
 | Only one node has the weights | The HF cache is per node | `make models` on both, or `rsync -a ~/.cache/huggingface/hub/ <peer>.cluster:.cache/huggingface/hub/` |
 | Boots clean, dies under real traffic | Speculative verify buffers allocate on the **first real request** | Lower `GPU_MEMORY_UTILIZATION` — `0.80 → 0.78` |
-| Correct output at half the speed | Draft path silently broken — costs acceptance and nothing else | Watch acceptance in `ws up vllm-bench-serve` |
+| Correct output at half the speed | Draft path silently broken — costs acceptance and nothing else | `ws up spec-decode-accept`, which breaks it down per draft **position** |
+| Worker rank dies ~60 s in, `ibv_modify_qp` errno 61 | A pinned `NCCL_IB_GID_INDEX` names an all-zero GID on one card | Leave `IB_GID_INDEX` unset; [pick one by hand](#gid-index) if you must |
+| Reported hang after `docker rm` and restart | JIT caches lost, one rank re-compiles mid-collective, the other trips NCCL's 600 s watchdog | Persist Triton/TileLang caches on the host — the GLM workspace does by default |
 | "The model got slow" at long context | Preemption — 1M context asked for on an `fp8` KV | Lower `MAX_MODEL_LEN` |
 | Killed under load, nothing in the log | `earlyoom` targets the largest-RSS process, always the server | `make verify` checks this; `systemctl disable --now earlyoom` |
 | `ws logs` says there is no compose file | Correct — these are not compose workspaces | `docker logs ws-vllm-2node`, and `ssh <peer> docker logs …` |
@@ -296,12 +367,27 @@ There is **no shared filesystem**. Each box has its own HF cache, its own venv,
 its own checkpoints. Provision both with the same playbook and they match, but a
 model downloaded on node A is not visible on node B.
 
+For the smaller checkpoints, letting each node fetch its own copy from the Hub
+is fine and is what the workspaces assume. It stops being fine somewhere north
+of 100 GiB, where the second copy is hours of WAN for bytes already sitting on a
+machine at the end of a cable measured here at **22.7 GB/s**:
+
 ```bash
 rsync -a ~/.cache/huggingface/hub/ poseidon.cluster:.cache/huggingface/hub/
 ```
 
 `<node>.cluster` is the interconnect name — use it when you explicitly want the
 200G path for a bulk copy ([why the names split](../decisions.md#hosts-split)).
+
+`twonode_stage_model` in the launcher library does exactly that for one HF repo
+id, resumably, and the GLM workspace exposes it as a script because it is the
+one whose 164 GiB makes the difference material:
+
+```bash
+cd workspaces/inference/vllm-2node-glm53-flash-exl3
+hf download Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw   # once, here
+./stage-weights.sh                                  # then to the peer, over the cable
+```
 
 ## Adding a third and fourth node
 
@@ -315,7 +401,7 @@ is the *only* thing that moves the memory line
 
 ## Provenance
 
-Both two-node workspaces are `unverified`: written from the vendor docs and the
+All three two-node workspaces are `unverified`: written from the vendor docs and the
 published 2× DGX Spark recipes cited in their manifests, not from a completed
 run on this hardware. The **fabric** measurements in this runbook are
 first-hand — 22.7 GB/s busbw, the NCCL device discovery, the MTU results — the
