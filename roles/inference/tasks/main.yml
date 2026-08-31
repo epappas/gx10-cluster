@@ -50,10 +50,17 @@
 
 # Deliberately NOT enabled. Which model to serve is a decision per session, and
 # a 75 GB model pinned in memory at boot is not a default anyone wants.
-#   systemctl start vllm@nvidia-Qwen3.6-27B-NVFP4
+#
+# systemd-escape, NOT "replace / with -", which is what this message used to
+# say and which the unit template's own header warns against: model ids contain
+# hyphens too, so deepseek-ai/DeepSeek-V4-Flash cannot be recovered from
+# deepseek-ai-DeepSeek-V4-Flash. %I round-trips only what systemd escaped.
+#   sudo systemctl start "vllm@$(systemd-escape 'nvidia/Qwen3.6-27B-NVFP4')"
 - name: Explain how to serve
   ansible.builtin.debug:
     msg: >-
       vLLM ready. Ad hoc: `vllm-serve <hf-model-id>`.
-      As a service: `sudo systemctl start vllm@<model>` where <model> is the HF
-      id with / replaced by -. See docs/runbooks/serve-models.md
+      As a service: `sudo systemctl start "vllm@$(systemd-escape '<hf-model-id>')"`
+      - use systemd-escape, not a manual / to - swap, or a model id containing
+      hyphens cannot be recovered. See docs/tools.md and
+      docs/runbooks/serve-models.md

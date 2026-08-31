@@ -295,11 +295,16 @@ every resident MB is a MB the model cannot use.
 | `gx10-sample -r` | What happened at 03:00? (systemd timer, ~1 MB/day of CSV) |
 | `ws` | What can I run, will it fit, and is it running? |
 
+Plus `vllm-serve`, `allreduce_test.py`, the two bench probes and the workspace
+helpers. **[tools.md](docs/tools.md) is the full reference** — every command,
+its flags, its exit codes, and how to read what it prints.
+
 ## Reference
 
 | | |
 |---|---|
 | [docs/](docs/README.md) | Index of everything, and the provenance rules |
+| [tools.md](docs/tools.md) | Every command this repo adds, indexed by command |
 | [decisions.md](docs/decisions.md) | Why the repo is the way it is — one entry per choice |
 | [hardware.md](docs/hardware.md) | Verified GX10 facts, and what DGX OS already owns |
 | [roles/](roles/README.md) | What each role does, and its tag |

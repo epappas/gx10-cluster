@@ -1,17 +1,23 @@
 # Documentation
 
-Four kinds of document, deliberately separated so each has one job.
+Five kinds of document, deliberately separated so each has one job.
 
 | | What it is | Read it when |
 |---|---|---|
 | [runbooks/](runbooks/) | Task-oriented procedures | You are doing something, or something broke |
+| [tools.md](tools.md) | Every command this repo adds, and how to read its output | You typed `gx10-<tab>`, or a runbook named a tool you do not know |
 | [hardware.md](hardware.md) | Verified GX10 facts, and what DGX OS already owns | You are about to tune something |
 | [decisions.md](decisions.md) | Why the repo is the way it is, one entry per choice | You are about to change something and it looks odd |
 | [contributing.md](contributing.md) | How to grow this without it rotting | You are adding to the repo |
 
 The split matters: `hardware.md` is facts, `decisions.md` is judgement calls,
-runbooks are actions. Mixing them is how a design essay grows where a checklist
-was needed.
+runbooks are actions, `tools.md` is the interface. Mixing them is how a design
+essay grows where a checklist was needed.
+
+Runbooks are indexed by **task** and by **symptom**; `tools.md` is indexed by
+**command**. If you know what you want to achieve, start with a runbook. If you
+have a command in front of you and want to know what it is before you run it,
+start with tools.
 
 ## Provenance
 

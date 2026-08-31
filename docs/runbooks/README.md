@@ -28,6 +28,7 @@ table. If you worked something out at 2am, it belongs here.
 | Bring the cluster back after a reboot or power loss | [reboot-recover](reboot-recover.md) |
 | Get back in after an SSH lockout | [recover-ssh-lockout](recover-ssh-lockout.md) |
 | Diagnose anything else | [troubleshoot](troubleshoot.md) |
+| Know what a `gx10-*` command is before running it | [tools](../tools.md) — the reference, indexed by command |
 
 ## By symptom
 
