@@ -1,0 +1,61 @@
+name: vllm-nemotron35-lightning-nvfp4
+kind: inference
+engine: vllm
+provenance: unverified
+summary: Nemotron 3.5 Lightning NVFP4 + DSpark on vLLM - where the acceptance ladder works
+
+# WHY THIS EXISTS ALONGSIDE THE SGLANG WORKSPACE, rather than instead of it.
+#
+# Both engines serve this checkpoint with DSpark, and neither is a fallback for
+# the other. The split is about what you can MEASURE:
+#
+#   sglang-...  the published DGX Spark operating point, with the measured
+#               allocation table behind it (~4.93M pool tokens, 48 concurrent).
+#               Exposes accept LENGTH and no per-position counters.
+#   vllm-...    the engine every bench and gate workspace in this repo speaks.
+#               Exposes vllm:spec_decode_num_accepted_tokens_per_pos_total,
+#               which is the ONE view that separates a weak drafter from a
+#               broken draft mask - and this is a model with three published
+#               drafters to choose between.
+#
+# So: SGLang to run it the way its authors published it, vLLM to find out WHY
+# a speculator is underperforming. docs/decisions.md#nemotron35-lightning.
+#
+# TWO FLAGS HERE HAVE NO EQUIVALENT ANYWHERE ELSE IN THIS REPO:
+#
+#   --moe-backend marlin      On GB10 the NVFP4 path is Marlin (W4A16), not
+#                             native FP4 tensor cores - those are GB200. The
+#                             model card's own hardware table says so.
+#   --mamba-cache-mode align  The hybrid's mamba state is a fixed allocation;
+#                             `align` is what the published DGX Spark run used.
+#
+# AND ONE SPELLING TRAP: the reasoning parser is `nemotron_v3` here and
+# `nemotron_3` in SGLang. Neither is a typo. Copying one into the other fails
+# at startup, which is the good outcome - the bad one is a parser that loads
+# and silently returns reasoning as content.
+requires:
+  gpu_arch: "12.1"
+  # 0.80 x 121 GiB = ~97 GiB claimed. The published run reports ~75 GB of KV at
+  # that utilisation with ~12 GB of system memory left, which is tighter than it
+  # sounds on a pool the OS also lives in.
+  min_unified_gb: 98
+  min_disk_gb: 30
+  docker: true
+
+images:
+  - vllm/vllm-openai:v0.27.1
+
+models:
+  - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+  - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark
+
+endpoints:
+  - "http://127.0.0.1:8895/v1  (OpenAI-compatible)"
+  - "http://127.0.0.1:8895/metrics  (vllm:spec_decode_* - the acceptance ladder)"
+
+sources:
+  - https://blog.kubesimplify.com/nemotron-3-5-lightning-on-dgx-spark
+  - https://dev.classmethod.jp/en/articles/nvidia-nemotron-3-5-lightning-dspark-dflash-mtp-dgx-spark/
+  - https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+  - https://www.lmsys.org/blog/2026-08-11-nemotron-3-5-lightning
+  - https://docs.vllm.ai/en/latest/features/spec_decode/

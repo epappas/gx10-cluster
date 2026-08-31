@@ -41,14 +41,26 @@ the recipe or the model is not.
 
 | | llama.cpp | vLLM | SGLang |
 |---|---|---|---|
-| **NVFP4** ~22.6 GB | no | **yes** | **NO** |
+| **NVFP4** | no | **yes** | **checkpoint-dependent** |
 | **GGUF Q4** ~17–19 GB | **yes** | yes | yes |
 | **MixedInt4-AutoRound** 20.8 GB | no | **yes** | no |
 
-**SGLang cannot serve the NVFP4 build.** Its `lm_head` is quantised and SGLang
-does not support that — so on Blackwell hardware, whose whole advantage is
-NVFP4, SGLang is the one engine that cannot use it. That is not a bug to work
-around; pick vLLM for NVFP4, or SGLang with GGUF.
+**"SGLang cannot serve NVFP4" was a claim about the wrong noun**, and this page
+used to make it. It is true of `unsloth/Qwen3.8-27B-NVFP4` — a quantised
+`lm_head`, which SGLang does not support — and false of NVIDIA's Nemotron 3.5
+Lightning NVFP4, which SGLang serves on day 0 on this hardware. Check the
+checkpoint, not the engine ([the correction](../decisions.md#nemotron35-lightning)).
+
+| Checkpoint | SGLang |
+|---|---|
+| `unsloth/Qwen3.8-27B-NVFP4` | **no** — quantised `lm_head`. Use vLLM, or SGLang with GGUF |
+| `nvidia/…-Nemotron-3.5-Lightning-30B-A3B-NVFP4` | **yes** — and it is the published GB10 recipe |
+
+**NVFP4 on `sm_121` is a claim about footprint, not about FP4 silicon.** Native
+FP4 tensor-core execution is GB200; NVIDIA's hardware table routes DGX Spark
+through a W4A16 **Marlin** kernel. NVFP4 is still the right default here — it is
+what fits and what is published — but "the format this hardware exists for"
+means *small*, not *natively executed*.
 
 **One node or two?** Use `vllm-2node-tp2` when the model does not fit one node
 with useful KV cache — the 120B NVFP4 is the worked example. Two-node serving
@@ -122,6 +134,43 @@ Sampling for V4 is not the Qwen table above: **temperature 1.0, top_p 1.0**
 (0.95 for agentic). Reasoning effort is a request field, not a flag:
 `--chat-template-kwargs '{"reasoning_effort":"high"}'`.
 
+## Nemotron 3.5 Lightning: 1M context on **one** node
+
+The only 1M-context recipe here that does not need both nodes, and the reason is
+architectural. Of 52 layers, **6** are attention (the rest are 23 Mamba-2 and 23
+MoE), so only six pay a K/V cost that grows with length and the mamba state is a
+flat 716 MiB. At `mem-fraction-static 0.78` the reference GB10 kit reports
+**~4.93M pool tokens in ~14.1 GiB** of FP8 KV, ~21 GiB of NVFP4 weights, and 48
+concurrent requests.
+
+**The DSpark draft model's KV cache is a separate ~28.2 GiB in bf16 — larger
+than the weights, and the biggest single allocation in the server.** So
+`SPEC_METHOD=none` is not "give up speed", it is "recover 28 GiB", and it is the
+first lever when the pool is the constraint. Lowering `mem-fraction-static` is
+the second.
+
+| Workspace | Use it when |
+|---|---|
+| `sglang-nemotron35-lightning-nvfp4` | You want it as published: 1M window, the measured allocation, DSpark |
+| `vllm-nemotron35-lightning-nvfp4` | You want to find out **why** a speculator underperforms — this is the only one with the per-position acceptance ladder |
+
+Three published speculators, ranked by measurement on a DGX Spark (code
+generation, single stream / 8 concurrent): `none` 81.3/241.7, `dflash`
+95.5/268.6, `mtp` 111.4/302.3, `dspark` **124.2/354.6** tok/s. `dspark` wins on
+both axes, which is unusual; `mtp` is the value pick — +37% with no second
+checkpoint and no extra KV.
+
+Two traps worth knowing before you copy a flag between them: the reasoning
+parser is `nemotron_3` in SGLang and `nemotron_v3` in vLLM, and SGLang serves
+**no `/metrics` at all** without `--enable-metrics` — without which
+`spec-decode-accept` reports a healthy DSpark server as having no speculative
+decoding.
+
+Sampling is not the Qwen table above either. NVIDIA's card says temperature
+**1.0**, top_p 0.95; the DGX Spark recipe says 0.6 / 0.95 / top_k 20 /
+repetition_penalty 1.08. Use NVIDIA's as the default. Thinking is a request
+field: `"chat_template_kwargs": {"enable_thinking": true}`.
+
 ## Benchmarking a server (not `make bench`)
 
 `make bench` measures the **hardware**. `ws up vllm-bench-serve` measures a
@@ -166,6 +215,28 @@ acceptance and nothing else — the target model still verifies every token — 
 the server stays perfectly correct at half the speed, which reads as bad
 hardware rather than a bad draft.
 
+## Which GLM, and why it is the odd one out
+
+There is one: [`vllm-2node-glm53-flash-exl3`](../../workspaces/inference/vllm-2node-glm53-flash-exl3/README.md).
+It is worth knowing two things before reaching for it.
+
+**It is the only workspace here that does not run an upstream image.** Upstream
+vLLM cannot serve this checkpoint at all — no `exl3` quantisation method, and it
+dies on the first forward because the model is NoPE MLA while the only SM12x
+sparse-MLA backend expects a RoPE section. Neither is reachable from a flag, so
+declining the overlay image costs the model rather than a few percent of decode
+([the full argument](../decisions.md#glm53-flash)).
+
+**Its context budget is hybrid**, so the usual tuning move is backwards: 1M
+context allocates on ~19 GB of KV per node, and dropping `MAX_MODEL_LEN` to
+"free" KV shrinks the pool ([why](capacity-planning.md#two-models-arithmetic-does-not-follow-the-rules-above)).
+
+Two values have no alternative on this hardware: `--kv-cache-dtype fp8` (the
+SM12x sparse-MLA kernel takes nothing else — **not** bf16, and **not** the NVFP4
+KV that exists on this arch as a *dense* kernel), and
+`--max-num-batched-tokens 2048` (8192-token prefill chunks oversubscribe the
+GB10 indexer top-k and crash a long prompt around 300k).
+
 ## Gating a server: right, not just fast
 
 ```bash
@@ -192,6 +263,62 @@ If a run comes back all-empty, raise `MAX_TOKENS` before believing it — with
 reasoning on, a budget that expires before `</think>` yields an empty reply and
 a full bill. Below ~1024 you are measuring your own cap
 ([detail](serve-models.md#the-answers-are-wrong-not-slow)).
+
+## Proving the drafter: acceptance per position
+
+```bash
+BASE_URL=http://127.0.0.1:8893/v1 ws up spec-decode-accept
+```
+
+The third failure a serving stack can have, and the quietest. A **broken draft
+path costs acceptance and nothing else** — the target model still verifies every
+token, so the answers stay correct and you simply get half the speed. The
+benchmark above shows the aggregate number; this breaks it down by draft
+**position**, which is what separates the two causes:
+
+| Shape, **on structured output** | Means |
+|---|---|
+| Every position low, position 0 included | Weak drafter — wrong draft weights, or weights that never loaded |
+| Position 0 **healthy**, 1..k−1 **collapsed** | A causal mask inside a *non-causal* draft block |
+
+**The class qualifier is load-bearing.** Acceptance is a property of the text: a
+healthy server measures ~0.92 on structured output and ~0.33 on prose, and its
+healthy *prose* ladder decays to 0.06 — the same shape a broken mask makes. So
+the collapse convicts only on structured output, and the tool refuses to return
+a mask verdict for any other class.
+[Full detail](../../workspaces/bench/spec-decode-accept/README.md).
+
+## The other half of a request: cold prefill
+
+```bash
+BASE_URL=http://127.0.0.1:8893/v1 ws up vllm-prefill-ladder --chunk-tokens 2048
+```
+
+Everything above measures **decode**. On a long-context server that is not where
+the time goes — a 100k-token prompt spends roughly a hundred seconds in prefill
+before a single character appears, and then decodes at whatever the benchmark
+already told you. This puts a number on the wait.
+
+**The reason it is a check and not a stopwatch:** every serving workspace here
+runs with `--enable-prefix-caching`, so sending the same prompt twice does not
+measure prefill twice. Measured on the kit the protocol comes from, rerunning a
+"cold" ladder unchanged took TTFT from **10.3 s to 1.9 s** — a 5× improvement
+produced by nothing, which looks exactly like a flag that worked. So each cold
+prompt carries a fresh UUID salt *first* in the message (position matters — a
+salt at the end shares every preceding block), and the prefix-cache counters are
+read across every request. A rung that hit the cache is reported `INVALID`, not
+fast.
+
+The follow-up row measures the opposite: reuse, against a **page model** rather
+than as a percentage. Hits are block-aligned, so a 7.7k-token conversation
+reuses `floor(7717/3584) × 3584 = 7168` tokens and computes the rest every turn.
+`hit_efficiency` of 1.00 means nothing is being lost; anything else usually
+means the page size assumed is not this server's, and the tool prints the sizes
+consistent with what it saw.
+
+`--chunk-tokens` adds a **seconds per chunk** column, which is the quantity to
+A/B when tuning `--max-num-batched-tokens`.
+[Full detail](../../workspaces/bench/vllm-prefill-ladder/README.md).
 
 ## Using it: the agent harness
 
@@ -252,7 +379,7 @@ one node without heavy sharding, and discovering that costs an afternoon.
 | Image "not pulled yet" | Normal on first run | `ws up` pulls it |
 | Weights "NOT cached" | Normal on first run | The engine downloads; 20 GB takes a while |
 | vLLM 503s for minutes after start | Weights still loading | Expected; `start_period` is 15m. Watch `ws logs -f` |
-| SGLang refuses the NVFP4 model | Quantised `lm_head`, unsupported | Use vLLM, or the GGUF build |
+| SGLang refuses **that** NVFP4 model | Quantised `lm_head`, unsupported — checkpoint-specific, not an SGLang limit | Use vLLM, or the GGUF build. Nemotron 3.5 Lightning NVFP4 loads fine there |
 | OOM / swap growing | Two workloads, or utilisation too high | `ws down` the other; lower `GPU_MEMORY_UTILIZATION` in `.env` |
 | Ray worker never joins | Head bound to loopback, or peer unreachable | Set `HEAD_IP` in `.env`; check `gx10-interconnect` |
 | 2-node vLLM hangs at init | Ranks never met — gloo picked the wrong interface, or flags differ | Both are handled by `vllm-2node-tp2`; if hand-rolling, set `GLOO_SOCKET_IFNAME` |

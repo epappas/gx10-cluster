@@ -70,6 +70,23 @@ while a job runs, that job is genuinely power-limited.
 The reasons that *are* faults: `HW Thermal Slowdown`, `SW Thermal Slowdown`,
 `HW Power Brake Slowdown`, `Sync Boost`.
 
+## Where the disk went — `gx10-storage`
+
+`gx10-status` prints free space and the size of the HF cache. On a real box
+that is a minority of the answer — measured here, 175 GB of 660 GB used, with
+303 GB of checkpoints in `/var/tmp` and 63 GB of core dumps that neither
+`du ~/.cache` nor `hf cache scan` can see.
+
+```bash
+gx10-storage              # by category, with what is safe to reclaim
+gx10-storage --reclaim    # the plan, without running it
+gx10-storage --top 20     # biggest directories, wherever they are
+gx10-storage -c           # every node
+```
+
+Full detail, including why weights are never reclaimed automatically:
+[manage-storage](manage-storage.md).
+
 ## <a name="cluster-wide"></a>All nodes at once — `gx10-top`
 
 `gx10-status` answers *this box*. `gx10-top` answers *the cluster*, in one

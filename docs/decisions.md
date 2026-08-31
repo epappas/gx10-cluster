@@ -830,10 +830,17 @@ experiment, the job scripts.
 
 **The engine/quant matrix is the expensive thing to learn late.** SGLang cannot
 serve `unsloth/Qwen3.8-27B-NVFP4`: the checkpoint has a quantised `lm_head`,
-which SGLang does not support. So on Blackwell hardware, whose entire advantage
-here is NVFP4, SGLang is the one engine that cannot use it. This is recorded in
-`workspaces/README.md`, in the runbook and in the SGLang manifest itself,
-because it is discoverable only by trying and failing.
+which SGLang does not support. This is recorded in `workspaces/README.md`, in
+the runbook and in the SGLang manifest itself, because it is discoverable only
+by trying and failing.
+
+*Later correction:* this section originally generalised that into "SGLang is
+the one engine that cannot use NVFP4 on Blackwell". It is a fact about **that
+checkpoint** — SGLang serves NVIDIA's Nemotron 3.5 Lightning NVFP4 on day 0 on
+this hardware ([#nemotron35-lightning](#nemotron35-lightning)). Left visible
+rather than quietly edited, because the shape of the mistake is the lesson: a
+negative result measured on one checkpoint is not a capability claim about an
+engine.
 
 **Every workspace ships `provenance: unverified`.** They are written from
 vendor documentation and the sources cited in each manifest, not from a
@@ -1118,6 +1125,512 @@ nodes. So the default is 128K on `fp8`, and the 1M path is documented in
 `.env.example` as a switch with a stated cost. Asking for 1M on `fp8` does not
 fail at startup — it fails later, as preemption, which reads as "the model got
 slow" rather than "the context was a lie".
+
+## <a name="glm53-flash"></a>GLM-5.3-Flash: the one model this repo runs on an image it did not choose
+
+[MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks)
+is the only published configuration for this model on this hardware, and like
+their DeepSeek recipe before it ([#two-node-vllm](#two-node-vllm)) most of it is
+model plumbing wrapped around a small amount of genuinely transferable
+knowledge. Same treatment: take the part that is knowledge, leave the part that
+is one project's operational model.
+
+### The fork question, answered the other way — and why that is not a reversal
+
+[#two-node-vllm](#two-node-vllm) declined `ghcr.io/anemll/dspark-vllm-gx10`
+because taking a fork means inheriting one project's release cadence for every
+future model. `workspaces/inference/vllm-2node-glm53-flash-exl3` takes
+`ghcr.io/miaai-lab/glm-5.3-flash-2x-dgx-sparks:exl3`. The rule did not change;
+the question is a different one:
+
+| | DeepSeek-V4 | GLM-5.3-Flash |
+|---|---|---|
+| Upstream vLLM | **can** serve it | **cannot** serve it |
+| What declining costs | ~8–9% decode | the model |
+| What the image adds | tuning | two things no flag can express |
+
+Those two things:
+
+- **There is no `exl3` quantisation method upstream.** Registering the name is
+  not enough either — the routed experts have to stay packed trellis + `suh` +
+  `svh` + `mcg` and run Trellis/MCG kernels, or they expand to BF16 and 164 GiB
+  becomes ~640 GiB.
+- **GLM-5.3-Flash is NoPE MLA** (`qk_rope_head_dim=0`, `kv_lora_rank=512`) and
+  the only sparse-MLA backend on SM12x packs a 656-byte record with a 128-byte
+  RoPE section. Stock loads the checkpoint and dies on the first forward with
+  `pe_dim must be 64 for fp8_ds_mla`. The overlay zero-pads the 512-d latent
+  into that geometry; the QK dot is unchanged.
+
+So the blast radius is one workspace, and the cost of the image going stale is
+that one model stops updating — not that every model in the repo is pinned to
+someone else's calendar. That is the distinction the original decision was
+protecting, and it survives intact.
+
+### EXL3 over NVFP4, which contradicts every other recommendation here
+
+Everywhere else this repo says *prefer NVFP4* — it is native to GB10's
+Blackwell FP4 tensor cores, it is smaller **and** faster, and that is the whole
+reason llama.cpp is compiled for `121a`. Here it is the wrong choice, on
+published numbers rather than on principle. An independent teacher-logit panel,
+five cold runs over 25 sealed windows (51,175 positions), KLD(teacher ‖ model):
+
+| Checkpoint | Mean KLD (nats) | Size |
+|---|---:|---:|
+| TR3 K6 (6bpw) | 0.013723 | 254 GB |
+| Official FP8 | 0.020615 | 328 GB |
+| **EXL3 4bpw — what we serve** | **0.024555** | **176 GB** |
+| NVFP4 | 0.060535 | ~180 GB |
+
+**NVFP4 is ~2.5× the divergence at the same size.** 4bpw matches official FP8 at
+54% of the bytes, and it is the only row that leaves two nodes with enough free
+memory to hold a KV cache at all. *(Confidence: published panel, not measured
+here.)* This does not generalise — it is one checkpoint, one quantiser, one
+panel — which is exactly why it is recorded as an exception rather than folded
+into the general advice.
+
+### The KV arithmetic is hybrid, and that inverts the usual tuning move
+
+~164 GiB of weights split TP=2 leaves roughly **19 GB of KV per node**, the
+smallest budget in this repo — and 1M context allocates on it. The reason is
+that this is a hybrid model:
+
+| Piece | Cost | Scales with context? |
+|---|---|---|
+| Target MLA, 12 layers | packed `fp8_ds_mla`, 656 B/token/layer | **yes** |
+| Mamba, 33 layers | window / state | **no** |
+| DFlash2 drafter, 5 SWA layers | bf16, ~2 KB/token | window-bounded |
+
+A large fixed floor plus a small slope. So the reflex that is right on a dense
+model — *lower `--max-model-len` to free KV* — is wrong here and actively
+harmful: the logged pool is roughly concurrency × the cap, so a smaller cap
+shrinks the pool while the floor stays put. Reported occupancy on the source
+kit: 36k → 16%, 256k → ~25%, 300k → 26%.
+
+### Taken
+
+| From them | Why it matters |
+|---|---|
+| **`--kv-cache-dtype fp8`, and that it has no alternative** | The SM12x sparse-MLA kernel accepts only packed `fp8_ds_mla`. bf16 KV has **no sparse kernel on this arch**; NVFP4 KV exists on SM12x and is a **dense MHA** kernel. Reading a working NVFP4-KV recipe for another model as evidence it applies here is the trap |
+| **A ceiling on `--max-num-batched-tokens`** | 8192-token prefill chunks oversubscribe the GB10 indexer top-k's shared memory and crash a long prompt around 300k. A hardware limit on that kernel, not a throughput preference. The *value* under that ceiling was 1024 here until it was measured — see [#glm53-second-pass](#glm53-second-pass) |
+| **`--skip-mm-profiling` with vision on** | vLLM's max-size multimodal dummy profile allocates a worst-case image+video batch at init and OOMs this unified pool before the server answers once |
+| **`TORCH_CUDA_ARCH_LIST=12.1a`** | [#two-node-vllm](#two-node-vllm) recorded the `a` suffix as "the first thing to check if a kernel misbehaves" and acted on nothing. This is the workspace where it stops being a note: the EXL3 trellis kernels are built for `sm_121a`, and Blackwell's FP4 instructions are not forward-compatible |
+| **Persisting the Triton and TileLang JIT caches on the host** | They live under `/root` on an overlay filesystem and do not survive `docker rm`. Recreating the container re-JITs mid-collective on TP=2 while the other rank waits — for long enough to trip NCCL's 600 s watchdog, which reports a **hang**, not a slow compile |
+| **`VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800`** | Same failure from the other side: EngineCore's stock 300 s is shorter than a cold JIT on two ranks, so the stock value turns a slow compile into a reported hang |
+| **`VLLM_NO_USAGE_STATS=1` / `DO_NOT_TRACK=1`** | Not a privacy gesture — a crash. The usage reporter shells out to py-cpuinfo, which returns **empty** output on Grace/aarch64 and is then JSON-parsed; the stats thread dies with `JSONDecodeError` in the middle of a healthy boot. Promoted to the shared launcher, because it is a property of aarch64 rather than of this model |
+| **`GLM53_SUPPRESS_STOPS_IN_REASONING`, `GLM53_MIXED_PREFILL_CHUNK=skip`** | Their image reads both. The first stops a client `stop` string truncating the server inside the reasoning block and returning `""` with a normal `finish_reason`; the second keeps a peer's prefill out of a step where another sequence is decoding. The second has a visible cost — concurrent cold prefills serialise — and that is the better trade than one long prefill stalling every stream |
+| **Not pinning `attention_backend` in the speculative config** | Their strongest single finding. `TRITON_ATTN` is copied from an SM120 recipe and is causal *inside* the draft block on this image: draft position 0 stays healthy, the rest collapse, structured decode goes ~62 → ~29 tok/s and acceptance 0.92 → 0.31, and nothing reports an error |
+
+### Not taken
+
+- **Their launcher's operational model.** It keeps a `.env` on each node and
+  ships inner scripts by `scp` before every start. This repo's whole argument
+  about two-node serving is that both ranks must be generated from one place
+  ([#twonode-lib](#twonode-lib)), so the flags were ported and the launcher was
+  not.
+- **`NCCL_IB_GID_INDEX=3`.** The interesting one, and the only place where
+  reading their recipe produced a **measurement on this cluster** that
+  contradicts it. They pin 3, and had to build a preflight to make the pin
+  safe, because index 3 is an all-zero entry on one card of some GB10 pairs:
+  the launch then survives every check and kills the **worker** rank about a
+  minute in with `ibv_modify_qp` errno 61.
+
+  Checked here with the `--gids` mode this prompted (`rocep1s0f0`, ACTIVE):
+  **index 3 is populated — and wrong.** It carries the *link-local* RoCE v2
+  GID. The routable one, `::ffff:192.168.100.10` with type `RoCE v2`, is
+  **index 5**. Their preflight asks only whether the entry is non-empty, so on
+  this hardware it would pass and hand NCCL a GID that cannot route between the
+  boxes.
+
+  Every IPv4 address is published **twice**, at adjacent indices, once as v1
+  and once as v2 — so choosing on the address alone picks the non-routing copy
+  half the time. That is three ways to get one integer wrong, which is the
+  argument for not choosing it by hand at all: this repo sets
+  `NCCL_IB_ROCE_VERSION_NUM=2` and `NCCL_IB_ADDR_FAMILY=AF_INET` and lets NCCL
+  select per card. `IB_GID_INDEX=` remains available for the case where a log
+  actually shows it choosing wrong, and `gx10-interconnect --gids` flags the
+  one combination that works rather than printing a table to squint at.
+- **Their CX7 interface and HCA pins**, and pointing NCCL's sockets at the
+  fabric. Same reasoning as [#nccl-socket-ifname](#nccl-socket-ifname) and
+  [#hosts-split](#hosts-split): rendezvous on the always-up management link,
+  data path chosen independently by NCCL over ibverbs. Their own "running on a
+  different kit" section is the argument for it — three of their four
+  kit-specific fixes are NIC names that this split never has to know.
+- **`NCCL_NET_PLUGIN=none`, `NCCL_CUMEM_ENABLE=0`, `NCCL_IB_MERGE_NICS=0`,
+  `NCCL_CROSS_NIC=0`, `NCCL_IGNORE_CPU_AFFINITY=1`.** Kit-specific hardening
+  with no stated measurement. [#no-speculative-roce-tuning](#no-speculative-roce-tuning)
+  applies: a knob without a number behind it is folklore we would then have to
+  maintain.
+- **`--cap-add IPC_LOCK`.** `--ulimit memlock=-1` is already the mechanism that
+  lets the queue pairs pin memory; the capability is the alternative to it, not
+  an addition. Two ways of granting the same thing is one more to reason about.
+- **`HF_HUB_OFFLINE=1`.** Correct for a launcher that guarantees the download
+  first. Ours lets the engine fetch on a cold cache like every other workspace
+  here, and `./stage-weights.sh` is the fast path rather than a precondition.
+- **Rebuilding the image.** `BUILD=1` on their side compiles ExLlamaV3 for
+  `sm_121a`. The published image is public and arm64; building it ourselves
+  would mean owning a CUDA toolchain pin for one model.
+
+### Improved on
+
+**Weight staging goes over the cable, and it is a library function.** Each rank
+loads from its own disk, so a two-node model has to land twice — and for the
+~40–100 GiB checkpoints the other workspaces run, letting each node fetch its
+own copy from the Hub is fine, which is why none of them mention it. At 164 GiB
+it stops being fine: the second copy is hours of WAN for bytes already sitting
+on a machine at the end of a link this repo has measured at 22.7 GB/s. So
+`twonode_stage_model` rsyncs `<peer>.cluster` — deliberately the interconnect
+address rather than the management NIC every other SSH in that library uses,
+because this is bulk transfer and not control traffic
+([#hosts-split](#hosts-split)).
+
+**Per-position draft acceptance became a workspace.** Their README quotes
+per-position ladders as the evidence for the `TRITON_ATTN` finding, and it is
+the only view that distinguishes a weak drafter from a broken mask. This repo
+already asserted, in three separate workspace READMEs, that a broken draft path
+"costs acceptance and nothing else" — and shipped no way to look.
+`workspaces/bench/spec-decode-accept` is that, reading `k` from the metrics so
+it covers DFlash2 (k=7) and DSpark (k=5) without configuration.
+
+**And their two ladders are why the verdict is class-aware**, which is the part
+that is easy to get wrong from a quick read of their README. Both of these are
+medians from the *same healthy server*:
+
+| Class | pos 0 → 6 | aggregate |
+|---|---|---:|
+| Structured | 0.98 0.98 0.94 0.94 0.91 0.83 0.83 | 0.92 |
+| Prose | 0.75 0.58 0.41 0.28 0.16 0.09 0.06 | 0.33 |
+
+**A healthy prose ladder collapses to 0.06 — the same shape a broken mask
+makes.** A tool that convicted on shape alone would flag every prose run on a
+working server, and a check with false positives gets muted, at which point it
+catches nothing. So a mask verdict is returned for the **structured class
+only**, and `tests/check_spec_accept.py` asserts that the published healthy
+prose ladder comes back clean — the same discipline
+[#quality-gate](#quality-gate) applies to the detectors, for the same reason.
+
+### The library grew two hooks, and they are meant to stay narrow
+
+`PRE_EXEC` and `EXTRA_MOUNTS` in `workspaces/lib/twonode.sh` exist because this
+image ships one patch it does **not** apply at build time — the video
+placeholder alignment — and a patch that must run inside the container before
+`vllm serve` cannot be expressed as an argument *to* `vllm serve`.
+
+The narrow form matters. `PRE_EXEC` does not hand the workspace the container's
+argv: the library still assembles the serve line, still generates it identically
+for both ranks, and splices the snippet in front with
+`bash -c "<PRE_EXEC>; exec vllm serve \"$@\""`. The property that stops the
+silent mismatched-rank hang is preserved, and a reader still has exactly one
+place to look for what the ranks were told. Anything reachable through
+`EXTRA_ENV` or `MODEL_ARGS` should go there instead.
+
+### The licence is not this repo's usual one
+
+The recipe is ours. The **weights are not MIT**: the EXL3/TR3 checkpoint is
+under ShapleyMCG License 1.0, and the DFlash2 drafter is **CC BY-NC-ND 4.0 —
+non-commercial, research and evaluation only**. That is a real constraint on
+what the fastest configuration here may be used for, so it is in the workspace
+README rather than only in a link, and `SPEC_METHOD=mtp` drops the drafter
+entirely at roughly 40% of the decode speed.
+
+### Recorded, not acted on
+
+Their published decode figures, for calibration rather than as a target:
+**62.9 tok/s** single-stream and **146.5 tok/s** aggregate across four streams,
+structured output, DFlash2 k=7 — against **26.9** on prose on the same server.
+That spread is the point: a single "how fast is this model" number is not
+meaningful under speculative decoding, because acceptance is a property of the
+text being generated.
+
+They also report a boot-time shape warmup (burning the DFlash2 block, sampler
+and kpool shapes after `/health` so the first client is not the first JIT on
+TP=2). Worth having if the first request turns out to be pathologically slow
+here; not ported without measuring that it is.
+
+**Everything from here down is the recipe as it stood at the first pass.** A
+second pass over the same upstream — after they spent a fortnight measuring it —
+moved two of these defaults and added a correctness fix:
+[#glm53-second-pass](#glm53-second-pass).
+
+## <a name="glm53-second-pass"></a>The second pass over the GLM recipe: the flags moved, and one of them was a correctness bug
+
+[#glm53-flash](#glm53-flash) ported that recipe as it stood. Upstream then spent
+a fortnight measuring it, and the result is unusually worth re-reading: most
+recipe repositories accrete knobs, and this one accreted *receipts* — a P0
+profile, four A/B rungs with keep/revert verdicts on each, and two of its own
+proposals reverted after they lost. A recipe that publishes its failed
+experiments is a better source than one that publishes only its settings, and
+three of the changes below exist because somebody measured a thing this repo
+had assumed.
+
+The pass also changed two of our defaults and added the only third-party file
+this repo vendors.
+
+### `--max-num-batched-tokens` was 1024 here for the wrong reason
+
+The original port carried 1024 across with the note that 8192 crashes a long
+prefill — which is true, and is a hardware limit on the GB10 indexer top-k's
+shared memory. What it did not say, because upstream had not said it either, is
+that 1024 was never *chosen*. It was the value on the far side of a ceiling
+nobody had walked up to.
+
+The published ladder, cold prefill, one request at a time, `prompt_tokens` from
+the server's own usage block, unique salt so the prefix cache cannot cheat:
+
+| MNBT | 8k | 16k | 100k | verdict |
+|---|---:|---:|---:|---|
+| 1024 | 772 | 893 | 947 | baseline |
+| **2048** | **895** (+16%) | **953** (+7%) | **975** (+3%) | **keep** |
+| 3584 | 777 (−13%) | 950 | 929 (−2%) | revert |
+| 4096 | 755 (−16%) | 948 | 987 (+4%) | revert |
+
+`2048` is now this workspace's default. The interesting row is **3584**, and it
+is interesting because it is the one a reasoning-from-first-principles argument
+picks: 3584 is the hybrid page (4×896), so chunk boundaries land exactly on
+prefix-cache page boundaries instead of straddling them. It lost anyway. The
+reason is on the other side of the model — at a 1024-token chunk the hottest
+routed expert is already in top-8 for ~90% of the tokens in it, so a larger
+chunk makes the fat-expert fallback hotter, and the `LinearEXL3` reconstruct
+loop it falls into costs more than the saved chunks are worth.
+
+The alignment argument was not wrong; it was outweighed, and there is no way to
+know that without running it. Which is the general point worth keeping: **an
+alignment argument is a hypothesis, not a result.**
+
+The cost of 2048 is real and it is not throughput. With
+`GLM53_MIXED_PREFILL_CHUNK=skip` a prefill chunk is a step no decoder gets, so
+doubling the chunk doubles the worst-case stall a streaming client sees while
+somebody else's prompt goes in. That is the trade, stated so it can be taken the
+other way; `ws up vllm-prefill-ladder` is how you re-take the table.
+
+### The K-pool tail overrun, and the first file this repo vendors
+
+Upstream landed a patch that clamps the slot-mapping index to the request's
+block-table row. The mechanism:
+
+`KpoolTailSpec` is a **one-block circular scratch** cache — its block-table row
+is a single entry. Slot mapping still runs the generic paged Triton kernel,
+which computes `block_indices = pos // block_size` and loads
+`block_table[req, block_indices]`. The mask guards token validity and nothing
+bounds the index against the row width, so for the tail group every token at
+`pos >= block_size` reads past that one entry and the kpool seed/update kernels
+then write through whatever block id came back.
+
+The symptom is the part that matters here. Most overruns land **inside the
+shared pool**, so nothing faults: another layer's indexer is corrupted instead,
+on generations of roughly 2k tokens and up. A request that finished is not
+evidence its writes were in bounds.
+
+Everything else this workspace needs is already applied inside the overlay
+image, so `up.sh` re-runs the image's patches only as a cheap repair and skips
+any the image has dropped. This one postdates the published `:exl3` tag, which
+makes `[ -f /opt/glm53/… ] || true` exactly the wrong shape: an image without
+the file would skip a correctness fix **silently**, which is the failure the fix
+exists to prevent.
+
+So `patch_kpool_tail_slotmap.py` is vendored into the workspace (MIT, upstream
+`overlay/`), staged to a fixed path on both nodes so the mount string is
+identical on both ranks, and run inside the container as a **mandatory** step —
+if it does not apply, the container exits. `--restart unless-stopped` then loops
+it, which is noisy on purpose: `docker logs` names the reason on every attempt,
+and a loud restart loop is cheaper than a server quietly corrupting its own
+indexer. `up.sh` also refuses to start at all if the peer copy fails, because
+half the ranks clamped and half not is worse than neither.
+
+This repo vendors nothing else, and the bar for the next one should stay here:
+a correctness fix, fail-closed, idempotent, that the upstream artefact does not
+carry.
+
+### The drafter shards now, and that is a memory decision
+
+`draft_tensor_parallel_size` went 1 → 2. Upstream's own evidence is weak on its
+face — idle prefill and both decode classes *held* against rank-0-only, which is
+a no-regression result rather than a win — and on most workspaces that would not
+be enough to change a default. Here it is, for a reason their note does not
+give:
+
+**vLLM sizes one KV pool for the whole server.** A ~2.3 GiB drafter parked
+entirely on rank 0 does not cost rank 0 2.3 GiB; it costs *both* nodes 2.3 GiB,
+because the pool is bounded by the tighter rank. Sharding it hands ~1.15 GiB
+back to a KV budget of about 19 GiB — the smallest in this repo, on the
+workspace where memory is the binding constraint and everything else is
+downstream of it.
+
+So the memory argument carries it and the latency evidence only has to show no
+harm — which it does: their A/B has idle cold prefill going 895 → 938 tok/s at
+8k and 975 → 997 at 100k with both decode classes unchanged, and they still
+describe the result as *held* rather than as a win. Reading it as a speed
+finding would be over-reading one boot; reading it as "no harm, and ~1.15 GiB
+of KV back" is what the numbers support. `DRAFT_TP=1` rolls it back if a draft
+step ever shows up as latency on a cable that is busy with something else.
+
+### Bearer auth belongs to the library, and it goes in the environment
+
+vLLM reads `VLLM_API_KEY` natively as the fallback for `--api-key`. That is not
+a stylistic preference between two ways of passing a secret: `--api-key <token>`
+puts it in argv, which means `ps`, the container's command line, and the
+`non-default args` line vLLM logs at every boot. The environment variable puts
+it in none of them.
+
+It went into `workspaces/lib/twonode.sh` rather than the GLM workspace, on the
+same reasoning as `VLLM_NO_USAGE_STATS` before it ([#glm53-flash](#glm53-flash)):
+it is a property of vLLM, not of this model. Empty stays the default — these
+servers listen on a private cluster and every workspace here assumes that — and
+the bench workspaces read the same value from `API_KEY`.
+
+### Two knobs recorded as knobs, not as advice
+
+- **`CG_ESTIMATE`** (`VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS`). vLLM subtracts
+  a *predicted* CUDA-graph footprint from the KV pool before capturing; where
+  the prediction overshoots, `0` hands that memory back with graphs still on.
+  Upstream ships it defaulted to the upstream value and publishes no delta. It
+  is exposed here at that same default and named in `.env.example`, because on
+  the workspace with the least headroom in the repo a knob that returns KV is
+  worth knowing about — and because guessing at an under-estimate on *this*
+  workspace is how you turn a served model into a startup memory failure.
+- **`EXL3_MOE_ROW_TILE` and `EXL3_TEMP_ROWS_FUSED`** are *not* exposed, and that
+  is the finding rather than an omission. Upstream proposed both as the fix for
+  the fat-expert fallback, implemented both, measured both, and reverted both:
+  GPU row-tiling cost −61% at 8k, and raising the fused temp rows to 1024 cost
+  −13% to −24% across the ladder. Recording a negative result is worth more here
+  than shipping the knob, because the knob's name makes it sound like a free win.
+
+### The boot-shape warmup got ported, default off — which is the earlier decision resolved, not reversed
+
+[#glm53-flash](#glm53-flash) recorded the warmup as "worth having if the first
+request turns out to be pathologically slow here; not ported without measuring
+that it is." That is still the right test and it still has not been taken, so
+`warmup.sh` ships as a separate script that nothing calls automatically. What
+changed is that the script stopped being plumbing and became three pieces of
+knowledge worth having on disk even unused:
+
+- **The BLOCK ladder is model-specific arithmetic.** This image sizes the draft
+  block as `min(256, next_pow2(scheduled_tokens + 1 + k))`. At k=7 that is +8, so
+  **BLOCK 8 is unreachable** — the smallest schedule is one token, which is 9,
+  which rounds to 16. A DSpark recipe's ladder is built on `next_pow2(s + 6)`;
+  copying it warms shapes this server never asks for and misses the ones it does.
+- **The sampler compiles three variants and the obvious warmup hits one.** The
+  top-k/top-p kernel specialises on which tensors are `None`. This checkpoint's
+  `generation_config.json` stamps `top_p=0.95`, so a request that sets only
+  `top_k` still arrives with a p tensor and compiles `k+p` — the `k-only`
+  variant is unreachable by any natural request. `top_p=1.0` and `top_k=0` are
+  the only way to ask for the other two on purpose.
+- **A rung that is not tokenize-verified warms the wrong block and reports
+  success.** One token of tokenizer drift pushes `s` past a power of two.
+
+And the postcondition is the part that makes it a check rather than a hope:
+every warmup request can return 200 while a variant was never compiled, because
+the arm took a path that already had a cache entry. The only direct evidence is
+the Triton cache itself — one `.ttir` per compilation, and which of `%K` / `%P`
+it references says which combination it was built for.
+
+What would flip it on: a measured first-request latency here that a second
+identical request does not have.
+
+### The cold-prefill protocol became a workspace, and the reason is one number
+
+`workspaces/bench/vllm-prefill-ladder`. Every bench in this repo measured
+**decode** — `vllm-bench-serve` throughput, `spec-decode-accept` the drafter —
+and on a long-context server that is not where the time goes. A 100k-token
+prompt spends ~100 s in prefill before emitting a character.
+
+The reason it is a *check* and not a stopwatch is a failure upstream documented
+against itself: rerunning a "cold" ladder without changing the prompt took TTFT
+from **10.3 s to 1.9 s**. Every serving workspace here runs with
+`--enable-prefix-caching`, so the second send of a prompt is not a prefill at
+all — and a 5× improvement produced by nothing looks exactly like an
+optimisation that worked. This is the most efficient way there is to convince
+yourself a flag helped.
+
+Two things port from their protocol and one is a detail people get wrong:
+
+- **The salt goes first.** Prefix caching hashes a *prefix*, so a salt appended
+  at the end shares every preceding block with the last run and the request is
+  cold in name only. Ahead of the shared text, the first block differs and
+  nothing after it can match.
+- **The counters decide, not faith.** `vllm:prefix_cache_hits_total` is read
+  before and after every request; a cold rung reporting any hits is `INVALID`,
+  not fast. `prompt_tokens` comes from the server's `usage` object rather than
+  an estimate, so two runs of "the same" ladder are the same amount of work.
+
+**And reuse is reported against a page model rather than as a percentage**,
+which is where this repo added something. Hits are block-aligned: a 7.7k-token
+conversation reuses `floor(7717/3584) × 3584 = 7168` tokens and computes the
+remainder on every turn. Their published follow-up rows are **7168 / 10752 /
+14336** hits at 8k / 12k / 16k — exactly two, three and four whole pages, which
+is the strongest available evidence that the page model is the right model at
+all, and it is the fixture the offline test asserts against. "93% hit" reads as though 7% is being lost and sends
+somebody looking for it; `hit_efficiency` — measured over what the page model
+*allows* — reads 1.00 and says the true thing. When it is not 1.00 the tool
+prints the page sizes **consistent with the observation, as a set**, because one
+sample genuinely cannot separate 3584 from 896 and naming one would be a guess
+wearing a measurement's clothes.
+
+`tests/check_prefill_ladder.py` holds the published healthy ladder as a fixture
+that must come back clean, for the same reason [#quality-gate](#quality-gate)
+and [#glm53-flash](#glm53-flash) do: a check that fires on a working server gets
+muted, and a muted check catches nothing.
+
+### Their GID handling moved toward ours, and the earlier finding stands
+
+[#glm53-flash](#glm53-flash) declined `NCCL_IB_GID_INDEX=3` and recorded a
+measurement that contradicted it: on this hardware index 3 is *populated and
+wrong* — it carries the link-local RoCE v2 GID, while the routable
+`::ffff:192.168.100.10` is index 5. Their preflight asked only whether the entry
+was non-empty, so it would have passed here and handed NCCL an unroutable GID.
+
+They have since split the pin per rank (`HEAD_GID` / `WORKER_GID`), which fixes
+the case where two cards need different indices. It does not change the reading
+above: the preflight still only tests non-empty, so it still passes on an entry
+that cannot route. Every IPv4 address is published twice at adjacent indices,
+once as v1 and once as v2, and there is no way to distinguish them by emptiness.
+
+So the decision holds — `NCCL_IB_ROCE_VERSION_NUM=2` plus
+`NCCL_IB_ADDR_FAMILY=AF_INET`, and NCCL selects per card — and
+`gx10-interconnect --gids` remains the tool that names the working combination
+rather than printing a table to squint at. Worth recording that upstream moved
+in the same direction, from a different starting point.
+
+### Not taken, second pass
+
+- **The ABLIT overlay.** Upstream restored an opt-in load-time hook that edits
+  `self_attn.o_proj` at weight load along a published refusal direction — an
+  abliteration, defaulted off on their side. Not ported. It is not a serving
+  capability and it is not what this repo is for: everything else in
+  `workspaces/` makes a model run on this hardware, and none of it changes what
+  the model will say. Somebody who wants it can run their image with `ABLIT=1`;
+  it does not need to be a flag in a cluster recipe.
+- **`MODEL_FALLBACK` and `HF_HUB_OFFLINE=1`.** Both are correct for a launcher
+  that guarantees the download itself. Ours lets the engine fetch on a cold
+  cache like every other workspace here, with `./stage-weights.sh` as the fast
+  path rather than a precondition — unchanged from the first pass.
+- **The P3–P8 improvement plan** (KDA autotune, a dense short-context MLA path,
+  fp8 for the non-routed GEMMs, a second CX7 rail, UMA KV offload). Upstream
+  stopped after P2 and says so. Every one of those is a change to the image or
+  the hardware rather than to a recipe, and this repo does not build the image.
+
+### Recorded, not acted on
+
+Their P0 profile, because it changes what a slow prefill *means* here and would
+otherwise have to be re-derived:
+
+| Where a 1.08 s prefill chunk goes | Share |
+|---|---:|
+| MoE forward (fused `exl3_moe` + fat-expert `LinearEXL3` loop + scatter) | **63%** |
+| `aten::mm` — shared experts, dense, lm_head | 10% |
+| NCCL all-reduce over the cable | 7% |
+| KDA / GDN scan, 34 layers | ~6% |
+| Sparse MLA prefill + indexer, 11 layers | 4% |
+
+The instinct on a two-node server is that the cable is the problem. It is 7%.
+The MoE is nearly two thirds, of which a large part is a **host sync** —
+`.nonzero().tolist()` in the fat-expert fallback, 29% of CPU time in one capture
+— and that combination is memory-bound rather than compute-bound: ~34 TFLOPS
+combined, about **14% of the two GB10s' BF16 peak**. There is headroom in this
+model on this hardware, and it is not on the interconnect.
+
+Also recorded: their aggregate prefill figures at the ladder's winning setting
+(~895 tok/s at 8k, ~975 at 100k, ~941 at 300k), for calibration when
+`ws up vllm-prefill-ladder` is first run on this cluster.
 
 ## <a name="quality-gate"></a>"Is it up" and "is it fast" are not "is it right", so there is a third check
 
@@ -1408,3 +1921,276 @@ use to ask "is anything running on this node?" is the signal that is broken.
 The `on-GPU` row is the cross-check: it reads `idle, no GPU procs` from
 `--query-compute-apps`, which stays honest because per-process accounting is
 unaffected.
+
+## <a name="storage-classes"></a>Disk pressure is a classification problem, not a `df` problem
+
+`gx10-status` already printed free space and the size of the HF cache. That
+looked like enough until the numbers were added up on odysseus at 660 GB used:
+
+| | measured |
+|---|---|
+| `~/.cache/huggingface` | 175 GB — the only line `gx10-status` showed |
+| `/var/tmp` | 303 GB — training checkpoints |
+| `/var/lib/apport` | 63 GB — core dumps |
+| `/var/lib/docker` | 44 GB |
+
+**485 GB was invisible.** Not hidden — just in directories nobody `du`s, none of
+which `hf cache scan` can see, because they are outside the HF cache by
+definition. The tool that was missing is not another `df` wrapper.
+
+### The class is the product
+
+The obvious design is "rank directories by size and offer to delete them", and
+it is wrong here, because the largest thing on the disk is almost always the
+thing you must not touch. So every row `gx10-storage` prints carries a class,
+and the class — not the size — decides what `--reclaim --apply` may remove:
+
+| class | may `--apply` remove it? | why |
+|---|---|---|
+| `weights`, `job` | **no** | expensive to re-fetch, and a script cannot know you are done with it |
+| `image` | **no** | a docker image built here exists in no registry — `docker pull` cannot undo the delete |
+| `crash`, `cache`, `system` | yes | regenerable by definition — deleting one costs a recompile or a re-pull |
+| `fixed` (swap) | never a candidate | reported only so the arithmetic adds up |
+
+`hf cache delete` is interactive for exactly this reason, and this tool inherits
+the stance. A tool that frees 300 GB by deleting a checkpoint you had not
+finished with is not a tool, it is an incident.
+
+### Weights are detected by content, not by location
+
+The 303 GB in `/var/tmp` is model data that no weight-aware tool could see,
+because "model weights live in the HF cache" is an assumption, not a fact. So
+the scan looks for `*.safetensors`, `*.gguf`, `*.pt` and `pytorch_model*.bin`
+under the places jobs actually write — `/var/tmp`, `/opt`, `~/models`, `/raid`,
+`/mnt`, `/srv` — and classes whatever holds them as `weights` wherever it sits.
+
+Hits roll up to the topmost directory inside the scanned root, because reporting
+40 shard directories separately is a list, not an answer. That rollup is
+**relative to the root, not a fixed component count**: the first version kept
+four path components, which is right for `/var/tmp/<job>/<shards>` and silently
+wrong for every other root — and silently wrong rather than empty, which is the
+worse failure. `tests/check_storage.py` asserts the rollup for this reason.
+
+### It states what it could not explain
+
+The report ends with `accounted for: 604 GB of 706 GB used (102 GB elsewhere)`.
+That line is not politeness. A report that silently explains 60% of a disk sends
+you looking in the wrong place with full confidence — which is precisely the bug
+that made this tool necessary. The same rule governs unreadable directories: with
+no passwordless sudo the root-owned rows are labelled **UNMEASURED, not zero**,
+because a 63 GB directory reported as `0 GB` because `du` could not open it is
+the exact silent-wrong-answer this repo keeps finding on this hardware.
+
+### `docker system prune -af` was in the auto tier, and that was a bug
+
+It shipped that way and was wrong within the hour. Running it on this cluster
+found three of six images — `ar-deberta:ctl`, `ar-deberta:spark`,
+`split-inference:spark`, 65 GB — built locally and pushed nowhere. "Regenerable"
+was doing unearned work: a *cache* is regenerable by a command, whereas those
+are regenerable only if the Dockerfile still exists and you have an hour, which
+is not the promise the `cache` class makes.
+
+`RepoDigests` is the exact discriminator and the name is not. An image ever
+pulled from or pushed to a registry has one; a `docker build` output has none.
+`ar-deberta:spark` is indistinguishable from a public image by its tag alone, so
+any heuristic on the string would have kept the bug.
+
+So the docker row is now classed by what is actually in it: `cache` when every
+unused image can be re-pulled (a prune then costs a download), `image` — held
+back, never automatic — the moment one cannot. The build cache is split into its
+own row and stays in the plan either way, because that genuinely is regenerable
+by a command.
+
+The general lesson, which is why this is written down rather than just fixed:
+**"can a script recreate this" is the question, not "is this an artifact".** Both
+of the categories this tool holds back — weights and locally-built images —
+failed that test while looking like caches.
+
+### It shares the models role's floor
+
+`gx10-storage` compares free space against `model_min_free_gb` — the same number
+`roles/models` projects against before it will download anything. Two thresholds
+would eventually disagree, and the failure mode of that is `make models`
+refusing to run right after a storage tool said there was plenty of room.
+
+### The docker row uses docker's figure, not the directory's
+
+`/var/lib/docker` is 44 GB on disk and only 20 GB of that is reclaimable —
+running containers are using the rest, and `prune` will not touch it. Planning
+around the directory size promises space that cannot be returned. The cost is
+one visible inconsistency: docker reports SI GB and everything else here is
+binary, so the row can print one GB below what `docker system df` says. Byte
+correctness wins, because the byte count is what the floor arithmetic needs.
+
+### Two hardware-specific findings that came out of building it
+
+**A core dump is a RAM image, and RAM here is 121 GB.** Measured: five cores in
+`/var/lib/apport/coredump` totalling 62 GB, the largest **41 GB**, from a
+crashed `python3.12`. On a normal server a core dump is an annoyance; on unified
+memory it is a full-size copy of the model you were serving, written to the same
+NVMe that holds the weights *and* the swap file. `ulimit -c` says `0` and is
+irrelevant — that is the login shell's soft limit, while systemd's
+`DefaultLimitCORE` is `infinity` and what crashes here is a unit or a container.
+Apport ages them out after `3d`, so it is not a leak: it is three days of the
+disk being smaller than you think, starting the moment something OOMs. Related:
+[persistence-latch](#persistence-latch), which is what the *same* OOM kill
+leaves behind on the GPU.
+
+**`/var/tmp` never expires.** Ubuntu ships
+`#q /var/tmp 1777 root root 30d` — commented out — in
+`/usr/lib/tmpfiles.d/tmp.conf`. Anything a job leaves there is permanent, and it
+is the natural place for a run to write checkpoints. The repo does **not** ship a
+drop-in to enable that rule: a timer that deletes files under a long training run
+is a policy decision for whoever owns the box, so
+[manage-storage](runbooks/manage-storage.md#var-tmp) gives the one-line command
+and says plainly when not to run it.
+
+### What was not done
+
+**No daemon, no exporter, no history.** Same bargain as `gx10-status`: on
+unified memory every resident MB is model capacity. Disk pressure also moves in
+hours, not seconds, so `make verify` asserting the floor and a script you run
+covers it. If you want it in Prometheus, `node_exporter` already exports
+`node_filesystem_avail_bytes` — what it cannot export is the *class*, which is
+the half that matters.
+
+**Both verify checks are `required: false`.** A box deliberately packed with
+weights is full, not broken. Failing the whole health check for that would train
+people to ignore `make verify`, which costs more than the warning is worth.
+
+## <a name="nemotron35-lightning"></a>Nemotron 3.5 Lightning: the checkpoint that proved "SGLang cannot serve NVFP4" was a claim about the wrong noun
+
+[MiaAI-Lab/Nemotron3.5-Lightning-DGX-Spark-RTX-5090-6000-PRO](https://github.com/MiaAI-Lab/Nemotron3.5-Lightning-DGX-Spark-RTX-5090-6000-PRO)
+is the third published DGX Spark serving configuration this repo has taken
+from, after [#two-node-vllm](#two-node-vllm) and
+[#dspark-1m-recipe](#dspark-1m-recipe). It is also the first one that made this
+repo **delete** something it had written down as a fact.
+
+### The correction, which is the most valuable thing in the port
+
+[workspaces/README.md](../workspaces/README.md) carried a matrix row saying
+**SGLang cannot run NVFP4**, with a reason: a quantised `lm_head`. That
+observation was real — it was measured on `unsloth/Qwen3.8-27B-NVFP4`, and
+`sglang-qwen3.8-27b-gguf` exists because of it. What was wrong was the *noun*.
+It is a property of **that checkpoint**, not of the engine, and the matrix
+stated it as an engine capability.
+
+NVIDIA's `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4` has day-0 SGLang
+support on GB10, with a published operating point and a measured allocation
+table. Both halves of the row are now true at once, so the matrix says
+**checkpoint-dependent** and names both cases.
+
+The general lesson, which is why this is a section and not a one-line diff:
+**a negative result measured on one checkpoint is not a capability claim about
+an engine.** This repo's matrix is one of its most-read tables, and it was
+confidently steering people away from a configuration that works.
+
+### Two workspaces for one model, and the split is about what can be measured
+
+| | `sglang-nemotron35-lightning-nvfp4` | `vllm-nemotron35-lightning-nvfp4` |
+|---|---|---|
+| Provenance | the published DGX Spark operating point, with the allocation table behind it | a published DGX Spark vLLM run, plus this repo's conventions |
+| Context | the full **1M** window, as measured | 256K by default |
+| Image | `lmsysorg/sglang:dev-…` — a **dev** tag | `vllm/vllm-openai:v0.27.1` — a **release** tag |
+| Acceptance | accept **length** only | the **per-position ladder** |
+| Bench + gate workspaces | partial | all of them |
+
+Not a preferred and a fallback. This is a model with **three** published
+drafters, and choosing between them is a measurement problem — which is
+exactly the half SGLang cannot instrument. So: SGLang to run it the way its
+authors published it, vLLM to find out *why* a speculator is underperforming.
+
+### Taken
+
+| From them | Why it matters |
+|---|---|
+| **The DGX Spark operating point** — `--mem-fraction-static 0.78`, `--cuda-graph-max-bs-decode 4`, `--speculative-dspark-block-size 3`, `--mamba-ssm-dtype float16` | The only published GB10 configuration with an allocation table behind it: ~4.93M pool tokens, ~14.1 GiB of FP8 KV, 48 concurrent, ~1,048,570 max input |
+| **The hybrid KV arithmetic**, and that it makes 1M affordable | 52 layers = 23 Mamba-2 + 23 MoE + **6** attention. Only those six pay a growing per-token K/V cost; the mamba state is a fixed 716 MiB. This is the *second* model here where a large fixed floor plus a small slope inverts the usual tuning move ([#glm53-flash](#glm53-flash) was the first) |
+| **That the draft model keeps its own separate KV cache** — bf16, ~28.2 GiB | The **largest single allocation in the server**, larger than the 30B target it drafts for. The drafter is **1.3 GB on disk** against the target's 21.6 GB (HF API), so this is the sharpest example in the repo of download size failing to predict footprint. It reframes `SPEC_METHOD=none` from "give up speed" to "recover 28 GiB" — the right first move when the pool binds, ahead of a lower `mem-fraction-static` |
+| **Every capacity number is a startup-time outcome, not a constant** | Pool size, KV size and `max_running_requests` are all derived at boot from a fraction of whatever was free. Their `get_server_info` recipe became `./report.sh`, so nobody quotes the reference kit's numbers as if they were their own |
+| **The per-GPU `mem-fraction-static` table** | The same fraction means a fraction of *that* card's memory. Kept because this repo's recipes get copied to other hardware, and 0.78 on a 32 GiB card OOMs at startup |
+| **Prefill is chunked at 8192**, so TTFT grows with prompt size and decode does not | Stops a long-prompt first-token delay being diagnosed as a slow model |
+
+### Taken from the wider sources, not from their repo
+
+| | |
+|---|---|
+| **The three speculators, ranked by measurement** — `none` 81.3, `dflash` 95.5, `mtp` 111.4, `dspark` **124.2** tok/s single-stream on a DGX Spark | Their repo ships DSpark only. The ranking is what makes the choice a decision rather than a default, and `mtp` is the interesting row: +37% with **no second checkpoint and no extra KV** |
+| **`--moe-backend marlin`** | The model card's own hardware table gives native FP4 tensor-core execution to **GB200** and lists DGX Spark under **Marlin**, a W4A16 kernel. This repo says "NVFP4 is the format this hardware exists for" in several places; on `sm_121` that is a claim about **footprint**, and this is the card that says so |
+| **`num_speculative_tokens` 3, not 7** | Measured better than 7 for single-stream use on this box. [#dspark-1m-recipe](#dspark-1m-recipe) already recorded what inheriting a `k` from a model card costs |
+| **`--enable-metrics`** | SGLang serves no `/metrics` without it, so `spec-decode-accept` would report a healthy DSpark server as having no speculative decoding. A wrong answer wearing the costume of a finding is the exact failure that tool exists to avoid |
+| **Block size is gamma, not the verify window** | SGLang's own help: the window is `gamma + 1`. Block size 3 drafts three and verifies four — so the "k" printed by the acceptance probe and the number in the flag are deliberately one apart |
+
+### Not taken
+
+- **Their snapshot-path resolution.** `start.sh` resolves
+  `~/.cache/huggingface/hub/models--…/snapshots/<hash>` on the host and passes
+  the container path, for both the target and the draft. It exists to keep the
+  container off the network; the bind-mounted cache already achieves that, and
+  SGLang resolves a Hub id itself. The cost of keeping it is a launcher that
+  breaks whenever a second snapshot lands in the cache — `ls | head -1` picks
+  one arbitrarily.
+- **The host-RAM hard floor at 80 GiB and warning at 110 GiB.** The same
+  question is already asked, better, by `ws check`: `MemAvailable` is what a
+  server can actually claim, and `MemTotal` on a box running a desktop session
+  says a machine qualifies that does not
+  ([#workspaces](#workspaces)).
+- **`--network host` as the only option.** Kept for SGLang, which the upstream
+  recipe launches that way, but the vLLM sibling publishes a port instead —
+  this repo already has seven serving workspaces on distinct ports and host
+  networking makes port collisions invisible until two of them are up.
+- **The `.sglang.pid` / `.sglang.log` files.** A container id in a dotfile
+  next to the recipe duplicates what `docker ps` already knows and goes stale
+  the moment anything else removes the container. A stable `--name` gives
+  `docker logs -f ws-sglang-nemotron35` for free.
+- **Their sampling parameters as *the* answer.** They publish 0.6 / 0.95 /
+  top_k 20 / repetition_penalty 1.08; NVIDIA's model card and the NeMo cookbook
+  publish **1.0 / 0.95**. Both are cited in both workspaces, with NVIDIA's as
+  the default because it is the model author's number and the one the published
+  evaluations were run at. Averaging two disagreeing published sets is how a
+  recipe ends up matching neither.
+
+### Improved on
+
+**The acceptance probe now knows which engine it is talking to.**
+`spec-decode-accept` was written against `vllm:spec_decode_*` and would have
+read an SGLang server as having no speculative decoding at all. It now detects
+the engine before generating anything, and on SGLang degrades to accept length
+with the comparable ratio derived as `(length − 1) / k`.
+
+The important half is what it refuses to do. SGLang publishes no per-position
+counter, so the **`mask` verdict is unreachable** on that path, and
+`tests/check_spec_accept.py` asserts that at four different accept lengths. A
+degraded path that degrades *silently* would return a confident verdict about a
+shape it never measured — strictly worse than not running, and the same
+discipline that already stops a healthy prose ladder convicting a server.
+
+**Both engines' recipes are in one repo with one bench toolchain.** Upstream is
+a two-script repo for one engine; the value that could not be copied was the
+comparison, which needs both servers behind the same probe.
+
+### Recorded, not acted on
+
+- **W4A16 quantisation of the draft head.** Upstream reports it cuts the
+  drafter's memory footprint and per-step latency *without hurting acceptance
+  rate*, and says it matters most on memory-constrained parts — which is
+  exactly this box, where the draft KV is the largest allocation. Not adopted
+  because no published DGX Spark configuration shows the flag, and inventing
+  one for the single largest allocation in the server is not the place to
+  guess. If a quantised-draft checkpoint appears, this is the first thing to
+  try.
+- **DSpark wins on throughput *and* latency**, which is unusual — speculative
+  decoding normally trades the first for the second. Worth re-testing on a
+  non-code workload before treating it as general: the published comparison is
+  code generation with thinking off at a 64K window, and acceptance is a
+  property of the text ([#dspark-1m-recipe](#dspark-1m-recipe) recorded the
+  same caveat from the other direction).
+- **`--reasoning-parser` is `nemotron_3` in SGLang and `nemotron_v3` in vLLM.**
+  Neither is a typo. Copying one into the other fails at startup, which is the
+  good outcome; the bad one would be a parser that loads and silently returns
+  reasoning as content.
+- **Ollama serves this model too**, from a GGUF Q4_K_M build, at 71.7–87 tok/s
+  with `draft_num_predict 2` built in. Not made a workspace: `roles/ollama`
+  already installs it and this repo's ollama story is "quickest, good for chat"
+  ([serve-models](runbooks/serve-models.md)). Recorded because it is the
+  cheapest way to try the model before committing ~94 GiB to it.

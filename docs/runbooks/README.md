@@ -16,6 +16,7 @@ table. If you worked something out at 2am, it belongs here.
 | Spin up inference, Ray or RL environments | [workspaces](workspaces.md) |
 | **Serve one model across BOTH nodes** | [two-node-serving](two-node-serving.md) |
 | Download or clean up model weights | [manage-models](manage-models.md) |
+| Work out where the disk went, and get it back | [manage-storage](manage-storage.md) |
 | Run a job across both nodes | [run-distributed](run-distributed.md) |
 | Measure the cluster and prove it performs | [benchmark](benchmark.md) |
 | See what the machine is doing | [monitoring](monitoring.md) |
@@ -54,11 +55,18 @@ fixes it. Otherwise:
 | Unsure whether a model fits before downloading it | [capacity-planning](capacity-planning.md) |
 | Throughput collapses as concurrency rises | [capacity-planning](capacity-planning.md) — you are measuring preemption |
 | A two-node server hangs at init, or is quietly on TCP | [two-node-serving](two-node-serving.md#the-three-things-that-fail-quietly) |
+| `ibv_modify_qp` errno 61 on the *remote* rank, ~60 s in | [two-node-serving](two-node-serving.md#gid-index) — a pinned GID index |
+| Correct output at half the expected speed | [two-node-serving](two-node-serving.md#failure-modes) — the draft path, not the hardware |
 | Memory is gone right after a reboot | [reboot-recover](reboot-recover.md) — a container restarted itself |
 | `Attempting to decrypt but no vault secrets found` | [manage-secrets](manage-secrets.md) |
 | A `local.yml` or vault override does nothing | [manage-secrets](manage-secrets.md) — the directory form |
 | Collectives hang after adding a node | [add-a-node](add-a-node.md) — ufw on the *other* nodes |
 | `No space left on device` pulling weights | [manage-models](manage-models.md#failure-modes) |
+| Free space did not return after deleting a big file | [troubleshoot](troubleshoot.md#disk) — a process still holds the descriptor |
+| The disk is full and `du ~/.cache` does not explain it | [manage-storage](manage-storage.md) — 485 GB of it was outside `$HOME` |
+| Tens of GB appeared in `/var/lib/apport` | [manage-storage](manage-storage.md#core-dumps) — a core dump here is a RAM image |
+| `/var/tmp` is enormous and nothing ever clears it | [manage-storage](manage-storage.md#var-tmp) — Ubuntu ships that rule commented out |
+| `make verify` says the disk is under the model floor | [manage-storage](manage-storage.md) |
 | The models role aborts before downloading anything | [manage-models](manage-models.md#the-disk-guard-projects-it-does-not-check-a-floor) |
 | 401/403 downloading a model | [manage-models](manage-models.md#gated-models) |
 | A distributed job hangs before step 1 | [run-distributed](run-distributed.md#hangs-before-the-first-step-in-detail) |

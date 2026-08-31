@@ -1,0 +1,59 @@
+# Nemotron 3.5 Lightning 30B-A3B NVFP4 + DSpark on a single GB10, under vLLM.
+#
+# Flags follow the published DGX Spark run linked in workspace.yml, cross-checked
+# against NVIDIA's model card. Where a value differs from the SGLang sibling the
+# comment says why - they are different engines, not a preferred and a fallback.
+#
+# `up.sh` next to this file computes ${SPEC_FLAG} and then calls compose, so
+# `ws logs` and `ws down` still work through the same project name. The
+# speculator cannot live in this file as a literal: three drafters take three
+# different JSON shapes and one of them is "no flag at all", and a compose
+# `command:` cannot branch.
+services:
+  vllm:
+    # A RELEASE tag, deliberately, where the SGLang sibling takes a `dev-` one.
+    # NVFP4 + DSpark for this checkpoint is in 0.27.x, so there is no reason to
+    # take the nightly here - and a release tag cannot be rebuilt under you.
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.27.1}
+    container_name: ws-vllm-nemotron35
+    restart: unless-stopped
+    runtime: nvidia
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+      - HF_HOME=/hf
+      # Not used at TP=1, but vLLM still initialises NCCL. Same reason
+      # /etc/nccl.conf does it (docs/decisions.md#nccl-socket-ifname).
+      - NCCL_SOCKET_IFNAME=${MGMT_IFACE:-enP7s7}
+    volumes:
+      - ${HF_HOME:-${HOME}/.cache/huggingface}:/hf
+    ports:
+      - "${PORT:-8895}:8000"
+    shm_size: ${SHM_SIZE:-16g}
+    ipc: host
+    command: >
+      --model ${MODEL:-nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4}
+      --served-model-name ${SERVED_NAME:-nemotron-3.5-lightning}
+      --host 0.0.0.0
+      --port 8000
+      --tensor-parallel-size 1
+      --moe-backend ${MOE_BACKEND:-marlin}
+      --mamba-backend ${MAMBA_BACKEND:-flashinfer}
+      --mamba-cache-mode ${MAMBA_CACHE_MODE:-align}
+      --kv-cache-dtype ${KV_CACHE_DTYPE:-fp8}
+      --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION:-0.80}
+      --max-model-len ${MAX_MODEL_LEN:-262144}
+      --enable-prefix-caching
+      --reasoning-parser ${REASONING_PARSER:-nemotron_v3}
+      --tool-call-parser ${TOOL_CALL_PARSER:-qwen3_coder}
+      --enable-auto-tool-choice
+      ${SPEC_FLAG:-}
+    healthcheck:
+      # /health, not /v1/models: the latter answers before the weights finish
+      # loading. ~2 minutes of engine init is normal here, and the DSpark
+      # verify buffers are allocated on the FIRST REAL REQUEST rather than at
+      # boot - so a healthy start is not yet proof it will hold under traffic.
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: ${START_PERIOD:-15m}

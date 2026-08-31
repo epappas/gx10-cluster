@@ -1,0 +1,581 @@
+#!/usr/bin/env bash
+# Managed by gx10-cluster ansible (roles/monitoring). Local edits overwritten.
+#
+# Where the 916 GB went, and which of it you can get back.
+#
+# gx10-status already prints free space and the size of the HF cache. On a real
+# box that is a small fraction of the answer. MEASURED on odysseus, 660 GB used:
+#
+#   ~/.cache/huggingface   175 GB   <- the only line gx10-status showed
+#   /var/tmp               303 GB   <- model checkpoints, outside the HF cache
+#   /var/lib/apport         63 GB   <- core dumps
+#   /var/lib/docker         44 GB
+#
+# 485 GB of it was invisible, in directories nobody thinks to `du`. That gap is
+# this tool's entire reason to exist: it crosses the $HOME // /var boundary and
+# attributes every large thing to a CATEGORY, because what you can safely
+# delete depends on what it is, not on how big it is.
+#
+#   gx10-storage                report: pressure, attribution, what is reclaimable
+#   gx10-storage -c             every node side by side
+#   gx10-storage --top [N]      rank the biggest directories, wherever they are
+#   gx10-storage --reclaim      exactly what would be freed, and by which command
+#   gx10-storage --reclaim --apply    run the safe ones
+#
+# Exit status is meant to be gated on:
+#   0  healthy   - free space is above the floor
+#   1  pressure  - below the floor, or below it once planned weights land
+#
+# THREE THINGS THAT ARE TRUE HERE AND NOT ON A NORMAL SERVER
+#
+# 1. A core dump is a RAM image, and RAM here is 121 GB. Unified memory means a
+#    crashed 40 GB-resident python writes 40 GB to the same NVMe that holds the
+#    weights AND the swap file. MEASURED: one 41 GB core, 2026-08-29. `ulimit
+#    -c` in your shell says 0 and is irrelevant - systemd's DefaultLimitCORE is
+#    `infinity`, and what crashes on this box is a systemd unit or a docker
+#    container, never your login shell. Apport ages these out after 3d
+#    (/usr/lib/tmpfiles.d/apport.conf), so the disk recovers on its own - three
+#    days after you needed the space.
+#
+# 2. /var/tmp NEVER ages out. Ubuntu ships the 30-day rule for it COMMENTED OUT
+#    (`#q /var/tmp 1777 root root 30d` in /usr/lib/tmpfiles.d/tmp.conf), so
+#    anything a training job leaves there is permanent. It is also the natural
+#    place for a job to write checkpoints, and 303 GB of them is what was
+#    actually there.
+#
+# 3. Swap lives on this disk. Filling it does not merely stop downloads - it
+#    removes the emergency valve on a box where swapping is already a
+#    performance cliff, not a slope. See docs/hardware.md#unified-memory.
+#
+# WHY IT NEVER AUTO-DELETES A WEIGHT
+# --reclaim --apply touches only categories whose contents are, by definition,
+# regenerable: core dumps, build caches, package archives, dangling docker
+# layers, rotated journal. Model weights and job output are REPORTED with the
+# command that would remove them and never removed for you - `hf cache delete`
+# is interactive for the same reason. A tool that frees 300 GB by deleting a
+# checkpoint you had not finished with is not a tool, it is an incident.
+set -uo pipefail
+# NOT -e: a du that trips over one unreadable directory must cost that line,
+# not the report.
+
+# Every path is read through this prefix so the whole tool can be pointed at a
+# fixture tree offline. tests/check_storage.py sets it. Empty in real use.
+R=${GX10_STORAGE_ROOT:-}
+
+# The models role refuses to download unless free minus planned weights still
+# clears this. Same number, so `gx10-storage` and `make models` cannot disagree
+# about whether there is room. group_vars/all.yml: model_min_free_gb.
+FLOOR_GB=${GX10_STORAGE_FLOOR_GB:-100}
+
+# Below these a row is noise, not a finding - a report listing 40 MB of apt
+# lists next to 303 GB of checkpoints buries the one line that mattered. Env
+# overrides exist so tests/check_storage.py can drive the real code path
+# against a fixture tree of a few KB instead of allocating gigabytes in CI.
+MIN_BYTES=${GX10_STORAGE_MIN_BYTES:-104857600}          # 100 MB
+LOOSE_MIN_BYTES=${GX10_STORAGE_LOOSE_MIN_BYTES:-1073741824}   # 1 GiB
+
+b()    { printf '\033[1m%s\033[0m\n' "$1"; }
+good() { printf '\033[32m%s\033[0m\n' "$1"; }
+warn() { printf '\033[33m%s\033[0m\n' "$1"; }
+bad()  { printf '\033[31m%s\033[0m\n' "$1"; }
+
+# Anchored on a line PATTERN, not on a start/end range. The range form silently
+# fails open: give it an end anchor that no line matches and it prints the
+# entire file, which is what `--help` did until this was noticed.
+usage() { awk '/^#   gx10-storage/ { sub(/^# {0,3}/, ""); print }' "$0"; }
+
+mode=report
+apply=false
+topn=15
+hosts_override=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -c|--cluster) mode=cluster ;;
+        --top)        mode=top; [[ ${2:-} =~ ^[0-9]+$ ]] && { topn=$2; shift; } ;;
+        --reclaim)    mode=reclaim ;;
+        --apply)      apply=true ;;
+        -H)           hosts_override=${2:-}; shift ;;
+        -h|--help)    usage; exit 0 ;;
+        *)            printf 'unknown option: %s\n\n' "$1" >&2; usage >&2; exit 2 ;;
+    esac
+    shift
+done
+
+# ---------------------------------------------------------------------------
+# Measurement
+# ---------------------------------------------------------------------------
+
+# Can we read root-owned trees? Probed ONCE. Everything root-only is then
+# either measured or explicitly labelled "needs sudo" - never silently counted
+# as zero. A 63 GB directory reported as 0 GB because du could not open it is
+# the precise failure this tool exists to prevent.
+CAN_ROOT=false
+if [[ $(id -u) -eq 0 ]] || sudo -n true 2>/dev/null; then CAN_ROOT=true; fi
+
+# `du -s --block-size=1` reports ALLOCATED bytes, which is what free space
+# actually responds to. Not --apparent-size: core dumps are sparse, and on
+# these the two differ. -x stays on one filesystem so /boot/efi and any bind
+# mount cannot be double-counted into the root total.
+dir_bytes() {  # <path> -> allocated bytes, or "" if unreadable
+    local p=$R$1 out
+    [[ -e $p ]] || { printf ''; return; }
+    if [[ ! -r $p || ! -x $p ]] && $CAN_ROOT && [[ $(id -u) -ne 0 ]]; then
+        out=$(sudo -n du -sx --block-size=1 "$p" 2>/dev/null)
+    else
+        out=$(du -sx --block-size=1 "$p" 2>/dev/null)
+    fi
+    printf '%s' "${out%%[[:space:]]*}"
+}
+
+# Sub-gigabyte rows print in MB. "0.2 GB" for a 254 MB journal is technically
+# right and reads as nothing at all, which is how a row worth acting on gets
+# skipped. Note docker reports SI GB and everything else here is binary, so the
+# docker row can print one GB lower than `docker system df` says - the byte
+# count is what the floor arithmetic needs to be right about.
+gb() {  # bytes -> "254 MB" / "5.7 GB" / "303 GB", and "-" for the empty string
+    [[ -z ${1:-} ]] && { printf '%s' "-"; return; }
+    awk -v b="$1" 'BEGIN {
+        if (b < 1073741824)      printf "%.0f MB", b/1048576
+        else if (b < 10737418240) printf "%.1f GB", b/1073741824
+        else                      printf "%.0f GB", b/1073741824
+    }'
+}
+
+# `df -B1 --output=` and not `df -h`: parsing a human-rounded "209G" back into
+# arithmetic loses exactly the precision the floor comparison needs.
+# FS_USED is read and discarded: `used` is derived as size - avail below, so
+# the two can never disagree, and dropping the column from --output= would just
+# make this line differ from the identical df call in reclaim_plan.
+# shellcheck disable=SC2034
+read -r FS_SIZE FS_USED FS_AVAIL FS_PCENT < <(
+    df -B1 --output=size,used,avail,pcent "$R/" 2>/dev/null | tail -1 | tr -d '%'
+)
+FS_SIZE=${FS_SIZE:-0}; FS_AVAIL=${FS_AVAIL:-0}
+
+HOME_DIR=${GX10_STORAGE_HOME:-$HOME}
+HF_HOME_DIR=${HF_HOME:-$HOME_DIR/.cache/huggingface}
+
+# ---------------------------------------------------------------------------
+# Categories.
+#
+# The class is the whole point. It decides what --apply may touch:
+#
+#   weights  model data. NEVER auto-removed - it is expensive to re-fetch and
+#            impossible for a script to know you are done with it.
+#   job      output somebody's run left behind. Never auto-removed either, and
+#            unlike weights it may still be being written to.
+#   image    a docker image that was BUILT HERE and exists in no registry.
+#            Never auto-removed - `docker pull` cannot bring it back.
+#   crash    core dumps. Always regenerable, always safe.
+#   cache    build/JIT/package caches. Regenerable by definition; deleting one
+#            costs a recompile, not data.
+#   system   journal, apt archives, superseded snap revisions.
+#   fixed    swap. Reported so the arithmetic adds up; never a candidate.
+#
+# tab-separated: class <TAB> path <TAB> label <TAB> reclaim command ("" = none)
+#
+# Path-bearing commands are written through $R for the same reason every read
+# is: --apply is the one code path where being wrong destroys something, so it
+# has to be exercisable against a fixture tree rather than reasoned about. $R is
+# empty in real use, so these are the plain absolute paths on a real box.
+# ---------------------------------------------------------------------------
+categories() {
+    printf '%s\t%s\t%s\t%s\n' \
+      weights "$HF_HOME_DIR/hub"          "HF cache (weights)"      "hf cache delete" \
+      crash   /var/lib/apport/coredump    "apport core dumps"       "sudo rm -f $R/var/lib/apport/coredump/core.*" \
+      crash   /var/crash                  "crash reports"           "sudo rm -f $R/var/crash/*.crash" \
+      cache   "$HOME_DIR/.cache/uv"       "uv cache"                "uv cache clean" \
+      cache   "$HOME_DIR/.cache/pip"      "pip cache"               "pip cache purge" \
+      cache   "$HOME_DIR/.triton"         "triton JIT cache"        "rm -rf $R$HOME_DIR/.triton" \
+      cache   "$HOME_DIR/.tilelang"       "tilelang JIT cache"      "rm -rf $R$HOME_DIR/.tilelang" \
+      cache   "$HOME_DIR/.cache/torch"    "torch hub cache"         "rm -rf $R$HOME_DIR/.cache/torch" \
+      cache   "$HOME_DIR/.local/share/Trash" "trash"                "gio trash --empty" \
+      system  /var/cache/apt/archives     "apt archives"            "sudo apt-get clean" \
+      fixed   /swap.img                   "swap file"               ""
+}
+
+# ---------------------------------------------------------------------------
+# The two categories that cannot be a fixed path
+# ---------------------------------------------------------------------------
+
+# Model weights living OUTSIDE the HF cache. This is the class `hf cache scan`
+# structurally cannot see and `du -sh ~/.cache/huggingface` misses entirely -
+# and on this cluster it was the single largest consumer, 303 GB in /var/tmp.
+#
+# Detected by content, not by name: a directory holding *.safetensors, *.gguf,
+# *.bin+config.json or *.pt is model data wherever it happens to sit. Depth is
+# bounded at 4 because a full-filesystem content scan is minutes, and every
+# real case is a checkpoint dir a level or two under a job directory.
+loose_weights() {
+    local roots=("$R/var/tmp" "$R/opt" "$R$HOME_DIR/models" "$R/raid" "$R/mnt" "$R/srv")
+    local d
+    for d in "${roots[@]}"; do
+        [[ -d $d ]] || continue
+        # Roll each hit up to the directory a human would actually delete: the
+        # topmost ancestor still inside the scanned root. Reporting 40 shard
+        # directories separately is a list, not an answer.
+        #
+        # Relative to the root, NOT by absolute component count - a fixed
+        # "keep 4 components" is right for /var/tmp/<job>/<shards> and wrong
+        # for every other root, and silently wrong rather than empty.
+        find "$d" -maxdepth 4 -type f \
+             \( -name '*.safetensors' -o -name '*.gguf' -o -name 'consolidated*.pth' \
+                -o -name '*.pt' -o -name 'pytorch_model*.bin' \) \
+             -printf '%h\n' 2>/dev/null \
+          | awk -v root="$d" '{ rel = substr($0, length(root) + 2)
+                                sub(/\/.*/, "", rel)
+                                print (rel == "" ? root : root "/" rel) }'
+    done | sort -u
+}
+
+# Docker reports its own reclaimable figure and it is the only trustworthy one -
+# /var/lib/docker on disk includes layers that live containers are using.
+docker_bytes() {  # -> "total reclaimable" in bytes, or "" if docker is absent
+    command -v docker > /dev/null || { printf ''; return; }
+    docker system df --format '{{.Size}}\t{{.Reclaimable}}' 2>/dev/null \
+      | awk -F'\t' '
+        function tob(s,   n,u) {
+            n = s + 0; u = s; gsub(/[0-9.]| /, "", u)
+            if (u ~ /^kB/) return n*1000
+            if (u ~ /^MB/) return n*1000000
+            if (u ~ /^GB/) return n*1000000000
+            if (u ~ /^TB/) return n*1000000000000
+            return n
+        }
+        { t += tob($1); r += tob($2) }
+        END { if (NR) printf "%d %d", t, r }'
+}
+
+# HOW MANY UNUSED IMAGES CANNOT BE RE-PULLED.
+#
+# This decides whether the docker row is safe to automate, and getting it wrong
+# is destructive: `docker system prune -af` was in the auto-apply tier here
+# until this cluster was checked and three of six images - 65 GB of
+# `ar-deberta` and `split-inference` - turned out to be built locally and
+# published nowhere. `docker pull` cannot bring those back; only rebuilding
+# from a Dockerfile can, if it still exists.
+#
+# RepoDigests is the exact test, not a heuristic on the name: an image that was
+# ever pulled from or pushed to a registry has one, and an image that was only
+# ever `docker build`-ed here has none. A registry-shaped tag proves nothing -
+# `ar-deberta:spark` looks exactly like a public image.
+docker_buildcache_bytes() {
+    docker system df --format '{{.Type}}\t{{.Reclaimable}}' 2>/dev/null \
+      | awk -F'\t' '/^Build Cache/ {
+            n = $2 + 0; u = $2; gsub(/[0-9.]| /, "", u)
+            if (u ~ /^kB/) n *= 1000; else if (u ~ /^MB/) n *= 1000000
+            else if (u ~ /^GB/) n *= 1000000000; else if (u ~ /^TB/) n *= 1000000000000
+            printf "%d", n; exit }'
+}
+
+docker_local_only() {  # -> count of unused images with no registry copy
+    command -v docker > /dev/null || { printf 0; return; }
+    local used id n=0
+    used=$(docker ps -aq 2>/dev/null | xargs -r docker inspect --format '{{.Image}}' 2>/dev/null)
+    while read -r id; do
+        [[ -n $id ]] || continue
+        [[ $used == *"$id"* ]] && continue
+        [[ -z $(docker inspect "$id" --format '{{if .RepoDigests}}x{{end}}' 2>/dev/null) ]] && (( n++ ))
+    done < <(docker images -q --no-trunc 2>/dev/null | sort -u)
+    printf '%d' "$n"
+}
+
+journal_bytes() {
+    command -v journalctl > /dev/null || { printf ''; return; }
+    journalctl --disk-usage 2>/dev/null \
+      | awk '{ for (i=1;i<=NF;i++) if ($i ~ /^[0-9.]+[KMGT]?$/ && $(i+1) ~ /^[KMGTB]/) next }
+             { match($0, /[0-9.]+[KMGT]?B?/); s = substr($0, RSTART, RLENGTH)
+               n = s + 0; u = s; gsub(/[0-9.]/, "", u)
+               if (u ~ /^K/) n *= 1024; else if (u ~ /^M/) n *= 1048576
+               else if (u ~ /^G/) n *= 1073741824; else if (u ~ /^T/) n *= 1099511627776
+               printf "%d", n; exit }'
+}
+
+# Snap keeps the previous revision of every snap. Disabled revisions are pure
+# rollback insurance and are the reclaimable half.
+snap_disabled_bytes() {
+    command -v snap > /dev/null || { printf ''; return; }
+    local total=0 rev
+    while read -r rev; do
+        [[ -f $R/var/lib/snapd/snaps/$rev ]] || continue
+        total=$(( total + $(stat -c %s "$R/var/lib/snapd/snaps/$rev" 2>/dev/null || echo 0) ))
+    done < <(snap list --all 2>/dev/null | awk '$NF ~ /disabled/ { print $1"_"$3".snap" }')
+    (( total > 0 )) && printf '%d' "$total"
+}
+
+# ---------------------------------------------------------------------------
+# Report
+# ---------------------------------------------------------------------------
+
+# Populated by collect(); read by report(), reclaim_plan() and the verdict.
+declare -a ROW_CLASS=() ROW_LABEL=() ROW_PATH=() ROW_BYTES=() ROW_CMD=()
+
+add_row() { ROW_CLASS+=("$1"); ROW_PATH+=("$2"); ROW_LABEL+=("$3"); ROW_BYTES+=("$4"); ROW_CMD+=("$5"); }
+
+collect() {
+    local class path label cmd bytes
+    while IFS=$'\t' read -r class path label cmd; do
+        bytes=$(dir_bytes "$path")
+        [[ -z $bytes || $bytes -lt $MIN_BYTES ]] && continue
+        add_row "$class" "$path" "$label" "$bytes" "$cmd"
+    done < <(categories)
+
+    local d rel
+    while read -r d; do
+        [[ -n $d ]] || continue
+        rel=${d#"$R"}
+        bytes=$(dir_bytes "$rel")
+        [[ -z $bytes || $bytes -lt $LOOSE_MIN_BYTES ]] && continue
+        # Anything under the HF cache is already counted as `weights` above.
+        [[ $rel == "$HF_HOME_DIR"* ]] && continue
+        add_row weights "$rel" "outside the HF cache" "$bytes" "rm -rf $R$rel   # CHECK FIRST"
+    done < <(loose_weights)
+
+    local dk dk_total dk_recl dk_local dk_class dk_label
+    dk=$(docker_bytes)
+    if [[ -n $dk ]]; then
+        read -r dk_total dk_recl <<< "$dk"
+        dk_local=$(docker_local_only)
+        # `image`, not `cache`, the moment anything unused was built here: a
+        # locally-built image is closer to a weight than to a cache. It is
+        # regenerable only in the sense that you still have the Dockerfile and
+        # an hour, which is not the promise `cache` makes.
+        if (( dk_local > 0 )); then
+            dk_class=image
+            dk_label="docker: $dk_local unused image(s) BUILT HERE, not re-pullable"
+        else
+            dk_class=cache
+            dk_label="docker images + build cache ($(gb "$dk_recl") reclaimable)"
+        fi
+        (( dk_total >= MIN_BYTES )) && add_row "$dk_class" /var/lib/docker \
+            "$dk_label" "$dk_total" "docker system prune -af --volumes   # CHECK FIRST"
+        # Build cache is always safe and always regenerable, so it stays in the
+        # plan even when the images beside it do not.
+        DOCKER_RECLAIMABLE=$dk_recl
+        if (( dk_local > 0 )); then
+            local bc; bc=$(docker_buildcache_bytes)
+            [[ -n $bc ]] && (( bc >= MIN_BYTES )) \
+                && add_row cache /var/lib/docker/buildkit "docker build cache" \
+                   "$bc" "docker builder prune -f"
+        fi
+    fi
+
+    bytes=$(journal_bytes)
+    [[ -n $bytes ]] && (( bytes >= MIN_BYTES )) \
+        && add_row system /var/log/journal "systemd journal" "$bytes" "sudo journalctl --vacuum-size=200M"
+
+    bytes=$(snap_disabled_bytes)
+    [[ -n $bytes ]] && (( bytes >= MIN_BYTES )) \
+        && add_row system /var/lib/snapd/snaps "superseded snap revisions" "$bytes" \
+           "sudo snap set system refresh.retain=2"
+}
+
+# What --apply is allowed to remove, in bytes. `weights`, `job` and `image` are
+# excluded by construction, and `fixed` is not a candidate at all.
+reclaimable_bytes() {
+    local i total=0
+    for i in "${!ROW_CLASS[@]}"; do
+        case "${ROW_CLASS[$i]}" in
+            crash|system) total=$(( total + ROW_BYTES[i] )) ;;
+            cache)
+                if [[ ${ROW_PATH[$i]} == /var/lib/docker ]]; then
+                    total=$(( total + ${DOCKER_RECLAIMABLE:-0} ))
+                else
+                    total=$(( total + ROW_BYTES[i] ))
+                fi ;;
+            image) ;;   # counted under "by hand only" below, never here
+        esac
+    done
+    printf '%d' "$total"
+}
+
+report() {
+    b "Disk"
+    printf '  %s of %s free (%s%% used) on %s\n' \
+        "$(gb "$FS_AVAIL")" "$(gb "$FS_SIZE")" "${FS_PCENT:-?}" "${R:-/}"
+
+    # The floor is not decoration: this is the exact comparison the models role
+    # makes before it will download anything, so a red line here is `make
+    # models` telling you in advance why it is about to refuse.
+    local head_gb
+    head_gb=$(awk -v a="$FS_AVAIL" -v f="$FLOOR_GB" 'BEGIN { printf "%.0f", a/1073741824 - f }')
+    if (( head_gb < 0 )); then
+        bad "  ${head_gb#-} GB BELOW the ${FLOOR_GB} GB floor - \`make models\` will refuse to run"
+    elif (( head_gb < 50 )); then
+        warn "  $head_gb GB above the ${FLOOR_GB} GB floor (model_min_free_gb)"
+    else
+        printf '  %s GB above the %s GB floor (model_min_free_gb)\n' "$head_gb" "$FLOOR_GB"
+    fi
+
+    if ! $CAN_ROOT; then
+        warn "  no passwordless sudo: root-owned trees below are UNMEASURED, not empty"
+    fi
+
+    echo
+    b "Where it went"
+    local i order
+    order=$(for i in "${!ROW_BYTES[@]}"; do printf '%s %s\n' "${ROW_BYTES[$i]}" "$i"; done | sort -rn)
+    local accounted=0
+    while read -r _ i; do
+        [[ -n ${i:-} ]] || continue
+        accounted=$(( accounted + ROW_BYTES[i] ))
+        printf '  %-8s %9s  %-32s %s\n' \
+            "${ROW_CLASS[$i]}" "$(gb "${ROW_BYTES[$i]}")" "${ROW_LABEL[$i]}" "${ROW_PATH[$i]}"
+    done <<< "$order"
+
+    # Say plainly how much of `used` these rows explain. The gap is where the
+    # next surprise lives, and hiding it would reproduce the bug this tool was
+    # written to fix.
+    local used=$(( FS_SIZE - FS_AVAIL ))
+    printf '\n  accounted for: %s of %s used (%s elsewhere - try --top)\n' \
+        "$(gb "$accounted")" "$(gb "$used")" "$(gb "$(( used > accounted ? used - accounted : 0 ))")"
+
+    echo
+    local recl; recl=$(reclaimable_bytes)
+    b "Reclaimable"
+    printf '  %s without touching a weight or a running job   (gx10-storage --reclaim)\n' "$(gb "$recl")"
+
+    local weight_bytes=0
+    for i in "${!ROW_CLASS[@]}"; do
+        case "${ROW_CLASS[$i]}" in weights|image)
+            weight_bytes=$(( weight_bytes + ROW_BYTES[i] )) ;; esac
+    done
+    (( weight_bytes > 0 )) && printf '  %s more needs a decision (model data, or images built here) - see above\n' "$(gb "$weight_bytes")"
+
+    (( head_gb < 0 )) && return 1
+    return 0
+}
+
+# One definition of "in the plan", used by both the listing and the apply. Two
+# copies of this filter is how a dry run stops matching what --apply does.
+plan_bytes() {  # <row index> -> reclaimable bytes on stdout; non-zero if out of scope
+    local i=$1 recl
+    case "${ROW_CLASS[$i]}" in crash|system|cache) ;; *) return 1 ;; esac
+    [[ -n ${ROW_CMD[$i]} ]] || return 1
+    recl=${ROW_BYTES[$i]}
+    # docker's own figure, not the directory size: /var/lib/docker includes
+    # layers that running containers are using and prune will not touch.
+    [[ ${ROW_PATH[$i]} == /var/lib/docker ]] && recl=${DOCKER_RECLAIMABLE:-0}
+    (( recl < MIN_BYTES )) && return 1
+    printf '%d' "$recl"
+}
+
+plan_order() {  # row indices, biggest reclaim first
+    local i recl
+    for i in "${!ROW_CLASS[@]}"; do
+        recl=$(plan_bytes "$i") || continue
+        printf '%s %s\n' "$recl" "$i"
+    done | sort -rn
+}
+
+reclaim_plan() {
+    local i recl total=0
+    b "Reclaim plan"
+    printf '  %-9s %9s  %s\n' class size command
+    while read -r _ i; do
+        [[ -n ${i:-} ]] || continue
+        recl=$(plan_bytes "$i") || continue
+        total=$(( total + recl ))
+        printf '  %-9s %9s  %s\n' "${ROW_CLASS[$i]}" "$(gb "$recl")" "${ROW_CMD[$i]}"
+    done < <(plan_order)
+    printf '\n  total: %s\n' "$(gb "$total")"
+
+    local held=false
+    for i in "${!ROW_CLASS[@]}"; do
+        case "${ROW_CLASS[$i]}" in weights|image) ;; *) continue ;; esac
+        $held || { echo; b "NOT in the plan - your call"; held=true; }
+        printf '  %9s  %-40s %s\n' "$(gb "${ROW_BYTES[$i]}")" "${ROW_PATH[$i]}" "${ROW_CMD[$i]}"
+    done
+
+    if ! $apply; then
+        echo
+        printf '  nothing has been deleted. To run the plan above:  gx10-storage --reclaim --apply\n'
+        return 0
+    fi
+
+    echo
+    b "Applying"
+    while read -r _ i; do
+        [[ -n ${i:-} ]] || continue
+        plan_bytes "$i" > /dev/null || continue
+        printf '  %s\n' "${ROW_CMD[$i]}"
+        # Reported, not swallowed: a prune that fails because a container is
+        # running is information, and a silent failure here reads as "freed"
+        # while the disk stays full.
+        if ! bash -c "${ROW_CMD[$i]}" > /dev/null 2>&1; then
+            warn "    failed - run it by hand to see why"
+        fi
+    done < <(plan_order)
+    echo
+    read -r _ _ FS_AVAIL _ < <(df -B1 --output=size,used,avail,pcent "$R/" | tail -1 | tr -d '%')
+    good "  now $(gb "$FS_AVAIL") free"
+}
+
+# `du --max-depth` alone answers this badly: /var, /var/tmp and
+# /var/tmp/rl-checkpoints are ONE 303 GB directory printed three times,
+# and they crowd out the entries you have not seen yet. A parent is therefore
+# dropped when a single child explains 90% or more of it - what you want to be
+# told is the deepest directory that still accounts for the space, because that
+# is the one you would act on.
+top_dirs() {
+    b "Largest directories (one filesystem, depth 3)"
+    $CAN_ROOT || warn "  no passwordless sudo - root-owned trees are missing from this list"
+    local du=(du -x --block-size=1 --max-depth=3 "$R/")
+    $CAN_ROOT && [[ $(id -u) -ne 0 ]] && du=(sudo -n "${du[@]}")
+    "${du[@]}" 2>/dev/null | awk -v n="$topn" -v root="$R/" '
+        $1 ~ /^[0-9]+$/ {
+            path = $0; sub(/^[0-9]+[ \t]+/, "", path)
+            if (path == root) next
+            size[path] = $1; order[++k] = path
+        }
+        END {
+            for (i = 1; i <= k; i++) {
+                p = order[i]; best = 0
+                for (j = 1; j <= k; j++) {
+                    c = order[j]
+                    if (c != p && index(c, p "/") == 1 && size[c] > best) best = size[c]
+                }
+                if (best >= size[p] * 0.9) continue
+                printf "%d\t%s\n", size[p], p
+            }
+        }' | sort -rn | awk -v n="$topn" -F'\t' '
+            c++ < n { printf "  %9.1f GB  %s\n", $1/1073741824, $2 }'
+}
+
+cluster() {
+    local peers=${GX10_PEERS_FILE:-/etc/gx10/interconnect.peers} hosts=()
+    if [[ -n $hosts_override ]]; then
+        IFS=, read -r -a hosts <<< "$hosts_override"
+    else
+        hosts=("$(hostname -s)")
+        [[ -f $peers ]] && while read -r h _; do
+            [[ $h == \#* || -z $h ]] && continue
+            [[ " ${hosts[*]} " == *" $h "* ]] || hosts+=("$h")
+        done < "$peers"
+    fi
+    local h
+    for h in "${hosts[@]}"; do
+        b "$h"
+        if [[ $h == "$(hostname -s)" ]]; then
+            df -B1 --output=size,avail,pcent / | tail -1 \
+              | awk '{ printf "  %.0f GB free of %.0f GB (%s used)\n", $2/1073741824, $1/1073741824, $3 }'
+        else
+            # Shipped over stdin rather than assuming this file is installed
+            # there, same bargain as gx10-top: a node provisioned before this
+            # tool existed still answers.
+            ssh -n -o BatchMode=yes -o ConnectTimeout=5 "$h" \
+                'df -B1 --output=size,avail,pcent / | tail -1' 2>/dev/null \
+              | awk '{ printf "  %.0f GB free of %.0f GB (%s used)\n", $2/1073741824, $1/1073741824, $3 }' \
+              || bad "  unreachable"
+        fi
+    done
+    echo
+    printf '  per-node detail:  ssh <node> gx10-storage\n'
+}
+
+case $mode in
+    cluster) cluster ;;
+    top)     top_dirs ;;
+    reclaim) collect; reclaim_plan ;;
+    report)  collect; report ;;
+esac

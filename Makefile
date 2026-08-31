@@ -51,7 +51,7 @@ help:  ## Show this help
 # --- Checks that run anywhere (and in CI) ----------------------------------
 
 .PHONY: check
-check: lint syntax smoke render handlers optional-tags workspaces detectors docs lockfile shellcheck  ## Every offline check (what CI runs)
+check: lint syntax smoke render handlers optional-tags workspaces detectors spec-accept prefill-ladder storage docs lockfile shellcheck  ## Every offline check (what CI runs)
 
 .PHONY: deps
 deps:  ## Install the pinned collections
@@ -123,6 +123,26 @@ docs:  ## Directory indexes must list every role, runbook and vars file
 .PHONY: detectors
 detectors:  ## The serving quality gate's detectors catch what they claim to
 	@python3 tests/check_detectors.py
+
+.PHONY: spec-accept
+spec-accept:  ## The acceptance probe's parser and ladder verdicts still hold
+	@python3 tests/check_spec_accept.py
+
+# A prefill number is only worth having if the rung was actually cold, and a
+# contaminated rung is FAST rather than wrong - it reads as an optimisation
+# that worked. The parser that proves coldness fails silently in exactly that
+# direction, so it is checked here rather than trusted.
+.PHONY: prefill-ladder
+prefill-ladder:  ## The prefill ladder proves a cold rung cold, and a clean run stays clean
+	@python3 tests/check_prefill_ladder.py
+
+# The half of gx10-storage that can be wrong without looking wrong: if a
+# checkpoint stops classing as `weights` it lands in the reclaim plan, and
+# --apply then deletes somebody's training run. This drives the real script
+# against a fixture tree, so it needs no GPU, no sudo and no disk pressure.
+.PHONY: storage
+storage:  ## gx10-storage classifies weights as weights and never plans to delete them
+	@python3 tests/check_storage.py
 
 # The ML lockfile is one resolution and only means anything whole. Two ways it
 # silently stops being that: regenerated without --index-strategy (the cu130

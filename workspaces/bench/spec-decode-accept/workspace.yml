@@ -1,0 +1,73 @@
+name: spec-decode-accept
+kind: bench
+engine: any
+provenance: unverified
+summary: Is the speculative decoder working - acceptance per DRAFT POSITION
+
+# THE FAILURE THIS EXISTS FOR, and why no other check in this repo finds it.
+#
+# A broken draft path costs ACCEPTANCE AND NOTHING ELSE. The target model still
+# verifies every token, so the output stays perfectly correct - you just get
+# half the speed, with no error and no warning. `vllm-quality-gate` passes.
+# `vllm-bench-serve` reports a lower number and no reason for it. Every
+# workspace README in this repo that runs a speculative server says some
+# version of "this is the most misleading failure in the file"; this is the
+# tool that resolves it.
+#
+# WHY PER-POSITION AND NOT THE AGGREGATE. `vllm-bench-serve` already shows
+# aggregate acceptance live, which answers "is the drafter doing anything".
+# It cannot separate the two ways one breaks:
+#
+#   weak drafter    every position low, the curve falls smoothly
+#   broken MASK     position 0 HEALTHY, positions 1..k-1 collapsed
+#
+# The second is a causal attention mask inside a non-causal draft block: the
+# first drafted token sees real context and is fine, every later one sees a
+# block it is not allowed to read. Aggregate acceptance halves and nothing else
+# moves. Reported on the GLM kit: pinning the draft attention backend took
+# structured decode from ~62 to ~29 tok/s and acceptance from 0.92 to 0.31,
+# with position 0 healthy and the rest collapsed.
+#
+# AND THE CLASS IS PART OF THE TEST. Published healthy medians from the SAME
+# working server on that kit:
+#
+#   structured  0.98 0.98 0.94 0.94 0.91 0.83 0.83   aggregate 0.92
+#   prose       0.75 0.58 0.41 0.28 0.16 0.09 0.06   aggregate 0.33
+#
+# A healthy PROSE ladder collapses to 0.06 - the same shape a broken mask
+# makes. So a collapse convicts only on structured output, and the tool returns
+# a mask verdict for no other class. tests/check_spec_accept.py asserts exactly
+# that, because a check that condemns a working server gets muted.
+#
+# It reads k from the metrics rather than assuming it, so it covers DFlash2
+# (k=7) and DSpark (k=5, or k=3 on Nemotron 3.5 Lightning) without
+# configuration.
+#
+# TWO ENGINES, AND ONLY ONE CAN BE CONVICTED. Everything above depends on
+# vllm:spec_decode_num_accepted_tokens_per_pos_total. SGLang publishes NO
+# per-position counter - the best it offers is an EMA of accept LENGTH on
+# /server_info - so against an SGLang server this degrades to length, derives
+# the comparable ratio as (length - 1) / k, and says so. `mask` is unreachable
+# on that path, and tests/check_spec_accept.py asserts it: a degraded probe
+# that degrades silently would return a confident verdict about a shape it
+# never measured, which is worse than not running.
+#
+# SGLang also serves no /metrics at all without --enable-metrics, which is why
+# sglang-nemotron35-lightning-nvfp4 passes it. Without it a perfectly healthy
+# DSpark server reads as having no speculative decoding.
+#
+# Like every `bench` workspace this is a CLIENT: it needs a running endpoint
+# rather than a free GPU, so `requires:` is empty and it coexists with the
+# serving workspace it is pointed at.
+requires: {}
+
+endpoints:
+  - "reads http://127.0.0.1:8888/v1 by default - set BASE_URL for anything else"
+  - "also reads /metrics off the same host, which is where the counters live"
+  - "on SGLang, /server_info too - the only place accept length is published"
+
+sources:
+  - https://docs.vllm.ai/en/latest/design/metrics/
+  - https://docs.vllm.ai/en/latest/features/spec_decode/
+  - https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks
+  - https://docs.sglang.io/references/production_metrics.html

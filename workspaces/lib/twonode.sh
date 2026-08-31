@@ -22,9 +22,20 @@
 #   PORT          rank 0 serves here; rank 1 is headless
 #   MODEL_ARGS    array of vLLM flags. Everything model-specific, and ONLY
 #                 that: topology, rendezvous and RDMA are set here.
-# and optionally MASTER_PORT, SHM_SIZE, PEER, MASTER_ADDR, MGMT_IFACE, IB_HCA.
+# and optionally MASTER_PORT, SHM_SIZE, PEER, MASTER_ADDR, MGMT_IFACE, IB_HCA,
+# IB_GID_INDEX, VLLM_API_KEY, EXTRA_ENV, EXTRA_MOUNTS, PRE_EXEC.
 #
 # Then calls: twonode_up
+#
+# EXTRA_MOUNTS and PRE_EXEC exist for one narrow case and should stay narrow.
+# An image that needs a step run INSIDE the container before `vllm serve` -
+# applying a patch that ships in the image but is not applied at build - cannot
+# express that through MODEL_ARGS, because MODEL_ARGS are arguments to the
+# entrypoint rather than a replacement for it. PRE_EXEC replaces the entrypoint
+# with `bash -c "<PRE_EXEC>; exec vllm serve \"$@\""`, so the serve line is
+# still assembled here, still identical on both ranks, and still the only thing
+# a reader has to trust. If you find yourself reaching for these to set an env
+# var or a flag, use EXTRA_ENV or MODEL_ARGS instead.
 
 twonode_resolve() {  # fills in whatever the workspace did not set
     NAME=${NAME:?twonode: NAME must be set}
@@ -70,7 +81,38 @@ twonode_common_env() {  # -> COMMON_ENV array
       # There is no NVLink between two Sparks, so NVLS has nothing to accelerate.
       -e "NCCL_NVLS_ENABLE=0"
       -e "NCCL_DEBUG=${NCCL_DEBUG:-WARN}"
+      # Not a privacy gesture - a crash. vLLM's usage reporter shells out to
+      # py-cpuinfo, which returns EMPTY output on Grace/aarch64 and is then
+      # JSON-parsed: the stats thread dies with JSONDecodeError in the middle
+      # of an otherwise healthy boot, which reads as a model failure. Off is
+      # also the right default for a private cluster.
+      -e "VLLM_NO_USAGE_STATS=1"
+      -e "DO_NOT_TRACK=1"
     )
+
+    # OPTIONAL BEARER AUTH, and it is here rather than in a workspace's
+    # MODEL_ARGS for one reason: vLLM reads VLLM_API_KEY natively as the
+    # fallback for `--api-key`, so passing it this way keeps the key out of
+    # argv - out of `ps`, out of the container's command line, and out of the
+    # `non-default args` line vLLM logs at every boot. `--api-key <secret>`
+    # puts it in all three. Empty means unauthenticated, which stays the
+    # default: these servers listen on a private cluster and every other
+    # workspace here assumes that.
+    #
+    # Only rank 0 serves an API, so only rank 0 needs it - it goes in the
+    # common env anyway, because a variable that differs between ranks is the
+    # class of thing this library exists to not have.
+    [[ -n ${VLLM_API_KEY:-} ]] && COMMON_ENV+=( -e "VLLM_API_KEY=$VLLM_API_KEY" )
+
+    # NCCL_IB_GID_INDEX is likewise NOT pinned here, and that IS the fix rather
+    # than an omission. Pinning an index (upstream recipes pin 3) fails when
+    # that entry is all-zero on one of the two cards - the launch survives
+    # every preflight and then kills the WORKER rank about a minute in with
+    # `ibv_modify_qp` errno 61. NCCL_IB_ROCE_VERSION_NUM=2 +
+    # NCCL_IB_ADDR_FAMILY=AF_INET above ask NCCL to SELECT the RoCEv2 IPv4 GID
+    # itself, on each card, which is the same answer without the failure mode.
+    # `gx10-interconnect` prints the table if you ever need to pick by hand.
+    [[ -n ${IB_GID_INDEX:-} ]] && COMMON_ENV+=( -e "NCCL_IB_GID_INDEX=$IB_GID_INDEX" )
 
     # NCCL_IB_HCA is deliberately NOT set by default, which is a considered
     # departure from the upstream recipes. MEASURED on this pair: with it unset,
@@ -107,16 +149,33 @@ twonode_launch() {  # $1 = rank, $2 = "local"|<peer host>, $3 = this rank's IP
         # vLLM needs each rank's OWN address for distributed init.
         -e "VLLM_HOST_IP=${3:-}"
         -e "NODE_RANK=$rank"
-        "$IMAGE"
+    )
+    [[ -n ${EXTRA_MOUNTS[*]:-} ]] && args+=( "${EXTRA_MOUNTS[@]}" )
+
+    # The serve line, assembled ONCE for both ranks. Only the rank number and
+    # who owns the API differ - everything else being identical is what stops
+    # the silent init hang this library exists to prevent.
+    local serve_args=(
         "${MODEL_ARGS[@]}"
         --nnodes 2 --node-rank "$rank"
         --master-addr "$MASTER_ADDR" --master-port "$MASTER_PORT"
     )
     # Only rank 0 serves the API; rank 1 is a headless worker.
     if [[ $rank == 0 ]]; then
-        args+=( --host 0.0.0.0 --port "$PORT" )
+        serve_args+=( --host 0.0.0.0 --port "$PORT" )
     else
-        args+=( --headless )
+        serve_args+=( --headless )
+    fi
+
+    if [[ -n ${PRE_EXEC:-} ]]; then
+        # `bash -c SCRIPT NAME ARGS...` puts ARGS in "$@", so the serve line
+        # stays a real argv rather than a string this file has to re-quote.
+        args+=(
+            --entrypoint bash "$IMAGE"
+            -c "$PRE_EXEC"$'\n''exec vllm serve "$@"' twonode "${serve_args[@]}"
+        )
+    else
+        args+=( "$IMAGE" "${serve_args[@]}" )
     fi
 
     if [[ $where == local ]]; then
@@ -152,6 +211,12 @@ twonode_up() {
     echo
     echo "confirm it is on RoCE and not TCP - the failure that looks like slowness:"
     echo "  docker logs $NAME 2>&1 | grep -E 'NET/IB|NET/Socket'"
+    [[ -n ${VLLM_API_KEY:-} ]] && {
+        echo
+        echo "auth is ON: send 'Authorization: Bearer <VLLM_API_KEY>' to /v1."
+        echo "  the bench workspaces read API_KEY from the environment."
+    }
+    return 0
 }
 
 twonode_down() {
@@ -163,4 +228,58 @@ twonode_down() {
         ssh -n -o BatchMode=yes -o ConnectTimeout=5 "$h" "docker rm -f $name >/dev/null 2>&1" 2>/dev/null \
             && echo "rank 1 on $h stopped" || echo "rank 1 on $h: unreachable or not running"
     done < <(awk '!/^#/ && NF {print $1}' "$peers_file" | sort -u)
+}
+
+# Copy an already-downloaded HF repo to the peer, over the CABLE.
+#
+# Each rank loads weights from its own disk. Nothing about the HF cache is
+# shared, so a two-node model has to land twice - and for the small checkpoints
+# the other workspaces run, letting each node fetch its own copy from the Hub is
+# fine and is what they do. It stops being fine at 164 GiB: the second copy is
+# hours of WAN for bytes that are already sitting on a peer at the end of a
+# 200 Gb/s cable that is cabled, trusted and idle.
+#
+# So this rsyncs over `<peer>.cluster`, which is the interconnect address
+# (docs/decisions.md#hosts-split) rather than the management NIC every other
+# SSH in this library uses. That is the one place in this repo where asking for
+# the fast path explicitly is worth it, because this is bulk transfer rather
+# than control traffic. Set STAGE_HOST to override if the cable is down and you
+# would rather wait on the management link than on the Hub.
+#
+# rsync is resumable and idempotent: an interrupted run costs only time, and
+# re-running verifies what is already there.
+twonode_stage_model() {  # $1 = HF repo id (org/name)
+    local repo=${1:?twonode_stage_model: HF repo id required}
+    local slug="models--${repo//\//--}"
+    local hf=${HF_HOME:-$HOME/.cache/huggingface}
+    local src="$hf/hub/$slug"
+
+    [[ -d $src ]] || {
+        echo "not in this node's cache yet: $repo" >&2
+        echo "  download it here first:  hf download $repo" >&2
+        return 1
+    }
+
+    local peers_file=${GX10_PEERS_FILE:-/etc/gx10/interconnect.peers}
+    local peer=${PEER:-$(awk '!/^#/ && NF {print $1; exit}' "$peers_file" 2>/dev/null)}
+    [[ -n ${peer:-} ]] || { echo "no peer found; set PEER" >&2; return 1; }
+    local host=${STAGE_HOST:-$peer.cluster}
+
+    # Both nodes run the SAME account (inventory.yml pins ansible_user for the
+    # whole gx10 group), so $HOME is the same string on both sides and the
+    # destination needs no translation. If that ever stops being true this is
+    # the line that has to know.
+    echo "staging $repo"
+    echo "  from  $src"
+    echo "  to    $host:$src"
+    echo "  over  the interconnect, not the management NIC"
+    echo
+    ssh -n -o BatchMode=yes -o ConnectTimeout=10 "$host" "mkdir -p $(printf '%q' "$hf/hub")" || {
+        echo "cannot reach $host - is the cable up? try: gx10-interconnect" >&2
+        echo "  or stage over management instead: STAGE_HOST=$peer $0" >&2
+        return 1
+    }
+    # --partial so an interrupted 164 GiB transfer resumes rather than restarts.
+    rsync -a --partial --info=progress2 --human-readable \
+        -e "ssh -o BatchMode=yes" "$src/" "$host:$src/"
 }

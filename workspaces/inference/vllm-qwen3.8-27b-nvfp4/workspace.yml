@@ -6,7 +6,9 @@ summary: Qwen3.8-27B NVFP4, OpenAI API, 1M ctx via YaRN
 
 # NVFP4 is a Blackwell-only format and GB10 is sm_121, so this is the quant
 # this hardware exists for. It is ALSO the reason there is no SGLang variant of
-# this workspace: the checkpoint has a quantised lm_head, which SGLang does not
+# THIS workspace - not of NVFP4 generally: SGLang serves NVIDIA's Nemotron 3.5
+# Lightning NVFP4 on day 0 (docs/decisions.md#nemotron35-lightning).
+# This checkpoint has a quantised lm_head, which SGLang does not
 # support. See the engine/quant matrix in workspaces/README.md.
 requires:
   gpu_arch: "12.1"
