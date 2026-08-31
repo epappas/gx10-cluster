@@ -21,6 +21,15 @@ this runs in CI, the serving half runs on the box.
 
 from __future__ import annotations
 
+# BOTH imports, and importlib.machinery is the one that is easy to lose.
+# `import importlib.util` does NOT reliably bind `importlib.machinery` as an
+# attribute of the parent package - whether it does is a CPython PATCH-level
+# detail. Ubuntu Noble's 3.12.3 imports machinery as a side effect of util, so
+# the missing line passes locally; setup-python's 3.12.14 does not, so CI died
+# with `module 'importlib' has no attribute 'machinery'` while `make check` was
+# green on the box. That is precisely the drift the Makefile claims cannot
+# happen, so name it rather than relying on the side effect again.
+import importlib.machinery
 import importlib.util
 import pathlib
 import sys
