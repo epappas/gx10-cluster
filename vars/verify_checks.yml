@@ -32,6 +32,22 @@ verify_checks:
       | awk '$1 == \"installed\" && $2 != \"hold\" { print $3; unheld = 1 } END { exit unheld }'"
     hint: "The packages listed are installed but not held; apt could skew them. Re-run: make apply TAGS=base"
 
+    # The check that did not exist while the bug did. roles/base adds
+    # cli.github.com precisely to escape Noble's 2.45, and for months it did
+    # not: Ubuntu Pro pins ESM to 510, a third-party repo defaults to 500, so
+    # apt kept ESM's 2.45 while the newer package sat there unreachable. No
+    # existing gate could see it - ansible-lint passes, `make diff` reports ok,
+    # and `state: present` is satisfied by any version at all.
+    #
+    # Asserted on the VERSION SHAPE rather than by parsing `apt-cache policy`,
+    # whose `***` block is a fiddly thing to walk in one shell line. Ubuntu and
+    # ESM builds always carry a Debian revision (2.45.0-1ubuntu0.3+esm3,
+    # 2.45.0-1build1); cli.github.com ships the bare upstream version (2.98.0).
+    # A bare version therefore means the pin applied, and nothing else does.
+  - name: "gh from upstream"
+    cmd: "dpkg-query -W -f='${Version}' gh | grep -qxE '[0-9]+(\\.[0-9]+)+'"
+    hint: "gh came from Ubuntu/ESM, not cli.github.com - the apt pin is missing or outranked. Re-run: make apply TAGS=base"
+
     # Not required: passes only after a NEW login session picks up the docker
     # group, so it legitimately fails on the first verify after provisioning.
   - name: "docker without sudo"

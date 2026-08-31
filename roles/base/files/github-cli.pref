@@ -1,0 +1,27 @@
+# Managed by gx10-cluster ansible (roles/base). Local edits overwritten.
+#
+# Without this file the GitHub CLI repo below is decorative. MEASURED on both
+# nodes before it existed:
+#
+#   gh:
+#     Installed: 2.45.0-1ubuntu0.3+esm3
+#        2.98.0  500  https://cli.github.com/packages stable/main
+#    *** 2.45.0-1ubuntu0.3+esm3  510  https://esm.ubuntu.com/... noble-apps
+#
+# Ubuntu Pro ships /etc/apt/preferences.d/ubuntu-pro-esm-apps, which pins
+# `Package: *` from `o=UbuntuESMApps` to 510 so ESM beats the plain archive.
+# A third-party repo gets the DEFAULT 500, so it loses to ESM every time - and
+# `state: present` is satisfied by any installed version, so the install task
+# reported ok forever while the whole point of adding the repo went unmet.
+#
+# That file belongs to ubuntu-pro-client and must not be edited; you outrank it
+# instead. 600 beats ESM's 510 and stays BELOW the 700 that
+# /etc/apt/preferences.d/nvidia-spark-repo gives the NVIDIA repos, so this can
+# never reorder anything in the driver stack roles/base holds.
+#
+# Deliberately scoped to ONE package and ONE origin. `Package: *` here would
+# hand a third-party host priority over the archive for anything it chose to
+# publish, which is a much larger claim than "we want a current gh".
+Package: gh
+Pin: origin cli.github.com
+Pin-Priority: 600

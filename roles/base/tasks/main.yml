@@ -241,9 +241,16 @@
   become: true
 
 # From GitHub's own repo, not Ubuntu's. Noble ships gh 2.45 (early 2024)
-# against upstream's 2.97 - old enough to be missing subcommands you will
+# against upstream's 2.98 - old enough to be missing subcommands you will
 # reach for. Same pattern as the NordVPN client in roles/remote: signed,
 # apt-managed, pinnable, and no curl-pipe-shell.
+#
+# THE REPO ALONE DOES NOTHING, and did nothing here for months. Ubuntu Pro pins
+# ESM above the archive at 510; a third-party repo gets the default 500. So apt
+# kept installing 2.45 from ESM while cli.github.com sat there at 500 offering
+# 2.98, and nothing reported it: ansible-lint passes, `make diff` says ok, and
+# `state: present` is satisfied by ANY version. See github-cli.pref, which is
+# what makes the three tasks below mean anything.
 - name: Add the GitHub CLI apt key
   ansible.builtin.get_url:
     url: https://cli.github.com/packages/githubcli-archive-keyring.gpg
@@ -260,10 +267,33 @@
     state: present
   become: true
 
-- name: Install the GitHub CLI
+# BEFORE the install, not after: the pin decides which candidate that task
+# resolves, so applying it afterwards would leave the first run on ESM's 2.45
+# and quietly fix itself on the second.
+- name: Outrank Ubuntu Pro's ESM pin for the GitHub CLI
+  ansible.builtin.copy:
+    src: github-cli.pref
+    dest: /etc/apt/preferences.d/github-cli
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+
+# `latest`, and the noqa is deliberate rather than a silenced warning. The rule
+# is right in general and this repo agrees with it everywhere else - ollama is
+# pinned by version AND sha256, llama.cpp by tag, the ML stack by a lockfile,
+# because two boxes provisioned months apart must come up identical.
+#
+# gh is the one place that trade is worth making the other way. It is a
+# developer convenience with no runtime dependents: nothing in the serving
+# path, the fabric or the driver stack imports it, so a version skew between
+# nodes changes nobody's results. `present` cannot be used here at all - it is
+# satisfied by the 2.45 already installed, so the pin above would never take
+# effect on an existing box, only on a fresh one.
+- name: Install the GitHub CLI  # noqa: package-latest
   ansible.builtin.apt:
     name: gh
-    state: present
+    state: latest
     update_cache: true
   become: true
 
