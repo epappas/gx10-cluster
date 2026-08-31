@@ -23,7 +23,11 @@ repos:
     hooks:
       - id: ansible-lint
 
+  # Must match the shellcheck-py pin in .github/workflows/ci.yml and the
+  # version on the boxes. SC2015 fires on some versions and not others, so a
+  # split here is a file that passes `make check`, passes the hook, and turns
+  # CI red - with nothing in the diff to explain it.
   - repo: https://github.com/koalaman/shellcheck-precommit
-    rev: v0.10.0
+    rev: v0.11.0
     hooks:
       - id: shellcheck

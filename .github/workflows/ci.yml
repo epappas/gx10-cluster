@@ -28,6 +28,14 @@ jobs:
           # major cannot turn CI red with zero repo changes.
           pipx install 'ansible-lint==25.6.1'
           pipx install yamllint
+          # Pinned for the SAME reason, and it was NOT pinned until CI went red
+          # on SC2015 in a file `make check` called clean: the runner image's
+          # shellcheck is whatever it happens to ship, so the repo had three
+          # versions in play - the runner's, 0.11.0 on the GX10s, and v0.10.0
+          # in .pre-commit-config.yaml. shellcheck-py vendors the binary, so
+          # pipx pins the ACTUAL checker rather than a wrapper around a
+          # system one. Keep this, the pre-commit rev and the box in step.
+          pipx install 'shellcheck-py==0.11.0.1'
           # tests/check_handlers.py parses YAML with the plain interpreter,
           # and setup-python provides a bare one. pipx venvs are isolated, so
           # ansible-core's own PyYAML is not importable from here.

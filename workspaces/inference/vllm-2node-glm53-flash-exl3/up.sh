@@ -49,9 +49,17 @@ JIT_CACHE=${JIT_CACHE:-$HOME/.cache/vllm-glm53-exl3}
 PEER=${PEER:-$(awk '!/^#/ && NF {print $1; exit}' \
     "${GX10_PEERS_FILE:-/etc/gx10/interconnect.peers}" 2>/dev/null || true)}
 mkdir -p "$JIT_CACHE/triton" "$JIT_CACHE/tilelang"
-[[ -n ${PEER:-} ]] && ssh -n -o BatchMode=yes -o ConnectTimeout=5 "$PEER" \
-    "mkdir -p $(printf '%q' "$JIT_CACHE/triton") $(printf '%q' "$JIT_CACHE/tilelang")" \
-    2>/dev/null || true
+# An `if`, not `[[ ... ]] && ssh ... || true`. That form reads as if-then-else
+# and is not one - the `|| true` catches a false TEST as readily as a failed
+# ssh - and shellcheck flags it as SC2015 on some versions and not others,
+# which is how this file passed locally and turned CI red.
+if [[ -n ${PEER:-} ]]; then
+    # Best effort by design: the peer may be down, and a missing cache there
+    # costs a re-JIT on its first boot, never correctness. Do not fail launch.
+    ssh -n -o BatchMode=yes -o ConnectTimeout=5 "$PEER" \
+        "mkdir -p $(printf '%q' "$JIT_CACHE/triton") $(printf '%q' "$JIT_CACHE/tilelang")" \
+        2>/dev/null || true
+fi
 # THE ONE PATCH THIS REPO CARRIES ITSELF, and the reason it is not optional.
 #
 # Every other patch below is already applied inside the image, so re-running it
