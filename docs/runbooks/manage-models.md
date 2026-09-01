@@ -187,10 +187,19 @@ full and the cache does not explain it.
 | `No space left on device` mid-pull | A `size_gb` understates the repo, so the guard let it through | Correct the catalog entry; `hf cache delete`, then re-run |
 | The guard refuses although the cache is small | Something outside the cache is holding the disk | `gx10-storage` — see [manage-storage](manage-storage.md) |
 | The download task reports `changed` every run | It should not — it compares blob bytes | [troubleshoot](troubleshoot.md#ansible) |
-| `PermissionError: [Errno 13] … /hub/models--…/snapshots/<rev>` | **A container downloaded into this cache as root.** Several serving images run as uid 0 and bind-mount the host cache at `/hf`, so the repo directory, `blobs/`, `refs/`, `snapshots/` and `.no_exist/` come back owned by `root` — and your own `hf download` can no longer write there | `sudo chown -R "$USER:$USER" ~/.cache/huggingface/hub`, then re-run. Seen here as 213 root-owned entries after one workspace restart-looped |
+| `PermissionError: [Errno 13] … /hub/models--…/snapshots/<rev>` | **A container downloaded into this cache as root.** Fixed for the two-node workspaces — `twonode_launch` now passes `--user "$(id -u):$(id -g)"` — but any image you run by hand with the cache bind-mounted can still do it | `sudo chown -R "$USER:$USER" ~/.cache/huggingface/hub`, then re-run |
 
-**That last one is worth understanding rather than just fixing**, because it is
-silent until it is not. A container that runs as root and writes to the shared
+**That last one is worth understanding rather than just fixing**, because it
+cost this repo a real bug. A cold `ws up` of a two-node workspace used to leave
+**156 GiB of root-owned weights inside your own `~/.cache/huggingface`** —
+after which `hf download` failed on its own cache, `rsync` to the peer moved
+the bytes and then dropped every one of them on
+`chgrp … Operation not permitted`, and `rm -rf` on your own disk needed `sudo`.
+213 root-owned entries after a single restart loop. `twonode_launch` now runs
+containers as the invoking user (`GX10_CONTAINER_ROOT=1` opts out for an image
+that genuinely needs uid 0, as `vllm-2node-glm53-flash-exl3` does for its
+site-packages patch). After a full cold run the count is **0**, and the weights
+delete without root. It is A container that runs as root and writes to the shared
 cache leaves it in a state where the *next* download — by you, by Ansible, by a
 different workspace — fails on a path it did not create. Nothing warns at the
 time; the damage surfaces later and looks like a permissions bug in the tool

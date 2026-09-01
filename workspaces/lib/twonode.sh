@@ -164,10 +164,33 @@ twonode_launch() {  # $1 = rank, $2 = "local"|<peer host>, $3 = this rank's IP
         --device /dev/infiniband:/dev/infiniband
         --ulimit memlock=-1
         -v "${HF_HOME:-$HOME/.cache/huggingface}:/hf"
+        # RUN AS THE INVOKING USER, so the shared HF cache stays yours.
+        #
+        # These images default to uid 0, and the cache is bind-mounted. A cold
+        # start therefore writes ~150 GiB of weights owned by root into your
+        # own ~/.cache/huggingface, and from then on the machine is not fully
+        # yours: `hf download` fails with
+        #   PermissionError: [Errno 13] ... /hub/models--…/snapshots/<rev>
+        # `rsync` to the peer transfers the bytes and then drops every one of
+        # them on "chgrp ... Operation not permitted", and `rm -rf` on your own
+        # cache needs sudo. Measured here: 213 root-owned entries after a
+        # single restart loop, and a 156 GiB checkpoint that could not be
+        # deleted without root.
+        #
+        # HOME comes with it. Triton/TileLang and vLLM's compile caches default
+        # to $HOME, which is /root in these images and unwritable for a
+        # non-root uid; pointing HOME at /hf keeps them on the same bind mount
+        # the weights already live on, which is also where they survive
+        # `docker rm`. Set GX10_CONTAINER_ROOT=1 to opt out for an image that
+        # genuinely needs uid 0.
         "${COMMON_ENV[@]}"
         # vLLM needs each rank's OWN address for distributed init.
         -e "VLLM_HOST_IP=${3:-}"
         -e "NODE_RANK=$rank"
+    )
+    [[ ${GX10_CONTAINER_ROOT:-0} == 1 ]] || args+=(
+        --user "$(id -u):$(id -g)"
+        -e "HOME=/hf"
     )
     [[ -n ${EXTRA_MOUNTS[*]:-} ]] && args+=( "${EXTRA_MOUNTS[@]}" )
 

@@ -437,7 +437,34 @@ hardware, with rank 1 on the peer. The evidence, per workspace:
 |---|---|---|
 | `vllm-2node-tp2` | `ws-vllm-2node` on both hosts; the peer's container logs `rank=1` and **1396 `NET/IB`, zero `NET/Socket`** | Nemotron-120B NVFP4: 24.2 / 67.1 / 131.6 tok/s at 1 / 4 / 16 streams; `17*23` → `391` |
 | `vllm-2node-glm53-flash-exl3` | `rank 1  poseidon  192.168.1.68   (headless)`; peer container logs **1409 `NET/IB` + `rank=1`**, rank 0 logs 1416, neither logs `NET/Socket` | see the table below — re-measured, because the first attempt was not valid |
-| `vllm-2node-deepseek-v4-flash` | same two-rank launcher | DSpark acceptance 1.00 across 5 draft positions at 79.9 tok/s |
+| `vllm-2node-deepseek-v4-flash` | both containers log **1417 `NET/IB`**, peer also `rank=1`, neither logs `NET/Socket` | see below — re-measured from a cold `ws up`, and the old figure held up |
+
+### DeepSeek-V4-Flash, from a genuinely cold start
+
+This one was re-run the way a new user would: **nothing pre-staged, no `.env`,
+one `ws up`**, with the weights deleted from both nodes first. It needed no
+manual step — 0 restarts, `Application startup complete` about 57 minutes
+later, of which 2776 s was the two ranks downloading in parallel.
+
+| | Result |
+|---|---|
+| KV pool | `GPU KV cache size: 157,271 tokens` at 131072 context |
+| Structured acceptance | **0.994** — ladder `1.00 1.00 1.00 0.99 0.99`, 4.97 of 6 per step |
+| Structured decode | **80.0 tok/s** median, TTFT 0.35 s |
+| Prose acceptance | 0.496, 2.48 per step, 46.3 tok/s |
+| Concurrency sweep | 34.1 / 51.1 / 73.3 tok/s at 1 / 4 / 16 streams |
+| `vllm-quality-gate` | 14/18; the four failures are `reasoning never closed` at `max_tokens=1024`, not correctness |
+| Swap | 4 GiB / 3 GiB, unchanged across all three probes |
+
+The figure this repo already carried — 79.9 tok/s, acceptance 1.00 — came back
+as **80.0 and 0.994**. Unlike the GLM number it was accurate; it simply had no
+log behind it. Now it does.
+
+**Cold-start cost is the one thing worth knowing:** both ranks fetch their own
+copy, so a 156 GiB checkpoint is downloaded twice over the same WAN link and
+each rank sees ~56 MB/s. GLM avoids this by downloading once at ~110 MB/s and
+moving the second copy over the interconnect at 534 MB/s. Applying that here
+would roughly halve the cold-start time.
 
 ### GLM-5.3-Flash, measured properly the second time
 

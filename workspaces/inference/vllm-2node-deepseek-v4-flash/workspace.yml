@@ -2,18 +2,34 @@ name: vllm-2node-deepseek-v4-flash
 kind: inference
 engine: vllm
 provenance: verified
-summary: DeepSeek-V4-Flash (284B/13B) across both nodes, DSpark spec decoding
+summary: DeepSeek-V4-Flash (284B/13B) across both nodes - 80.0 tok/s, 0.994 DSpark acceptance
 
 # VERIFIED on odysseus + poseidon. ~149 GiB of FP8 sharded TP=2 over RoCE,
 # 7m20s to /health, 131072 context, 10.22 GiB of KV per node, and DSpark doing
 # exactly what the header above claims:
 #
-#   ws up spec-decode-accept   structured  1.00 1.00 1.00 1.00 1.00  (k=5)
-#                              79.9 tok/s decode, 5.00 accepted per step
-#                              prose 0.47 aggregate - the documented shape
-#   ws up vllm-quality-gate    6/6 clean across concurrency 1,2
+#   ws up spec-decode-accept   structured  1.00 1.00 1.00 0.99 0.99  (k=5)
+#                              0.994 acceptance, 4.97 of 6 accepted per step
+#                              80.0 tok/s decode, TTFT 0.35s
+#                              prose 0.496, 2.48/step, 46.3 tok/s
+#   concurrency sweep          34.1 / 51.1 / 73.3 tok/s at 1 / 4 / 16 streams
+#   ws up vllm-quality-gate    14/18 - the four failures are "reasoning never
+#                              closed" at max_tokens=1024, not correctness
 #   ws up vllm-prefill-ladder  709-779 tok/s cold; the follow-up turn reused
 #                              7680 tokens and went 11.18 s -> 0.47 s TTFT
+#   GPU KV cache size          157,271 tokens
+#   swap                       4 GiB / 3 GiB, UNCHANGED across all three probes
+#
+# RE-RUN FROM A GENUINELY COLD START - weights deleted from both nodes, no
+# .env, one `ws up`, nothing staged by hand. 0 restarts, healthy ~57 min later,
+# of which 2775s was the two ranks downloading in parallel. The earlier numbers
+# here (79.9 tok/s, acceptance 1.00) came back as 80.0 and 0.994, so they were
+# right - they just had no log behind them, and now they do.
+#
+# COLD-START COST: both ranks fetch their OWN copy, so 156 GiB crosses the WAN
+# twice and each rank sees ~56 MB/s. vllm-2node-glm53-flash-exl3 downloads once
+# at ~110 MB/s and moves the second copy over the interconnect at 534 MB/s.
+# Doing the same here would roughly halve the cold start.
 #
 # ONE FLAG HAD TO COME OFF, and it is the one every official launch line for
 # this model carries. `--attention-config '{"use_fp4_indexer_cache": true}'`

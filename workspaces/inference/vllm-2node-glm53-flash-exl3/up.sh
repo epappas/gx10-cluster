@@ -32,12 +32,43 @@ NAME=ws-vllm-glm53-exl3
 # (docs/decisions.md#two-node-vllm). Digest-pin it in .env if you want the
 # stronger guarantee; both ranks pull the same tag either way, which is the
 # property that actually matters.
+# THIS ONE IMAGE MUST RUN AS ROOT, and it is the exception rather than the rule.
+# twonode_launch otherwise passes --user "$(id -u):$(id -g)" so containers
+# cannot leave root-owned weights in your own HF cache. Here the mandatory
+# kpool tail slot-map patch rewrites a file inside the image:
+#   PermissionError: [Errno 13] Permission denied:
+#   '/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/.block_table.py...'
+# and without that patch the correctness fix this workspace exists for is not
+# applied. Running as root is safe HERE specifically because up.sh downloads
+# and stages the weights on the host as you, before any container starts - so
+# the 164 GiB stays yours and only the JIT cache is written by the container.
+export GX10_CONTAINER_ROOT=1
+
 IMAGE=${IMAGE:-ghcr.io/miaai-lab/glm-5.3-flash-2x-dgx-sparks:exl3}
 PORT=${PORT:-8893}
 
 MODEL=${MODEL:-Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw}
 SERVED=${SERVED_NAME:-glm-5.3-flash-exl3}
 DRAFT_MODEL=${DRAFT_MODEL:-incoai/GLM-5.3-Flash-DFlash2}
+
+# PICK THE RIGHT SNAPSHOT, not just the first one - and in ONE place, because
+# getting this wrong twice in the same file is exactly how it went. Two things
+# put more than one directory under snapshots/: MODEL_REVISION pins one, and a
+# container that died mid-load leaves a STUB - the failed run here left
+# 024db9f7 holding 6 files beside the real 25a44fdb holding 143. Taking the
+# first one got the stub, and vLLM reported it as a WorkerProc initialization
+# error rather than as anything about missing weights.
+_pick_snapshot() {  # $1 = .../snapshots
+    local snap=$1 d
+    if [[ -n ${MODEL_REVISION:-} && -d $snap/$MODEL_REVISION ]]; then
+        printf '%s' "$MODEL_REVISION"; return 0
+    fi
+    # Otherwise the snapshot with the most entries: the one that finished.
+    for d in "$snap"/*/; do
+        [[ -d $d ]] || continue
+        printf '%s %s\n' "$(find "$d" -maxdepth 1 | wc -l)" "$(basename "$d")"
+    done | sort -rn | head -1 | cut -d' ' -f2
+}
 
 # THE MODEL HAS TO BE A PATH, AND RESOLVING IT IS THIS SCRIPT'S JOB.
 #
@@ -66,26 +97,35 @@ if [[ $MODEL == */* && $MODEL != /* ]]; then
     # initialization error rather than anything about missing weights.
     # Prefer the pinned revision; otherwise take the snapshot with the most
     # files in it, which is the one that finished downloading.
-    if [[ -n ${MODEL_REVISION:-} && -d $_snap/$MODEL_REVISION ]]; then
-        _rev=$MODEL_REVISION
-    else
-        _rev=$(for _d in "$_snap"/*/; do
-                   [[ -d $_d ]] || continue
-                   printf '%s %s\n' "$(find "$_d" -maxdepth 1 | wc -l)" "$(basename "$_d")"
-               done | sort -rn | head -1 | cut -d' ' -f2)
-    fi
+    _rev=$(_pick_snapshot "$_snap")
     if [[ -n $_rev ]]; then
         MODEL="/hf/hub/models--${MODEL//\//--}/snapshots/$_rev"
         echo "model     resolved to snapshot $_rev"
     else
-        echo "weights not cached: $MODEL" >&2
-        echo "  the container cannot fetch these itself - see the note above." >&2
-        echo "  download here, then re-run:" >&2
-        echo "    ml && hf download $MODEL${MODEL_REVISION:+ --revision $MODEL_REVISION}" >&2
-        echo "    ml && hf download $DRAFT_MODEL" >&2
-        echo "  then copy to the peer over the cable, not the WAN:" >&2
-        echo "    ./stage-weights.sh" >&2
-        exit 1
+        # FETCH THEM, DO NOT LECTURE ABOUT FETCHING THEM. `ws up` is the whole
+        # interface: a workspace that stops to tell you two commands to type is
+        # a workspace that does not work. The container genuinely cannot do
+        # this itself here - the loader needs a real path before it will start,
+        # which is the bug documented above - so up.sh does it.
+        _cli=$(twonode_hf_cli) || {
+            echo "no hf CLI found, and this workspace needs one to stage weights." >&2
+            echo "roles/ml installs it: make apply TAGS=ml" >&2
+            exit 1; }
+        echo "==> downloading $MODEL (~164 GiB) - first run only"
+        "$_cli" download "$MODEL" ${MODEL_REVISION:+--revision "$MODEL_REVISION"} >/dev/null || {
+            echo "download failed: $MODEL" >&2; exit 1; }
+        echo "==> downloading $DRAFT_MODEL"
+        "$_cli" download "$DRAFT_MODEL" >/dev/null || {
+            echo "download failed: $DRAFT_MODEL" >&2; exit 1; }
+        # And put them on the peer over the cable rather than paying the WAN
+        # twice - the reason stage-weights.sh exists. Calling it here means the
+        # optimisation is the default instead of a step people skip.
+        echo "==> staging to the peer over the interconnect"
+        ./stage-weights.sh || { echo "staging to the peer failed" >&2; exit 1; }
+        _rev=$(_pick_snapshot "$_snap")
+        [[ -n $_rev ]] || { echo "still no snapshot under $_snap" >&2; exit 1; }
+        MODEL="/hf/hub/models--${MODEL//\//--}/snapshots/$_rev"
+        echo "model     resolved to snapshot $_rev"
     fi
     # --revision is meaningless once MODEL is a local path, and vLLM rejects
     # the combination rather than ignoring it.
