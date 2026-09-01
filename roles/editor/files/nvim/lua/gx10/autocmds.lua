@@ -24,14 +24,28 @@ vim.filetype.add({
   },
 })
 
--- The content pass. `hosts:` at the top level of a document, or any
+-- The content pass. A `hosts:` key at the top level of a document, or any
 -- fully-qualified module name, is as good a signal as exists.
+--
+-- Note the optional leading dash. A playbook is a LIST of plays, so the
+-- commonest possible first line is `- hosts: all` - and a pattern that only
+-- accepted `hosts:` after whitespace missed exactly that, leaving the file as
+-- plain yaml with yamlls attached and no ansible diagnostics at all. It
+-- matched the `- name: …` / `hosts: …` form and so looked correct.
+local function looks_like_ansible(buf)
+  local head = table.concat(vim.api.nvim_buf_get_lines(buf, 0, 40, false), "\n")
+  return head:match("^%s*%-?%s*hosts:")
+    or head:match("\n%s*%-?%s*hosts:")
+    or head:match("ansible%.builtin%.")
+    or head:match("ansible%.posix%.")
+    or head:match("community%.general%.")
+end
+
 au("FileType", {
   group = group("ansible"),
   pattern = "yaml",
   callback = function(ev)
-    local head = table.concat(vim.api.nvim_buf_get_lines(ev.buf, 0, 40, false), "\n")
-    if head:match("\n%s*hosts:") or head:match("^%s*hosts:") or head:match("ansible%.builtin%.") then
+    if looks_like_ansible(ev.buf) then
       vim.bo[ev.buf].filetype = "yaml.ansible"
     end
   end,

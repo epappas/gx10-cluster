@@ -170,12 +170,17 @@ verify_checks:
     cmd: "nvim --headless -c 'lua require(\"gx10.provision\").plugins()' +qa"
     hint: "Plugins are not at the commits in lazy-lock.json. Re-run: make apply TAGS=editor"
 
-    # Treesitter parsers are compiled at provision time; without them the
-    # editor still starts and still highlights, just badly, so nothing else
-    # would report this. yaml is the one this cluster would miss first.
+    # Every parser AND its highlight queries, checked by the config's own list.
+    #
+    # This was `test -f site/parser/yaml.so` and passed on a box where YAML was
+    # visibly unhighlighted: the parser installs and the query files install as
+    # two halves of one operation, and yaml.so had landed without
+    # queries/yaml/. A parser with no queries attaches a highlighter that
+    # produces no captures - it looks exactly like treesitter being off, and a
+    # file test cannot see it.
   - name: "editor treesitter parsers"
-    cmd: "test -f $HOME/.local/share/nvim/site/parser/yaml.so"
-    hint: "Treesitter parsers were not compiled. Re-run: make apply TAGS=editor"
+    cmd: "nvim --headless -c 'lua require(\"gx10.provision\").parsers({check = true})' +qa"
+    hint: "A parser or its highlight queries are missing. Re-run: make apply TAGS=editor"
 
     # Both halves of the nvim/tmux navigation, which is the one binding that
     # silently half-works: with only the tmux side, C-h leaves the editor and

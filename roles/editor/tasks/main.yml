@@ -335,19 +335,25 @@
 # alternative is that the first person to open a YAML file waits for it
 # interactively. gx10.provision.parsers() exits non-zero if any parser fails,
 # so a broken toolchain fails the play rather than degrading the editor.
+#
+# NO stamp file, unlike the plugin restore above, and that is a correction
+# rather than an inconsistency. A stamp keyed on the parser list and the CLI
+# version says "the work was attempted for this input", which is not the same
+# as "the parsers work" - and the difference is not theoretical: this box ran
+# for a day with yaml.so installed and no queries/yaml directory, so every YAML
+# buffer had a treesitter highlighter attached, zero captures and an indentexpr
+# that returned 0 for a list item. The stamp was present, so a re-apply skipped
+# the one task that would have repaired it.
+#
+# parsers() checks the parser AND its highlight queries and returns in about a
+# second when they are all there, so it can simply run every time.
 - name: Compile the treesitter parsers
-  ansible.builtin.shell:
-    cmd: |
-      set -e
-      nvim --headless -c 'lua require("gx10.provision").parsers()' +qa
-      touch "$HOME/.local/state/nvim/.gx10-parsers-{{ nvim_parsers_hash }}"
-    creates: "{{ primary_home }}/.local/state/nvim/.gx10-parsers-{{ nvim_parsers_hash }}"
+  ansible.builtin.command:
+    cmd: nvim --headless -c 'lua require("gx10.provision").parsers()' +qa
   become_user: "{{ primary_user }}"
   become: true
-  vars:
-    # Keyed on the parser LIST and the CLI version, the two things that decide
-    # what gets built.
-    nvim_parsers_hash: "{{ (lookup('file', 'nvim/lua/gx10/parsers.lua') ~ tree_sitter_version) | hash('sha1') }}"
+  register: nvim_parsers
+  changed_when: "'installing' in nvim_parsers.stdout"
   environment:
     PATH: "/usr/local/bin:{{ ansible_facts['env']['PATH'] }}"
 

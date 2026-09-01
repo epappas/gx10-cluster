@@ -5,38 +5,86 @@
 -- that finishes before its own work does is a step that always passes.
 local M = {}
 
---- Compile every parser in gx10.parsers that is not already installed.
---- Called as: nvim --headless -c 'lua require("gx10.provision").parsers()' +qa
-function M.parsers()
+--- Compile every parser in gx10.parsers, and prove each one can actually
+--- highlight. Called as:
+---   nvim --headless -c 'lua require("gx10.provision").parsers()' +qa
+---   nvim --headless -c 'lua require("gx10.provision").parsers({check = true})' +qa
+--- @param opts table|nil { check = true } verifies and installs nothing
+function M.parsers(opts)
+  opts = opts or {}
+
+  -- A parser on its own highlights NOTHING. The .so and the query files are
+  -- installed by separate steps of the same operation, and one can land
+  -- without the other: this box had yaml.so with no queries/yaml directory,
+  -- so every YAML buffer opened with a treesitter highlighter attached, zero
+  -- captures, and an indentexpr that returned 0 for a list item. It looks
+  -- exactly like "treesitter is not working" and passed every check that only
+  -- asked whether the parser was installed.
+  --
+  -- The FILE, not vim.treesitter.query.get. get caches its answer for the life
+  -- of the process, including a negative one - so the check below would call
+  -- it, install the missing queries, call it again and be handed the cached
+  -- nil, reporting a failure it had just fixed. (Observed, before this line
+  -- looked like this.)
+  --
+  -- Searching the runtimepath also covers the languages neovim bundles, whose
+  -- queries are in $VIMRUNTIME rather than under site/.
+  local function can_highlight(lang)
+    return #vim.api.nvim_get_runtime_file("queries/" .. lang .. "/highlights.scm", false) > 0
+  end
+
+  local want = require("gx10.parsers")
+  local have = require("nvim-treesitter.config").get_installed("parsers")
+  local missing, unqueried = {}, {}
+  for _, lang in ipairs(want) do
+    if not vim.tbl_contains(have, lang) then
+      missing[#missing + 1] = lang
+    elseif not can_highlight(lang) then
+      unqueried[#unqueried + 1] = lang
+    end
+  end
+
+  local broken = vim.list_extend(vim.list_slice(missing), unqueried)
+  if #broken == 0 then
+    print("parsers: all " .. #want .. " present, with queries")
+    return
+  end
+
+  if opts.check then
+    io.stderr:write("parsers: incomplete:\n")
+    for _, lang in ipairs(missing) do io.stderr:write("  " .. lang .. ": not installed\n") end
+    for _, lang in ipairs(unqueried) do io.stderr:write("  " .. lang .. ": parser but no highlight queries\n") end
+    os.exit(1)
+  end
+
   if vim.fn.executable("tree-sitter") == 0 then
     io.stderr:write("tree-sitter CLI not found - parsers cannot be compiled\n")
     os.exit(1)
   end
-  local want = require("gx10.parsers")
-  local have = require("nvim-treesitter.config").get_installed("parsers")
-  local missing = {}
-  for _, lang in ipairs(want) do
-    if not vim.tbl_contains(have, lang) then missing[#missing + 1] = lang end
-  end
-  if #missing == 0 then
-    print("parsers: all " .. #want .. " present")
-    return
-  end
-  print("parsers: installing " .. table.concat(missing, " "))
+
+  print("parsers: installing " .. table.concat(broken, " "))
+  -- force, and this is the point: plain install() skips a language whose
+  -- parser is already there, which is precisely the half-installed case above,
+  -- so without force the repair is a no-op that reports success.
+  --
   -- 20 minutes. Compiling 35 grammars on this hardware takes about two, but a
   -- cold apt cache and a slow mirror can stretch the downloads.
-  require("nvim-treesitter").install(missing):wait(1200000)
+  require("nvim-treesitter").install(broken, { force = true }):wait(1200000)
 
   have = require("nvim-treesitter.config").get_installed("parsers")
   local failed = {}
-  for _, lang in ipairs(missing) do
-    if not vim.tbl_contains(have, lang) then failed[#failed + 1] = lang end
+  for _, lang in ipairs(broken) do
+    if not vim.tbl_contains(have, lang) then
+      failed[#failed + 1] = lang .. " (no parser)"
+    elseif not can_highlight(lang) then
+      failed[#failed + 1] = lang .. " (no queries)"
+    end
   end
   if #failed > 0 then
-    io.stderr:write("parsers: FAILED to install " .. table.concat(failed, " ") .. "\n")
+    io.stderr:write("parsers: FAILED to install " .. table.concat(failed, ", ") .. "\n")
     os.exit(1)
   end
-  print("parsers: installed " .. #missing)
+  print("parsers: installed " .. #broken)
 end
 
 --- Assert every plugin is installed AT THE COMMIT IN lazy-lock.json.
