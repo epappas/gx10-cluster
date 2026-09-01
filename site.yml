@@ -54,6 +54,13 @@
     - { role: shell,      tags: [shell] }
     - { role: dev_python, tags: [python, dev] }
     - { role: dev_rust,   tags: [rust, dev] }
+    # Node was opt-in until the editor needed it: five of the language servers
+    # roles/editor installs are npm packages. It runs BEFORE editor for that
+    # reason, and dev_go runs before it for the same one - gopls has no
+    # published binary and can only be built by a Go toolchain.
+    - { role: dev_node,   tags: [node, dev] }
+    - { role: dev_go,     tags: [go, dev] }
+    - { role: editor,     tags: [editor, dev] }
     - { role: ml,         tags: [ml] }
     - { role: inference,  tags: [inference, serving] }
     - { role: monitoring, tags: [monitoring] }

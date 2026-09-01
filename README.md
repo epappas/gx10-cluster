@@ -279,6 +279,7 @@ and a failure table. Start here.
 | Bring the cluster back after a reboot or power loss | [reboot-recover](docs/runbooks/reboot-recover.md) |
 | Get back in after an SSH lockout | [recover-ssh-lockout](docs/runbooks/recover-ssh-lockout.md) |
 | Fix something that's broken | [troubleshoot](docs/runbooks/troubleshoot.md) |
+| Edit code on the box, and drive tmux from the editor | [edit-code](docs/runbooks/edit-code.md) |
 
 ## The tools
 
@@ -294,6 +295,7 @@ every resident MB is a MB the model cannot use.
 | `gx10-storage` | Where did the 916 GB go, and what is safe to delete? (`--reclaim` plans it, `--top` ranks it, `-c` does both nodes) |
 | `gx10-sample -r` | What happened at 03:00? (systemd timer, ~1 MB/day of CSV) |
 | `ws` | What can I run, will it fit, and is it running? |
+| `gx10-sessionizer` | Which project am I switching to? (`prefix f`, or `<Space>tf` in neovim) |
 
 Plus `vllm-serve`, `allreduce_test.py`, the two bench probes and the workspace
 helpers. **[tools.md](docs/tools.md) is the full reference** — every command,
@@ -324,7 +326,7 @@ bootstrap.sh        the one thing you run by hand
 Makefile            every command you need
 inventory.yml       your nodes, interconnect index and rank  (gitignored)
 group_vars/all.yml  every tunable
-roles/              16 roles, 11 of them in site.yml   -> roles/README.md
+roles/              18 roles, 14 of them in site.yml   -> roles/README.md
 workspaces/         18 runnable recipes + the `ws` runner
                                                       -> workspaces/README.md
 vars/               playbook-scoped data              -> vars/README.md
@@ -343,10 +345,10 @@ make apply EXTRA='-e allow_apt_upgrade=true'
 Not `make apply -e …` — make eats `-e` as its own flag and it never reaches
 Ansible.
 
-Five roles are opt-in and never run from `site.yml`:
+Four roles are opt-in and never run from `site.yml`:
 
 ```bash
-make optional TAGS=ray|slurm|exporters|dashboards|node|bench
+make optional TAGS=ray|slurm|exporters|dashboards|bench
 ```
 
 A bare `optional.yml` run is a no-op. There is no `enable_*` variable per role —

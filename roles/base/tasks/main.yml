@@ -212,6 +212,10 @@
     state: present
   become: true
 
+# No neovim here, deliberately. Noble ships 0.9.5 and roles/editor installs
+# 0.12 from the upstream tarball into /opt: two nvim binaries with PATH order
+# deciding which one you get is worse than either alone, so the editor role
+# owns the editor and also removes this package if an older run installed it.
 - name: Install CLI utilities
   ansible.builtin.apt:
     name:
@@ -230,7 +234,6 @@
       - strace
       - ripgrep
       - fzf
-      - neovim
       - zsh
       - ethtool
       - iperf3

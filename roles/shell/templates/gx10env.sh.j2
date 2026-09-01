@@ -19,6 +19,11 @@ _gx10_path_prepend() {
 
 _gx10_path_prepend "{{ cuda_home }}/bin"
 _gx10_path_prepend "$HOME/.cargo/bin"
+# GOBIN's default, where `go install` puts gopls and anything else you install
+# that way. roles/dev_go writes nothing to PATH itself - ~/go/bin/gopls is a
+# symlink into a version-named directory, so this path never changes when the
+# version does.
+_gx10_path_prepend "$HOME/go/bin"
 _gx10_path_prepend "$HOME/.local/bin"
 export PATH
 
@@ -71,6 +76,15 @@ export MAX_JOBS={{ ansible_facts['processor_vcpus'] | default(20) }}
 export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
 
+# AFTER nvm, deliberately. The editor's npm language servers live in
+# ~/.local/lib/gx10-npm-<hash of the pinned list>, with ~/.local/lib/gx10-npm a
+# symlink at the current set - and sourcing nvm.sh above puts nvm's own global
+# bin at the FRONT of PATH. Prepending this earlier would leave any leftover
+# copy in nvm's prefix shadowing the set roles/editor actually deployed, so a
+# version bump would move the symlink and change nothing you can observe.
+_gx10_path_prepend "$HOME/.local/lib/gx10-npm/bin"
+export PATH
+
 # --- Aliases ---------------------------------------------------------------
 alias ml='. {{ ml_venv }}/bin/activate'
 alias gpu='nvidia-smi'
@@ -85,6 +99,21 @@ command -v fdfind  >/dev/null 2>&1 && alias fd='fdfind'
 # nicer `ls`. The `command -v eza` guard meant the aliases silently did nothing
 # once that stopped, taking `ll` with them in zsh, which has no default for it.
 alias ll='ls -lah --group-directories-first'
+
+# --- Editor ----------------------------------------------------------------
+# roles/editor installs neovim to /opt/nvim-<version> and symlinks it into
+# /usr/local/bin. EDITOR is what git, systemctl edit, crontab and `ws` hand
+# your text to, so it belongs here rather than in a shell-specific rc.
+if command -v nvim > /dev/null 2>&1; then
+    export EDITOR=nvim
+    export VISUAL=nvim
+    # Man pages with syntax highlighting, search and the same keys as
+    # everything else. `nvim +Man!` is neovim's own pager mode, not a plugin.
+    export MANPAGER='nvim +Man!'
+    alias vi='nvim'
+    alias vim='nvim'
+    alias v='nvim'
+fi
 
 # tmux, as on the devbox. `ta` with no argument attaches to the most recent
 # session instead of erroring, which is what you want after reconnecting to a

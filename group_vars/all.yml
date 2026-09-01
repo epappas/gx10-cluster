@@ -312,7 +312,12 @@ enable_dcgm: true
 # ---------------------------------------------------------------------------
 # Toolchains
 # ---------------------------------------------------------------------------
-# Node is opt-in (optional.yml --tags node). Nothing in the ML path needs it.
+# Node was opt-in (optional.yml --tags node) on the grounds that nothing in the
+# ML path needs it. That is still true of the ML path and no longer true of the
+# box: FIVE of the language servers roles/editor installs are npm packages
+# (yaml, json, bash, ansible, pyright), so dev_node moved into site.yml and
+# runs before it. Nothing else changed - npm_globals below is still just JS
+# tooling, and the servers are a separate list (editor_npm_servers).
 nvm_version: "v0.40.1"
 node_version: "22"
 npm_globals:
@@ -326,6 +331,96 @@ npm_globals:
 rust_toolchain: "1.97.1"
 
 default_shell: /usr/bin/zsh
+
+# The Go toolchain, from the official tarball. Installed for one reason and it
+# is worth being honest about it: gopls, the Go language server, is not
+# published as a binary by anyone - `go install` is the only way to get it - so
+# "the editor understands Go" and "this box has a Go toolchain" are the same
+# statement.
+#
+# The checksum is go.dev's own, published in the release JSON at
+# https://go.dev/dl/?mode=json, not one computed here.
+go_version: "1.27.0"
+go_sha256: "51798d2c42d0e1c6ed7fd9f48728b4193abac9e8aad6dbac2fe96a81f5909bda"
+# Pinned like every other tool. gopls is a compiler-adjacent binary and its
+# analyses change between releases; two boxes disagreeing about whether your
+# code has a bug is exactly the failure this repo exists to prevent.
+gopls_version: "v0.23.0"
+
+# ---------------------------------------------------------------------------
+# Editor
+#
+# roles/editor installs neovim itself, every language server, and a lazy.nvim
+# config whose plugin commits are pinned in roles/editor/files/nvim/lazy-lock.json.
+# See docs/runbooks/edit-code.md.
+#
+# NOT the apt neovim, which roles/base used to install: noble ships 0.9.5, and
+# the plugin set here needs the 0.11+ LSP API (vim.lsp.config / vim.lsp.enable)
+# and the treesitter main branch. Two nvim binaries on one box, with PATH order
+# deciding which you get, is worse than either alone - so base no longer
+# installs one.
+#
+# The checksum is computed from the release asset, NOT copied from an upstream
+# sums file: neovim publishes no checksums with its releases (verified against
+# the v0.12.5 asset list). Bumping neovim_version therefore means recomputing
+# this - `sha256sum` on the downloaded tarball - and the download fails loudly
+# if you forget.
+# ---------------------------------------------------------------------------
+neovim_version: "0.12.5"
+neovim_sha256: "1aa5ca085249580ae0f91eb14f27ec0919773ff2d99a163d03f3d6c21ac29725"
+
+# The plugin manager, pinned to a tag. The plugins it manages are pinned
+# separately and more strictly, by commit, in lazy-lock.json.
+lazy_nvim_version: "v11.17.5"
+
+# nvim-treesitter's main branch compiles parsers with the tree-sitter CLI
+# rather than shelling out to cc itself, so this is a hard dependency of
+# syntax highlighting - without it every :TSInstall fails with ENOENT and the
+# editor silently falls back to regex highlighting.
+tree_sitter_version: "0.27.0"
+tree_sitter_sha256: "3a35a2dd961ad842384e982c75daf792c01d1a67e442fc3914d4de37bd8a59cb"
+
+# Language servers that ship as a release binary. The npm ones are below; rust
+# comes from rustup (roles/dev_rust) and gopls from `go install` (roles/dev_go),
+# in both cases so the server matches the compiler that will be run.
+#
+# Checksums: lua-language-server and marksman publish none, so these are
+# computed from the assets. terraform-ls is fetched with HashiCorp's own
+# SHA256SUMS URL instead - see the task - so it has no digest here to go stale.
+lua_ls_version: "3.19.1"
+lua_ls_sha256: "abd2572e8fc929dc838a81ffb8473c5bce0bf39bfe8edb4b120b3b623176ce83"
+terraform_ls_version: "0.39.0"
+# Yes, the version really is a date. marksman tags releases that way.
+marksman_version: "2026-02-08"
+marksman_sha256: "db8e124527f7f8048e3e6c91821b9c52ef173d92c01e47d221bf1337afd962fb"
+
+# The npm half. Pinned specs, never bare names - see the changed_when in
+# roles/dev_node for what a bare name costs.
+editor_npm_servers:
+  - "yaml-language-server@1.24.0"
+  - "bash-language-server@5.6.0"
+  # json, html, css and eslint in one package - this is where
+  # vscode-json-language-server comes from.
+  - "vscode-langservers-extracted@4.10.0"
+  - "@ansible/ansible-language-server@26.6.0"
+  # Types for python. Lint and format are ruff's job (installed as a uv tool),
+  # and lsp.lua turns pyright's own linter off so the same unused import is not
+  # reported twice in two wordings.
+  - "pyright@1.1.413"
+  # Formatter for json, yaml and markdown, driven by conform.nvim.
+  - "prettier@3.9.6"
+  - "markdownlint-cli@0.49.1"
+
+# The python half. ansible-core is here for the ANSIBLE LANGUAGE SERVER, which
+# shells out to ansible-lint for diagnostics and ansible-doc for hover
+# documentation; without them it starts, attaches, and reports nothing.
+#
+# Pinned to the same versions this repo's own `make check` uses, so a
+# diagnostic you see while editing a role is one CI will also produce.
+editor_uv_tools:
+  - "ansible-core==2.21.3"
+  - "ansible-lint==25.6.1"
+  - "yamllint==1.38.0"
 
 # ---------------------------------------------------------------------------
 # Remote access

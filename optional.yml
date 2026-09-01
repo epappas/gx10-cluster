@@ -12,8 +12,11 @@
 #   dashboards  the above plus prometheus and grafana on this box. Costs real
 #               memory, which here is model capacity - prefer running them
 #               elsewhere and pointing at the exporter.
-#   node        Node.js via nvm. Nothing in the ML path needs it; it is here
-#               for JS tooling if you happen to want it.
+#
+# Node.js was here (--tags node) and has moved into site.yml: roles/editor
+# installs five npm language servers, so a box that can edit YAML, JSON, bash,
+# ansible or python needs it. `make optional TAGS=node` is gone; the toolchain
+# arrives with `make apply`.
 #
 #   ansible-playbook optional.yml --tags ray -K
 #   ansible-playbook optional.yml --tags exporters -K
@@ -87,13 +90,6 @@
         apply:
           tags: [dashboards]
       tags: [dashboards, never]
-
-    - name: Node.js toolchain
-      ansible.builtin.include_role:
-        name: dev_node
-        apply:
-          tags: [node]
-      tags: [node, never]
 
     # Installs the tooling only. `make bench` runs it.
     - name: Benchmark tooling

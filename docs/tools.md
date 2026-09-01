@@ -24,6 +24,8 @@ and, where they lie to you on this hardware, in
 | [`vllm-serve`](#vllm-serve) | `roles/inference` | Serve one model, one node, no ceremony |
 | [`allreduce_test.py`](#allreduce_testpy) | `roles/cluster` | Does NCCL actually use the cable? |
 | [`gx10env.sh`](#gx10envsh) | `roles/shell` | *(sourced)* PATH and CUDA env for every shell |
+| [`gx10-sessionizer`](#gx10-sessionizer) | `roles/shell` | Which project am I switching to? |
+| [`nvim`](#nvim) | `roles/editor` | The editor, and the keys that drive tmux from inside it |
 | [`gpu-metrics.sh`](#gpu-metricssh) | `roles/observability` | GPU metrics for Prometheus *(opt-in)* |
 | [`bootstrap.sh`](#bootstrapsh) | repo root | Get a fresh box to where Ansible can take over |
 | [`make`](#make) | repo root | Everything else: check, apply, verify, bench |
@@ -304,9 +306,10 @@ prints the transport and interface it chose.
 Not a command — `~/.gx10env.sh`, sourced by `~/.bashrc` and `~/.zshrc`. POSIX
 `sh`, because both shells read it.
 
-Puts `$CUDA_HOME/bin`, `~/.cargo/bin` and `~/.local/bin` on PATH idempotently,
-and sets the CUDA and allocator environment. `make verify` checks it by
-grepping for `PYTORCH_CUDA_ALLOC_CONF`.
+Puts `$CUDA_HOME/bin`, `~/.cargo/bin`, `~/go/bin` and `~/.local/bin` on PATH
+idempotently, and sets the CUDA and allocator environment. `make verify` checks
+it by grepping for `PYTORCH_CUDA_ALLOC_CONF`. It also sets `EDITOR`, `VISUAL`
+and `MANPAGER` to neovim when neovim is installed.
 
 It deliberately sets **no `NCCL_*` variables.** NCCL gives the environment
 precedence over `/etc/nccl.conf`, so exporting them here would override the
@@ -315,6 +318,49 @@ SSH-launched rank different settings, which is a Tuesday-works-Wednesday-fails
 bug. `/etc/nccl.conf` owns NCCL.
 
 → [provision-node](runbooks/provision-node.md)
+
+### gx10-sessionizer
+
+`prefix f` in tmux, `<Space>tf` in neovim, or just run it. Fuzzy-picks a
+project and switches to a tmux session named after it, creating the session if
+it does not exist.
+
+Candidates are, in order: sessions that already exist, git repositories up to
+three levels under `$GX10_PROJECT_ROOTS` (default `~/src ~/projects ~/work`),
+and whatever zoxide has learned. Existing sessions come first because switching
+back to a running job is the common case, and a directory list cannot offer it.
+
+Installed to `/usr/local/bin`, not `~/.local/bin`, for the same reason as
+`gx10-top`: `tmux display-popup` runs the command through a non-login shell
+that never sources `~/.gx10env.sh`.
+
+→ [edit-code](runbooks/edit-code.md)
+
+### nvim
+
+Neovim at the version in `group_vars/all.yml`, installed to
+`/opt/nvim-<version>` and symlinked into `/usr/local/bin` — **not** the apt
+package, which is 0.9.5 on noble and too old for the config.
+
+The configuration lives in `roles/editor/files/nvim` and is deployed to
+`~/.local/share/gx10/nvim-<content hash>`, with `~/.config/nvim` a symlink at
+it — so an apply swaps the tree rather than editing it, and nothing deleted
+from the repo lingers on the node. Your own settings go in
+`~/.config/nvim-local/init.lua`, outside the deployment, and are loaded last.
+Plugins are pinned by commit in `lazy-lock.json` and restored, never updated,
+so both nodes run identical trees.
+
+Two commands worth knowing before anything else:
+
+```vim
+:GX10Servers      " which language servers are installed, and which attached
+```
+
+```bash
+nvim --headless -c 'lua require("gx10.provision").doctor()' +qa   # same, with an exit code
+```
+
+→ [edit-code](runbooks/edit-code.md)
 
 ### gpu-metrics.sh
 

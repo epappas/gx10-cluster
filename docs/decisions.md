@@ -2194,3 +2194,144 @@ comparison, which needs both servers behind the same probe.
   already installs it and this repo's ollama story is "quickest, good for chat"
   ([serve-models](runbooks/serve-models.md)). Recorded because it is the
   cheapest way to try the model before committing ~94 GiB to it.
+
+## <a name="editor-on-the-box"></a>The editor is installed by the play, and pinned like everything else
+
+`roles/editor` puts neovim, ten language servers and 37 plugins on both nodes.
+Four choices in it were not obvious, and one of them changes what `site.yml`
+installs on every box.
+
+### Why an editor is provisioned infrastructure at all
+
+The work that only reproduces here is the work you most need to edit here: a
+dataloader that only misbehaves against 121 GB of coherent memory, a vLLM flag
+that only matters at `sm_121`, a two-node job that has nowhere else to run.
+Editing that over a mounted filesystem puts the language server on a machine
+with a different Python, a different CUDA and a different GPU from the one the
+code runs on.
+
+Once the editor is on the box it is reached the way the box is reached — SSH,
+tmux, and a connection that drops — which is why the tmux integration is the
+part with the most design in it rather than a convenience binding. Neovim
+drives the tmux session it runs inside (panes, a runner, popups, the session
+switcher) instead of using `:terminal`, because a tmux pane outlives the editor
+and can be watched from another window while you keep typing.
+
+### No mason.nvim
+
+mason is how nearly every neovim configuration installs language servers, and
+it is the wrong tool on this box twice over. It downloads binaries on first
+use, unpinned, from whatever its registry points at that day — the `curl | sh`
+shape this repo removed from three other roles. And roughly half its registry
+ships x86_64 assets only, so on aarch64 it installs something that cannot run
+and the editor simply never gets a server, with no error that names the cause.
+
+So ansible installs every server from a pinned, checksummed release, and the
+config only says how to *configure* them. The cost is that adding a server
+means editing a role; the benefit is that `make verify` can assert the set, and
+`:GX10Servers` can tell you which one is missing.
+
+Two servers deliberately do not come from a release at all: `rust-analyzer` is
+a rustup component and `gopls` is a `go install`, so each matches the compiler
+that will actually be run rather than being independently versioned against it.
+
+### Plugins are pinned by commit, and restored rather than updated
+
+`lazy-lock.json` is committed, and the play runs `Lazy! restore`, never `sync`.
+`sync` resolves every plugin to its branch HEAD, which would make each node's
+editor a function of the day it was provisioned — the same drift the ML
+lockfile exists to prevent, and the reason `make nvim-lock` exists to move the
+lockfile deliberately.
+
+One lockfile-shaped trap, found the hard way: lazy.nvim manages *itself* as a
+plugin and writes its own branch into the lockfile. Cloned shallow at a tag
+(`--depth 1 --branch v11.17.5`) there is no `refs/remotes/origin/HEAD` to read
+a branch from, and every lockfile write dies on an assertion in
+`lazy/manage/lock.lua`. The role therefore does a full clone and checks the tag
+out — which is what `ansible.builtin.git` does by default, and now on purpose.
+
+### Node and Go moved from opt-in into `site.yml`
+
+`dev_node` was opt-in on the grounds that nothing in the ML path needs Node.
+That is still true of the ML path and no longer true of the box: five of these
+language servers are npm packages (yaml, json, bash, ansible, pyright). `dev_go`
+is new for one reason — nobody publishes a `gopls` binary, so a Go toolchain and
+a Go-aware editor are the same statement.
+
+The alternative was to install the npm servers only when Node happens to be
+present, which is precisely the silent degradation this repo argues against
+elsewhere: an editor that claims to support YAML, attaches nothing, and reports
+no error. Making them dependencies costs about a gigabyte on a machine that
+holds 130 GB of weights.
+
+<a name="immutable-artifacts"></a>
+### Every artifact is versioned and every pointer is a symlink
+
+The first version of this role installed four things by writing over the top of
+them: `gunzip` onto `/usr/local/bin/tree-sitter`, `unzip` onto
+`/usr/local/bin/terraform-ls`, `get_url` straight onto `/usr/local/bin/marksman`,
+and — worst — a Go bump that **deleted `/usr/local/go`** before unpacking the
+replacement. Each recorded its version in a separate stamp file, which is a
+second source of truth that can disagree with the artifact it describes.
+
+All of it now follows the shape neovim already had: the artifact lands in a
+directory named after its version, and a symlink points at it.
+
+```
+/opt/nvim-<version>            ~/go/versions/gopls-<version>
+/opt/go-<version>              ~/.local/lib/gx10-npm-<hash of the pinned list>
+/opt/<server>-<version>        ~/.local/share/gx10/nvim-<hash of the config>
+```
+
+Four things follow from that, and they are the argument for it:
+
+- **There is no window with nothing installed.** The old binary keeps working
+  until the link moves, so a download that fails its checksum costs you
+  nothing.
+- **Rollback needs no network and no ansible.** `ln -sfn` to the previous
+  directory, which is still there because the play never deletes it.
+- **The path is the version record.** No stamp file to drift out of step with
+  the binary it claims to describe, and `ls -l /usr/local/bin/nvim` answers
+  "which version is this box running" exactly.
+- **Idempotence gets easier, not harder.** `creates:` on a version-named path
+  is a real test of "is THIS version installed". The npm task previously
+  scraped `added \d+ package` out of npm's output to decide whether it had
+  changed anything; a prefix per pinned set replaced that with a directory
+  test.
+
+The npm set is per-SET rather than per-package for a reason: `npm install -g`
+writes into one shared tree, so bumping one server rewrites part of a set that
+was resolved together, and a failure halfway through leaves a mixture that
+nothing records. A prefix named after the hash of the pinned list makes the
+whole set the artifact — it exists complete, or it does not exist.
+
+The neovim CONFIG is in that list deliberately. Copying it into
+`~/.config/nvim` in place had a defect that only appears months later: `copy`
+never removes anything, so a plugin spec deleted from the repo stays on the
+node and keeps being loaded. That is why local customisation moved OUT of the
+tree to `~/.config/nvim-local/init.lua` — the tree is replaced wholesale, so
+anything inside it would go with the swap.
+
+Two things are deliberately left replaceable rather than side-by-side, and it
+is worth being precise about why they are not exceptions in spirit:
+
+- **The plugins**, which are git checkouts at the commits in `lazy-lock.json`.
+  The artifact's identity IS the commit, the state is derived entirely from a
+  committed pin, and rollback is restoring the lockfile — everything the
+  versioned directories buy, by another mechanism.
+- **The uv tools** (`ansible-core`, `ansible-lint`, `yamllint`). uv owns that
+  layout and has no side-by-side mode; the environment is rebuilt from a pinned
+  spec rather than mutated incrementally, and `roles/dev_python` already works
+  this way. A second mechanism for three tools would cost more in divergence
+  than it buys.
+
+### The assistant points at this cluster first
+
+The AI plugin's default adapter is chosen at startup by what actually answers:
+the vLLM server a workspace is serving, then the ollama service, then Anthropic
+only if `ANTHROPIC_API_KEY` is set. Both local endpoints are already bound to
+loopback, which is exactly where an editor running on the node can reach them
+and nothing else can — so the default is also the choice where the buffer never
+leaves the machine.
+
+→ [edit-code](runbooks/edit-code.md)

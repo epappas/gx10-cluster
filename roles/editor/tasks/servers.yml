@@ -1,0 +1,264 @@
+---
+# The language servers, one install path per ecosystem.
+#
+# There is no mason.nvim in the editor config, and this file is the reason it
+# is not needed. Everything here is pinned in group_vars, downloaded from the
+# vendor's own release, and checksummed - which mason does none of, and which
+# matters more than usual on aarch64, where a good half of its registry ships
+# x86_64 assets and installs them anyway.
+#
+# Everything installed here follows the same shape as the editor itself: the
+# artifact goes in a directory named after its version and a symlink in
+# /usr/local/bin (or ~/.local/lib) points at it. Nothing is written over the
+# top of a working binary, so a version bump cannot leave a box with neither
+# the old server nor the new one, and a rollback is `ln -sf`.
+#
+# Two servers are deliberately NOT here:
+#   rust-analyzer  a rustup component, added by roles/dev_rust, so it always
+#                  matches the pinned toolchain that will compile the code.
+#   gopls          `go install` from roles/dev_go, for the same reason - and
+#                  because nobody publishes a gopls binary.
+
+- name: Install the shell tooling the editor drives
+  ansible.builtin.apt:
+    name:
+      # bash-language-server runs shellcheck for diagnostics; conform runs
+      # shfmt to format. Both are what `make check` uses on this repo's own
+      # scripts, so the editor agrees with CI.
+      - shellcheck
+      - shfmt
+    state: present
+  become: true
+
+# --- lua-language-server ---------------------------------------------------
+# For this configuration itself, which is ~1200 lines of Lua. Editing it
+# without a server is the one gap that would be felt on every change to the
+# editor.
+- name: Check whether the installed lua-language-server is already {{ lua_ls_version }}
+  ansible.builtin.stat:
+    path: "/opt/lua-language-server-{{ lua_ls_version }}/bin/lua-language-server"
+  register: lua_ls_installed
+
+- name: Download lua-language-server {{ lua_ls_version }}
+  ansible.builtin.get_url:
+    url: >-
+      https://github.com/LuaLS/lua-language-server/releases/download/{{ lua_ls_version }}/lua-language-server-{{ lua_ls_version }}-linux-arm64.tar.gz
+    checksum: "sha256:{{ lua_ls_sha256 }}"
+    dest: "/var/cache/gx10/lua-language-server-{{ lua_ls_version }}.tar.gz"
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  when: not lua_ls_installed.stat.exists
+
+# --one-top-level, where neovim needed --transform: this archive is rooted at
+# bin/ and main.lua rather than at a directory named after the release, so tar
+# has to CREATE the versioned directory rather than rename one. Extracting into
+# /opt rather than into a directory made by a previous task is what keeps
+# `make diff` working - see the note on the neovim unpack.
+- name: Unpack lua-language-server
+  ansible.builtin.unarchive:
+    src: "/var/cache/gx10/lua-language-server-{{ lua_ls_version }}.tar.gz"
+    dest: /opt
+    remote_src: true
+    extra_opts:
+      - "--one-top-level=lua-language-server-{{ lua_ls_version }}"
+    owner: root
+    group: root
+  become: true
+  when:
+    - not lua_ls_installed.stat.exists
+    # get_url does not download under --check, so the archive is not there to
+    # unpack and this would fail with "Source ... does not exist" - reporting a
+    # broken role on a box that simply does not have it yet. There is nothing
+    # for a dry run to say about unpacking a file that was never fetched.
+    - not ansible_check_mode
+
+- name: Remove the lua-language-server archive
+  ansible.builtin.file:
+    path: "/var/cache/gx10/lua-language-server-{{ lua_ls_version }}.tar.gz"
+    state: absent
+  become: true
+
+# The binary finds main.lua next to its own REAL path, so a symlink is enough
+# and no wrapper script is needed. Verified on this hardware.
+  # force, only because of --check: the link's target is unpacked by the task
+  # above, which a dry run cannot do, and file refuses to create a link to a
+  # path that does not exist yet. On a real run the target is always there -
+  # the unpack is `any_errors_fatal` and would have stopped the play.
+- name: Put lua-language-server on PATH
+  ansible.builtin.file:
+    src: "/opt/lua-language-server-{{ lua_ls_version }}/bin/lua-language-server"
+    dest: /usr/local/bin/lua-language-server
+    state: link
+    force: true
+  become: true
+
+# --- terraform-ls ----------------------------------------------------------
+- name: Check whether terraform-ls is already unpacked at {{ terraform_ls_version }}
+  ansible.builtin.stat:
+    path: "/opt/terraform-ls-{{ terraform_ls_version }}/terraform-ls"
+  register: terraform_ls_installed
+
+# The checksum comes from HashiCorp's own SHA256SUMS for this release, looked
+# up by the URL's basename - so bumping terraform_ls_version cannot leave a
+# stale digest behind to either fail confusingly or, worse, pass. Same
+# mechanism as the ollama tarball in roles/ml.
+- name: Download terraform-ls {{ terraform_ls_version }}
+  ansible.builtin.get_url:
+    url: >-
+      https://releases.hashicorp.com/terraform-ls/{{ terraform_ls_version }}/terraform-ls_{{ terraform_ls_version }}_linux_arm64.zip
+    checksum: >-
+      sha256:https://releases.hashicorp.com/terraform-ls/{{ terraform_ls_version }}/terraform-ls_{{ terraform_ls_version }}_SHA256SUMS
+    dest: "/var/cache/gx10/terraform-ls-{{ terraform_ls_version }}.zip"
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  when: not terraform_ls_installed.stat.exists
+
+# The zip holds the bare binary and nothing else, so unzip is given the
+# versioned directory to write into - the same shape as the tree-sitter CLI in
+# main.yml, and for the same reason: the binary's path is its version record,
+# and the previous release stays on disk to roll back to.
+- name: Create the install directory for terraform-ls {{ terraform_ls_version }}
+  ansible.builtin.file:
+    path: "/opt/terraform-ls-{{ terraform_ls_version }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+- name: Unpack terraform-ls
+  ansible.builtin.shell:
+    cmd: |
+      set -e
+      unzip -o -q /var/cache/gx10/terraform-ls-{{ terraform_ls_version }}.zip \
+        terraform-ls -d /opt/terraform-ls-{{ terraform_ls_version }}
+      chmod 0755 /opt/terraform-ls-{{ terraform_ls_version }}/terraform-ls
+    creates: "/opt/terraform-ls-{{ terraform_ls_version }}/terraform-ls"
+  become: true
+
+- name: Remove the terraform-ls archive
+  ansible.builtin.file:
+    path: "/var/cache/gx10/terraform-ls-{{ terraform_ls_version }}.zip"
+    state: absent
+  become: true
+
+  # force: the unpack above is skipped under --check, so a dry run has no
+  # target for this link yet.
+- name: Point /usr/local/bin at terraform-ls {{ terraform_ls_version }}
+  ansible.builtin.file:
+    src: "/opt/terraform-ls-{{ terraform_ls_version }}/terraform-ls"
+    dest: /usr/local/bin/terraform-ls
+    state: link
+    force: true
+  become: true
+
+# --- marksman --------------------------------------------------------------
+# Markdown: link and heading completion, rename-across-files, and a workspace
+# symbol index. This repo is ~30 markdown files that link to each other and
+# `make docs` fails on a dead link, so the payoff is immediate.
+#
+# A single binary, so get_url IS the install - but into the versioned
+# directory, not over /usr/local/bin/marksman. Downloading straight onto the
+# live path means the moment the new release starts arriving there is no
+# working server, and if the checksum then fails you have neither.
+- name: Create the install directory for marksman {{ marksman_version }}
+  ansible.builtin.file:
+    path: "/opt/marksman-{{ marksman_version }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+- name: Install marksman {{ marksman_version }}
+  ansible.builtin.get_url:
+    url: "https://github.com/artempyanykh/marksman/releases/download/{{ marksman_version }}/marksman-linux-arm64"
+    checksum: "sha256:{{ marksman_sha256 }}"
+    dest: "/opt/marksman-{{ marksman_version }}/marksman"
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+- name: Point /usr/local/bin at marksman {{ marksman_version }}
+  ansible.builtin.file:
+    src: "/opt/marksman-{{ marksman_version }}/marksman"
+    dest: /usr/local/bin/marksman
+    state: link
+    force: true
+  become: true
+
+# --- The npm servers -------------------------------------------------------
+# yaml, json, bash, ansible and pyright. Node comes from roles/dev_node, which
+# runs before this role in site.yml for exactly this reason.
+#
+# The nvm dance (source, then use) is the same as roles/dev_node: nvm is a
+# shell function, so nothing inherits its PATH - not this task, and not neovim
+# either, which is why lua/gx10/path.lua resolves the same directory itself.
+# --prefix, into a directory named after the hash of the pinned list. `npm
+# install -g` writes into ONE shared tree, so bumping a single server rewrites
+# part of a set that was resolved together, and a failure halfway through
+# leaves a mixture with no record of what it is. A prefix per set makes the
+# whole set the artifact: it either exists complete or it does not.
+#
+# It also removes the output-parsing from roles/dev_node that this task used to
+# copy. `creates:` on a directory that is only ever written once is a stronger
+# idempotence test than "did npm print 'added N packages'".
+- name: Name the language-server prefix after its pinned list
+  ansible.builtin.set_fact:
+    editor_npm_prefix: "{{ primary_home }}/.local/lib/gx10-npm-{{ (editor_npm_servers | join(' ')) | hash('sha1') | truncate(12, true, '') }}"
+
+- name: Ensure the library directory exists
+  ansible.builtin.file:
+    path: "{{ primary_home }}/.local/lib"
+    state: directory
+    owner: "{{ primary_user }}"
+    group: "{{ primary_user }}"
+    mode: "0755"
+  become: true
+
+- name: Install the npm language servers
+  ansible.builtin.shell:
+    cmd: |
+      set -e
+      . "$HOME/.nvm/nvm.sh"
+      nvm use default >/dev/null
+      npm install -g --prefix {{ editor_npm_prefix | quote }} {{ editor_npm_servers | join(' ') }}
+    executable: /bin/bash
+    creates: "{{ editor_npm_prefix }}/bin"
+  become_user: "{{ primary_user }}"
+  become: true
+
+# What ~/.gx10env.sh and lua/gx10/path.lua put on PATH, so the version in use
+# is one symlink rather than a path baked into two other files.
+- name: Point ~/.local/lib/gx10-npm at the current language-server set
+  ansible.builtin.file:
+    src: "{{ editor_npm_prefix }}"
+    dest: "{{ primary_home }}/.local/lib/gx10-npm"
+    state: link
+    force: true
+    owner: "{{ primary_user }}"
+    group: "{{ primary_user }}"
+  become_user: "{{ primary_user }}"
+  become: true
+
+# --- The python tools ------------------------------------------------------
+# ansible-core and ansible-lint are here for the ANSIBLE LANGUAGE SERVER, not
+# to run plays from the node: the server shells out to ansible-lint for
+# diagnostics and ansible-doc for hover documentation, and without them it
+# attaches and then reports nothing at all - the most confusing possible
+# failure, because the status line says it is running.
+- name: Install the editor's python tools with uv
+  ansible.builtin.command: "{{ uv_bin }} tool install {{ item }}"
+  become_user: "{{ primary_user }}"
+  become: true
+  loop: "{{ editor_uv_tools }}"
+  register: editor_uv_install
+  # The no-op message is "`ansible-lint==25.6.1` is already installed",
+  # lowercase; the capital I distinguishes a real install. See roles/dev_python
+  # for what --quiet cost here once.
+  changed_when: "'Installed' in (editor_uv_install.stderr | default(''))"

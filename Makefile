@@ -187,8 +187,8 @@ models: inventory  ## Download the model sets (long; resumable)
 	ansible-playbook site.yml $(ASKPASS) --tags models $(ANSIBLE_ARGS)
 
 .PHONY: optional
-optional: inventory  ## Install an opt-in component: make optional TAGS=ray|slurm|exporters|dashboards|node|bench
-	@[ -n "$(TAGS)" ] || { echo "pick one: make optional TAGS=ray|slurm|exporters|dashboards|node|bench"; exit 1; }
+optional: inventory  ## Install an opt-in component: make optional TAGS=ray|slurm|exporters|dashboards|bench
+	@[ -n "$(TAGS)" ] || { echo "pick one: make optional TAGS=ray|slurm|exporters|dashboards|bench"; exit 1; }
 	ansible-playbook optional.yml $(ASKPASS) --tags $(TAGS) $(if $(LIMIT),--limit $(LIMIT),) $(EXTRA)
 
 # Resolve roles/ml/files/requirements-ml.in into a fully pinned .txt.
@@ -226,6 +226,28 @@ lock:  ## Re-resolve the ML lockfile (run ON a GX10; commit the result)
 # The canonical Ansible test: a correct playbook changes nothing on a second
 # run. NOTE it catches only one direction - a task that reports changed when it
 # should not. A changed_when that NEVER fires makes this target pass.
+# Bring the editor's plugin lockfile back into the repo after resolving it on a
+# box. The direction matters and is the opposite of `make lock`: nvim writes
+# ~/.config/nvim/lazy-lock.json when you run :Lazy sync or :Lazy update, and
+# THAT file is the resolution - this target only copies it back so it can be
+# committed and both nodes get the same plugin commits.
+#
+# LOCAL by default, because that is where you were editing. Set NODE to pull it
+# from the other box: make nvim-lock NODE=poseidon
+NODE ?=
+.PHONY: nvim-lock
+nvim-lock:  ## Copy the resolved neovim plugin lockfile into the repo (commit the result)
+	@if [ -n "$(NODE)" ]; then \
+	  scp $(NODE):.config/nvim/lazy-lock.json roles/editor/files/nvim/lazy-lock.json; \
+	else \
+	  test -f "$(HOME)/.config/nvim/lazy-lock.json" || { \
+	    echo "nvim-lock: no ~/.config/nvim/lazy-lock.json here - run this on a provisioned node, or pass NODE=<host>"; \
+	    exit 1; }; \
+	  cp "$(HOME)/.config/nvim/lazy-lock.json" roles/editor/files/nvim/lazy-lock.json; \
+	fi
+	@git diff --stat -- roles/editor/files/nvim/lazy-lock.json
+	@echo "nvim-lock: review the diff before committing"
+
 .PHONY: idempotence
 idempotence: inventory  ## Apply twice; the second run must report zero changes
 	@echo "==> first run"

@@ -1,0 +1,140 @@
+---
+# The Go toolchain, from go.dev's official tarball.
+#
+# Installed for one honest reason: gopls. Nobody publishes a gopls binary -
+# `go install` is the only supported way to get it - so "this box can edit Go"
+# and "this box has a Go toolchain" are the same sentence. Having got one,
+# `go build` and `go test` come free, which is what makes the editor's
+# <leader>ct (test this function) do anything.
+#
+# NOT apt: noble's golang-go is a version behind and is not upgraded in place,
+# and the go.dev tarball is what the release checksums in group_vars refer to.
+#
+# The layout is versioned and the pointer is a symlink, like every other
+# release binary this repo installs: /opt/go-<version>, never /usr/local/go.
+# An in-place tree means a version bump has to DELETE the working toolchain
+# before it has the new one - a window with no compiler, and no way back if the
+# download turns out to be wrong. Here the old tree is still there, and a
+# rollback is `ln -sf`.
+
+- name: Check whether Go is already unpacked at {{ go_version }}
+  ansible.builtin.stat:
+    path: "/opt/go-{{ go_version }}/bin/go"
+  register: go_installed
+
+- name: Ensure the download directory exists
+  ansible.builtin.file:
+    path: /var/cache/gx10
+    state: directory
+    mode: "0755"
+  become: true
+
+# The checksum is go.dev's own, from https://go.dev/dl/?mode=json, not one
+# computed here - so it verifies the release rather than verifying that the
+# file has not changed since somebody downloaded it once.
+- name: Download the Go tarball for {{ go_version }}
+  ansible.builtin.get_url:
+    url: "https://go.dev/dl/go{{ go_version }}.linux-arm64.tar.gz"
+    checksum: "sha256:{{ go_sha256 }}"
+    dest: "/var/cache/gx10/go{{ go_version }}.linux-arm64.tar.gz"
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  when: not go_installed.stat.exists
+
+# Two --transform rules, not one. The archive is rooted at `go/`, and the bare
+# directory member is named `go` with no trailing slash - so a single
+# `s|^go/|go-<version>/|` renames everything INSIDE the tree and leaves an
+# empty /opt/go behind. Verified against the archive's actual member list.
+#
+# Extracting into /opt rather than into a directory a previous task creates is
+# what keeps `make diff` honest: unarchive requires dest to be an existing
+# directory, and under --check that mkdir has not really happened.
+- name: Unpack Go into /opt/go-{{ go_version }}
+  ansible.builtin.unarchive:
+    src: "/var/cache/gx10/go{{ go_version }}.linux-arm64.tar.gz"
+    dest: /opt
+    remote_src: true
+    extra_opts:
+      - --transform
+      - "s|^go/|go-{{ go_version }}/|"
+      - --transform
+      - "s|^go$|go-{{ go_version }}|"
+    owner: root
+    group: root
+  become: true
+  when:
+    # get_url does not download under --check, so the archive is not there to
+    # unpack and this would fail with "Source ... does not exist" - reporting a
+    # broken role on a box that simply does not have it yet. There is nothing
+    # for a dry run to say about unpacking a file that was never fetched.
+    - not go_installed.stat.exists
+    - not ansible_check_mode
+
+- name: Remove the downloaded Go tarball
+  ansible.builtin.file:
+    path: "/var/cache/gx10/go{{ go_version }}.linux-arm64.tar.gz"
+    state: absent
+  become: true
+
+# The pointer flip, and the only mutable thing in this role. go finds GOROOT
+# from the REAL path of its own executable, so a symlink here needs no
+# GOROOT export and no wrapper.
+#
+# force, only because of --check: the link's target is unpacked by the task
+# above, which a dry run cannot do, and file refuses to create a link to a path
+# that does not exist yet. On a real run the target is always there - the
+# unpack is `any_errors_fatal` and would have stopped the play.
+- name: Point /usr/local/bin at Go {{ go_version }}
+  ansible.builtin.file:
+    src: "/opt/go-{{ go_version }}/bin/{{ item }}"
+    dest: "/usr/local/bin/{{ item }}"
+    state: link
+    force: true
+  become: true
+  loop: [go, gofmt]
+
+# gopls goes into a version-named GOBIN of its own rather than straight into
+# ~/go/bin, for the same reason as the toolchain: `go install` OVERWRITES its
+# output, so a bump destroys the working binary before it has proven the new
+# one, and there is nothing to roll back to. Two versions coexist here and the
+# symlink below decides which one every editor gets.
+- name: Ensure the gopls directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ primary_user }}"
+    group: "{{ primary_user }}"
+    mode: "0755"
+  become: true
+  loop:
+    - "{{ primary_home }}/go/bin"
+    - "{{ primary_home }}/go/versions/gopls-{{ gopls_version }}"
+
+- name: Install gopls {{ gopls_version }}
+  ansible.builtin.command: "go install golang.org/x/tools/gopls@{{ gopls_version }}"
+  args:
+    creates: "{{ primary_home }}/go/versions/gopls-{{ gopls_version }}/gopls"
+  become_user: "{{ primary_user }}"
+  become: true
+  environment:
+    PATH: "/opt/go-{{ go_version }}/bin:{{ ansible_facts['env']['PATH'] }}"
+    # Without HOME the module cache lands wherever the become plumbing puts it.
+    HOME: "{{ primary_home }}"
+    # The whole point: the binary lands in a directory named after its version,
+    # so `creates:` above is a real test of "is THIS gopls installed" rather
+    # than of "is some gopls installed" - the bug the llama.cpp build guard
+    # exists to prevent.
+    GOBIN: "{{ primary_home }}/go/versions/gopls-{{ gopls_version }}"
+
+- name: Point ~/go/bin/gopls at gopls {{ gopls_version }}
+  ansible.builtin.file:
+    src: "{{ primary_home }}/go/versions/gopls-{{ gopls_version }}/gopls"
+    dest: "{{ primary_home }}/go/bin/gopls"
+    state: link
+    force: true
+    owner: "{{ primary_user }}"
+    group: "{{ primary_user }}"
+  become_user: "{{ primary_user }}"
+  become: true

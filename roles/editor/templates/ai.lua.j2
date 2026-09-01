@@ -1,0 +1,120 @@
+-- Managed by gx10-cluster ansible (roles/editor/templates/ai.lua.j2).
+-- Local edits are OVERWRITTEN - the endpoints below come from group_vars.
+--
+-- The assistant talks to THIS cluster first. Both inference endpoints this
+-- repo installs are bound to localhost by design (see ollama_host and
+-- vllm_bind in group_vars/all.yml), which is exactly where an editor running
+-- on the box can reach them and nothing else can - so the code in the buffer
+-- never leaves the machine unless you deliberately pick the anthropic adapter.
+--
+--   gx10_ollama  the ollama service roles/ml installs. Always up, model list
+--                fetched from the server, so whatever `ollama list` shows is
+--                what the picker offers.
+--   gx10_vllm    the OpenAI-compatible server a `ws up` workspace serves on
+--                :{{ vllm_port }}. Much faster and much bigger models, but only while a
+--                workspace is running - see docs/runbooks/serve-models.md.
+--   anthropic    used only when ANTHROPIC_API_KEY is set in the environment.
+--
+-- The default is picked at startup by what is actually reachable, rather than
+-- by hardcoding one and having the chat fail with a connection error.
+return {
+  {
+    "olimorris/codecompanion.nvim",
+    dependencies = { "nvim-lua/plenary.nvim", "nvim-treesitter/nvim-treesitter" },
+    cmd = { "CodeCompanion", "CodeCompanionChat", "CodeCompanionActions", "CodeCompanionCmd" },
+    keys = {
+      { "<leader>aa", "<cmd>CodeCompanionActions<cr>", mode = { "n", "v" }, desc = "AI actions" },
+      { "<leader>ac", "<cmd>CodeCompanionChat Toggle<cr>", mode = { "n", "v" }, desc = "AI chat" },
+      { "<leader>ai", ":CodeCompanion<cr>", mode = { "n", "v" }, desc = "AI inline edit" },
+      { "<leader>ad", ":CodeCompanion /lsp<cr>", mode = { "n", "v" }, desc = "Explain diagnostics" },
+      { "<leader>ae", ":CodeCompanion /explain<cr>", mode = "v", desc = "Explain selection" },
+      { "<leader>af", ":CodeCompanion /fix<cr>", mode = "v", desc = "Fix selection" },
+      { "<leader>at", ":CodeCompanion /tests<cr>", mode = "v", desc = "Write tests for selection" },
+      { "<leader>am", "<cmd>CodeCompanionChat Add<cr>", mode = "v", desc = "Add selection to chat" },
+      { "<leader>ag", "<cmd>CodeCompanion /commit<cr>", desc = "Write a commit message" },
+    },
+    init = function()
+      -- Which adapter to default to, decided once at startup.
+      --
+      -- A 150 ms connect timeout, not a full request: this runs before the
+      -- first chat opens and a hung probe would be indistinguishable from a
+      -- slow editor.
+      local function reachable(url)
+        local res = vim.system(
+          { "curl", "-sS", "-o", "/dev/null", "--max-time", "1", "--connect-timeout", "0.15", url },
+          { text = true }
+        ):wait()
+        return res.code == 0
+      end
+      if vim.env.CODECOMPANION_ADAPTER and vim.env.CODECOMPANION_ADAPTER ~= "" then
+        vim.g.gx10_ai_adapter = vim.env.CODECOMPANION_ADAPTER
+      elseif reachable("http://{{ vllm_bind }}:{{ vllm_port }}/v1/models") then
+        vim.g.gx10_ai_adapter = "gx10_vllm"
+      elseif reachable("http://{{ ollama_host }}/api/tags") then
+        vim.g.gx10_ai_adapter = "gx10_ollama"
+      elseif vim.env.ANTHROPIC_API_KEY and vim.env.ANTHROPIC_API_KEY ~= "" then
+        vim.g.gx10_ai_adapter = "anthropic"
+      else
+        vim.g.gx10_ai_adapter = "gx10_ollama"
+      end
+    end,
+    opts = {
+      adapters = {
+        http = {
+          gx10_ollama = function()
+            return require("codecompanion.adapters").extend("ollama", {
+              name = "gx10_ollama",
+              env = { url = "http://{{ ollama_host }}" },
+              -- OLLAMA_MAX_LOADED_MODELS is 1 on this box (unified memory -
+              -- see roles/ml/tasks/ollama.yml), so asking for a second model
+              -- evicts the first. That is a deliberate trade, not a bug.
+              parameters = { sync = true },
+            })
+          end,
+          gx10_vllm = function()
+            return require("codecompanion.adapters").extend("openai_compatible", {
+              name = "gx10_vllm",
+              env = {
+                url = "http://{{ vllm_bind }}:{{ vllm_port }}",
+                -- vLLM is started without --api-key by every workspace here,
+                -- and it is on loopback. The field must still be non-empty or
+                -- the adapter refuses to send.
+                api_key = "GX10_VLLM_API_KEY",
+                chat_url = "/v1/chat/completions",
+                models_endpoint = "/v1/models",
+              },
+              schema = {
+                model = {
+                  -- Whatever the running workspace serves. vLLM answers
+                  -- /v1/models with exactly one entry, so the picker is
+                  -- correct without being told.
+                  default = vim.env.GX10_VLLM_MODEL,
+                },
+              },
+            })
+          end,
+        },
+      },
+      strategies = {
+        chat = {
+          adapter = vim.g.gx10_ai_adapter,
+          roles = { llm = function(adapter) return "  " .. adapter.formatted_name end, user = "  you" },
+          keymaps = {
+            send = { modes = { n = "<CR>", i = "<C-CR>" } },
+            close = { modes = { n = "q" } },
+          },
+        },
+        inline = { adapter = vim.g.gx10_ai_adapter },
+        cmd = { adapter = vim.g.gx10_ai_adapter },
+      },
+      display = {
+        chat = {
+          window = { layout = "vertical", width = 0.4 },
+          show_settings = true,
+        },
+        diff = { enabled = true, provider = "default" },
+      },
+      opts = { log_level = "ERROR" },
+    },
+  },
+}

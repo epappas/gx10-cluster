@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Switch to (or create) a tmux session for a project directory.
+#
+# Managed by gx10-cluster ansible (roles/shell). Bound to `prefix f` in
+# ~/.tmux.conf and to <leader>tf in neovim.
+#
+# The problem it solves: one tmux server per box is the right shape - your work
+# survives a dropped SSH connection - but only if getting to the right session
+# is one keystroke. Otherwise you end up with `tmux ls`, three sessions called
+# "0", and a habit of starting a fourth.
+#
+# A project is a git repository, or anywhere zoxide has seen you spend time.
+set -euo pipefail
+
+# Where to look for projects, one level of nesting under each. Override in
+# ~/.tmux.conf.local or the environment.
+ROOTS=${GX10_PROJECT_ROOTS:-"$HOME/src $HOME/projects $HOME/work"}
+
+candidates() {
+  # Sessions that already exist come first: switching back to a running job is
+  # the common case, and it is the one thing a directory list cannot offer.
+  tmux list-sessions -F '[session] #{session_name}' 2>/dev/null || true
+
+  # Git repositories, up to two levels down. -prune stops find from walking
+  # INTO .git, which on a repo with a big object store is most of the work.
+  for root in $ROOTS; do
+    [ -d "$root" ] || continue
+    find "$root" -mindepth 1 -maxdepth 3 -type d -name .git -prune -printf '%h\n' 2>/dev/null || true
+  done
+
+  # zoxide knows where you actually work, which is usually a superset of the
+  # above and always in a more useful order.
+  if command -v zoxide > /dev/null 2>&1; then
+    zoxide query -l 2>/dev/null | head -50
+  fi
+}
+
+selected=$(candidates | awk '!seen[$0]++' | fzf --prompt='session > ' --height=100% --border) || exit 0
+[ -n "$selected" ] || exit 0
+
+if [ "${selected#\[session\] }" != "$selected" ]; then
+  name=${selected#\[session\] }
+  dir=$HOME
+else
+  dir=$selected
+  # tmux treats dots as part of its target syntax (session.window), so a
+  # directory called "foo.bar" would produce a session nothing can address.
+  name=$(basename "$dir" | tr '. ' '__')
+fi
+
+# =name is an EXACT match. Without it `has-session -t work` is a prefix match
+# and happily reports that "workspaces" is "work", so the new session is never
+# created and you are switched somewhere else entirely.
+if ! tmux has-session -t "=$name" 2> /dev/null; then
+  tmux new-session -d -s "$name" -c "$dir"
+fi
+
+if [ -n "${TMUX:-}" ]; then
+  tmux switch-client -t "=$name"
+else
+  tmux attach-session -t "=$name"
+fi

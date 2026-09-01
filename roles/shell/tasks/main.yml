@@ -57,6 +57,20 @@
     force: true
   become: true
 
+# /usr/local/bin, not ~/.local/bin, for the same reason as gx10-top in
+# roles/monitoring: it is launched by `tmux display-popup`, which runs the
+# command through a NON-LOGIN shell that never sources ~/.gx10env.sh and so
+# never gets ~/.local/bin on PATH. The binding would fail with "command not
+# found" on a box where the script is plainly installed.
+- name: Install the tmux sessionizer
+  ansible.builtin.copy:
+    src: gx10-sessionizer
+    dest: /usr/local/bin/gx10-sessionizer
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
 # ansible.builtin.user does not validate the shell path. Setting a login shell
 # that does not exist means sshd cannot exec it and every connection closes
 # immediately - a second, independent lockout path.

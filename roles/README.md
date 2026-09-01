@@ -1,7 +1,7 @@
 # Roles
 
-Eleven roles run in `site.yml`, in the order below; the other five are opt-in
-and run only from `optional.yml`. Each row's tag is what you pass to
+Fourteen roles run in `site.yml`, in the order below; the other four are
+opt-in and run only from `optional.yml`. Each row's tag is what you pass to
 `make apply TAGS=…` / `SKIP=…`, or to `make optional TAGS=…`.
 
 ## Provisioning — run by `site.yml`
@@ -13,6 +13,9 @@ and run only from `optional.yml`. Each row's tag is what you pass to
 | `shell` | `shell` | the env fragment both shells source, tmux config, zsh as the login shell |
 | `dev_python` | `python`, `dev` | uv and standalone tools (ruff, ipython, pre-commit) |
 | `dev_rust` | `rust`, `dev` | rustup pinned to `rust_toolchain`, plus `bat` / `fd-find` / `zoxide` from apt |
+| `dev_node` | `node`, `dev` | nvm + Node 22. **No longer opt-in** — five of the editor's language servers are npm packages |
+| `dev_go` | `go`, `dev` | Go from the official tarball, plus `gopls`. Nobody publishes a gopls binary; `go install` is the only way to get one |
+| `editor` | `editor`, `dev` | neovim 0.12 from upstream, ten language servers, and a lazy.nvim config pinned by commit. Drives tmux from inside the editor — [runbook](../docs/runbooks/edit-code.md), [why](../docs/decisions.md#editor-on-the-box) |
 | `ml` | `ml` | NCCL, cuDNN, the pinned venv from `requirements-ml.txt`, ollama, llama.cpp built for sm_121 |
 | `inference` | `inference`, `serving` | vLLM container, `vllm-serve`, templated systemd unit |
 | `monitoring` | `monitoring` | `gx10-status` (live), `gx10-top` (all nodes at once), `gx10-storage` (where the disk went, and what is safe to reclaim), `gx10-sample` (history, systemd timer). **No daemons, nothing resident** |
@@ -32,7 +35,6 @@ already runs 2-node jobs, and `gx10-status` already shows you the machine.
 | `slurm` | `slurm` | slurmctld/slurmd + munge. Real queueing; heavy for two nodes |
 | `observability` | `exporters` | node_exporter + GPU textfile collector, ~20 MB RSS, for an external scraper |
 | `observability` | `dashboards` | the above plus prometheus + grafana **on this box** — costs model capacity |
-| `dev_node` | `node` | nvm + Node 22. Nothing in the ML path needs it |
 | `benchmark` | `bench` | perftest, fio, OpenMPI, DCGM and a pinned `nccl-tests` build. Installs only — `make bench` runs them |
 
 ```bash

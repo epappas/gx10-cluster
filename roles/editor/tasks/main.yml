@@ -1,0 +1,355 @@
+---
+# Neovim, and a configuration that is pinned as hard as the rest of this repo.
+#
+# Three things are installed here and each is version-stamped, so a bump of the
+# variable in group_vars is what moves the box - never "whatever was newest the
+# day you provisioned":
+#
+#   the editor          /opt/nvim-<version>, from the release tarball
+#   the tree-sitter CLI /usr/local/bin/tree-sitter, needed to compile parsers
+#   the plugins         restored to the commits in lazy-lock.json, not to HEAD
+#
+# The language servers are in servers.yml, included at the end.
+
+# ---------------------------------------------------------------------------
+# Neovim itself
+# ---------------------------------------------------------------------------
+# Noble's neovim is 0.9.5 (verified with apt-cache policy). This config needs
+# the 0.11+ LSP API - vim.lsp.config / vim.lsp.enable - and nvim-treesitter's
+# main branch, neither of which exists there. Leaving the apt package installed
+# alongside would leave two nvim binaries with PATH order deciding which one
+# you get, which is a worse failure than either: the editor starts, half the
+# config errors, and nothing says why.
+- name: Remove the apt neovim
+  ansible.builtin.apt:
+    name: neovim
+    state: absent
+    purge: true
+  become: true
+
+- name: Check whether the unpacked neovim is already {{ neovim_version }}
+  ansible.builtin.stat:
+    path: "/opt/nvim-{{ neovim_version }}/bin/nvim"
+  register: nvim_installed
+
+- name: Ensure the download directory exists
+  ansible.builtin.file:
+    path: /var/cache/gx10
+    state: directory
+    mode: "0755"
+  become: true
+
+# The checksum is in group_vars and was computed from this asset. Neovim
+# publishes no sums file with its releases, so unlike the ollama task there is
+# no URL to look it up from - which is exactly why it is pinned here rather
+# than left off.
+- name: Download the neovim release tarball for {{ neovim_version }}
+  ansible.builtin.get_url:
+    url: "https://github.com/neovim/neovim/releases/download/v{{ neovim_version }}/nvim-linux-arm64.tar.gz"
+    checksum: "sha256:{{ neovim_sha256 }}"
+    dest: "/var/cache/gx10/nvim-linux-arm64-{{ neovim_version }}.tar.gz"
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  when: not nvim_installed.stat.exists
+
+# The archive is rooted at nvim-linux-arm64/, and the version belongs in the
+# path rather than the architecture: two versions can then coexist and the
+# symlink below decides which is current. --transform renames that top-level
+# directory during extraction.
+#
+# Note it extracts into /opt rather than into a directory this play creates
+# first. That is not a style choice: unarchive requires dest to be an EXISTING
+# directory, and under --check the preceding mkdir has not really happened, so
+# `make diff` on a box without neovim would fail with "must be an existing
+# dir" - reporting a broken role where there is none.
+- name: Unpack neovim into /opt/nvim-{{ neovim_version }}
+  ansible.builtin.unarchive:
+    src: "/var/cache/gx10/nvim-linux-arm64-{{ neovim_version }}.tar.gz"
+    dest: /opt
+    remote_src: true
+    extra_opts:
+      - --transform
+      - "s|^nvim-linux-arm64|nvim-{{ neovim_version }}|"
+    owner: root
+    group: root
+  become: true
+  when:
+    - not nvim_installed.stat.exists
+    # get_url does not download under --check, so the archive is not there to
+    # unpack and this would fail with "Source ... does not exist" - reporting a
+    # broken role on a box that simply does not have it yet. There is nothing
+    # for a dry run to say about unpacking a file that was never fetched.
+    - not ansible_check_mode
+
+- name: Remove the downloaded neovim tarball
+  ansible.builtin.file:
+    path: "/var/cache/gx10/nvim-linux-arm64-{{ neovim_version }}.tar.gz"
+    state: absent
+  become: true
+
+# nvim resolves its runtime from the REAL path of the executable, so a symlink
+# here is enough - no wrapper script and no $VIMRUNTIME.
+  # force, only because of --check: the link's target is unpacked by the task
+  # above, which a dry run cannot do, and file refuses to create a link to a
+  # path that does not exist yet. On a real run the target is always there -
+  # the unpack is `any_errors_fatal` and would have stopped the play.
+- name: Point /usr/local/bin/nvim at neovim {{ neovim_version }}
+  ansible.builtin.file:
+    src: "/opt/nvim-{{ neovim_version }}/bin/nvim"
+    dest: /usr/local/bin/nvim
+    state: link
+    force: true
+  become: true
+
+# ---------------------------------------------------------------------------
+# The tree-sitter CLI
+# ---------------------------------------------------------------------------
+# nvim-treesitter's main branch shells out to this to compile grammars. Without
+# it every parser install fails with ENOENT and the editor quietly falls back
+# to regex highlighting - which looks like a theme problem, not a missing
+# dependency, and is why this is a task rather than a note in the runbook.
+- name: Check whether the tree-sitter CLI is already unpacked at {{ tree_sitter_version }}
+  ansible.builtin.stat:
+    path: "/opt/tree-sitter-{{ tree_sitter_version }}/tree-sitter"
+  register: tree_sitter_installed
+
+- name: Download the tree-sitter CLI {{ tree_sitter_version }}
+  ansible.builtin.get_url:
+    url: "https://github.com/tree-sitter/tree-sitter/releases/download/v{{ tree_sitter_version }}/tree-sitter-linux-arm64.gz"
+    checksum: "sha256:{{ tree_sitter_sha256 }}"
+    dest: "/var/cache/gx10/tree-sitter-{{ tree_sitter_version }}.gz"
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  when: not tree_sitter_installed.stat.exists
+
+- name: Create the install directory for the tree-sitter CLI {{ tree_sitter_version }}
+  ansible.builtin.file:
+    path: "/opt/tree-sitter-{{ tree_sitter_version }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+# A bare .gz holding one binary is the one archive shape ansible has no module
+# for - unarchive handles .tar.gz and .zip, not this.
+#
+# It decompresses into the VERSIONED directory, not over /usr/local/bin: the
+# previous version of this task wrote the live binary in place and recorded the
+# version in a separate stamp file, which meant the stamp and the binary could
+# disagree and there was nothing to roll back to. The binary's own path is now
+# the version record.
+- name: Unpack the tree-sitter CLI
+  ansible.builtin.shell:
+    cmd: |
+      set -e
+      gunzip -c /var/cache/gx10/tree-sitter-{{ tree_sitter_version }}.gz \
+        > /opt/tree-sitter-{{ tree_sitter_version }}/tree-sitter
+      chmod 0755 /opt/tree-sitter-{{ tree_sitter_version }}/tree-sitter
+    creates: "/opt/tree-sitter-{{ tree_sitter_version }}/tree-sitter"
+  become: true
+
+- name: Remove the downloaded tree-sitter archive
+  ansible.builtin.file:
+    path: "/var/cache/gx10/tree-sitter-{{ tree_sitter_version }}.gz"
+    state: absent
+  become: true
+
+  # force: the shell task above is skipped under --check, so on a dry run there
+  # is no target yet. See the note on the neovim symlink.
+- name: Point /usr/local/bin at the tree-sitter CLI {{ tree_sitter_version }}
+  ansible.builtin.file:
+    src: "/opt/tree-sitter-{{ tree_sitter_version }}/tree-sitter"
+    dest: /usr/local/bin/tree-sitter
+    state: link
+    force: true
+  become: true
+
+# ---------------------------------------------------------------------------
+# The configuration
+#
+# Deployed to a directory named after its own CONTENT, with ~/.config/nvim a
+# symlink pointing at it. Copying into ~/.config/nvim in place - which is what
+# this did first - has a defect that only shows up months later: `copy` never
+# REMOVES anything, so a plugin spec deleted from the repo stays on the node
+# and keeps being loaded, and the box quietly runs a configuration that no
+# longer exists in git. Swapping a symlink leaves nothing behind, makes the
+# switch atomic, and turns "which config is this box running" into a question
+# `ls -l ~/.config/nvim` answers.
+#
+# Local customisation lives OUTSIDE the deployed tree, in
+# ~/.config/nvim-local/init.lua, which init.lua loads last and this play never
+# writes. It has to be outside: the tree is replaced wholesale, so anything
+# inside it would go with the swap.
+# ---------------------------------------------------------------------------
+- name: Name the configuration directory after its contents
+  ansible.builtin.set_fact:
+    nvim_config_dir: "{{ primary_home }}/.local/share/gx10/nvim-{{ nvim_config_id[:12] }}"
+  vars:
+    # Both halves matter. The committed files, and ai.lua.j2 RENDERED - its
+    # content comes from group_vars (the ollama and vLLM endpoints), so a
+    # change there has to produce a new tree exactly like a change to any
+    # other file does.
+    nvim_config_id: >-
+      {{ (lookup('pipe', 'find ' ~ role_path ~ '/files/nvim -type f -print0 | sort -z | xargs -0 sha1sum')
+          ~ lookup('template', 'ai.lua.j2')) | hash('sha1') }}
+
+- name: Create the versioned configuration directory
+  ansible.builtin.file:
+    path: "{{ nvim_config_dir }}"
+    state: directory
+    owner: "{{ primary_user }}"
+    group: "{{ primary_user }}"
+    mode: "0755"
+  become: true
+
+- name: Install the neovim configuration
+  ansible.builtin.copy:
+    src: nvim/
+    dest: "{{ nvim_config_dir }}/"
+    owner: "{{ primary_user }}"
+    group: "{{ primary_user }}"
+    mode: "0644"
+    directory_mode: "0755"
+  become: true
+
+# The one config file with anything host-specific in it: the AI assistant's
+# endpoints, which are this cluster's own ollama and vLLM addresses from
+# group_vars rather than a vendor's API.
+- name: Install the AI assistant configuration
+  ansible.builtin.template:
+    src: ai.lua.j2
+    dest: "{{ nvim_config_dir }}/lua/plugins/ai.lua"
+    owner: "{{ primary_user }}"
+    group: "{{ primary_user }}"
+    mode: "0644"
+  become: true
+
+# 0700, not the 0755 the rest of this role uses. ~/.config is 0700 on both
+# nodes and that is the sane default for it; a play that quietly widened the
+# permissions of somebody's config directory as a side effect of installing an
+# editor would be changing the security posture without saying so.
+- name: Ensure the config directory exists
+  ansible.builtin.file:
+    path: "{{ primary_home }}/.config"
+    state: directory
+    owner: "{{ primary_user }}"
+    group: "{{ primary_user }}"
+    mode: "0700"
+  become: true
+
+# Created empty and never written to again: this is where your own settings go,
+# and an existing directory is how you find that out. It is deliberately
+# OUTSIDE the deployed tree, which is replaced wholesale on every apply.
+- name: Ensure the local override directory exists
+  ansible.builtin.file:
+    path: "{{ primary_home }}/.config/nvim-local"
+    state: directory
+    owner: "{{ primary_user }}"
+    group: "{{ primary_user }}"
+    mode: "0755"
+  become: true
+
+- name: Check what ~/.config/nvim currently is
+  ansible.builtin.stat:
+    path: "{{ primary_home }}/.config/nvim"
+  register: nvim_config_path
+
+# Ansible refuses to replace a real directory with a symlink, even with force,
+# and it is right to. Boxes provisioned by the first version of this role have
+# a real ~/.config/nvim, so it is renamed rather than deleted - it may hold a
+# lua/local.lua somebody wrote before the override moved out of the tree.
+- name: Move a pre-versioning configuration aside
+  ansible.builtin.command:
+    cmd: mv {{ primary_home }}/.config/nvim {{ primary_home }}/.config/nvim.pre-versioned
+    creates: "{{ primary_home }}/.config/nvim.pre-versioned"
+  become_user: "{{ primary_user }}"
+  become: true
+  when:
+    - nvim_config_path.stat.exists
+    - nvim_config_path.stat.isdir | default(false)
+    - not (nvim_config_path.stat.islnk | default(false))
+
+- name: Point ~/.config/nvim at the current configuration
+  ansible.builtin.file:
+    src: "{{ nvim_config_dir }}"
+    dest: "{{ primary_home }}/.config/nvim"
+    state: link
+    force: true
+    owner: "{{ primary_user }}"
+    group: "{{ primary_user }}"
+  become_user: "{{ primary_user }}"
+  become: true
+
+# ---------------------------------------------------------------------------
+# Plugins
+# ---------------------------------------------------------------------------
+# A full clone, not depth: 1. lazy.nvim manages ITSELF as a plugin and writes
+# its own branch into lazy-lock.json; a shallow single-branch clone at a tag
+# has no refs/remotes/origin/HEAD to read that from, and every lockfile write
+# then dies on an assertion in lazy/manage/lock.lua. Verified the hard way.
+- name: Install lazy.nvim {{ lazy_nvim_version }}
+  ansible.builtin.git:
+    repo: https://github.com/folke/lazy.nvim.git
+    dest: "{{ primary_home }}/.local/share/nvim/lazy/lazy.nvim"
+    version: "{{ lazy_nvim_version }}"
+  become_user: "{{ primary_user }}"
+  become: true
+
+# The hash of the lockfile IS the stamp. `Lazy! restore` is not free - it runs
+# a git fetch per plugin - so it must not run on every apply, and the only
+# thing that should trigger it is the lockfile changing.
+- name: Stamp the plugin set with the lockfile's hash
+  ansible.builtin.set_fact:
+    nvim_lock_hash: "{{ lookup('file', 'nvim/lazy-lock.json') | hash('sha1') }}"
+
+# restore, NOT sync or update. sync resolves every plugin to its branch HEAD
+# and rewrites the lockfile, which would make each box's plugin set a function
+# of the day it was provisioned - the exact drift the lockfile exists to
+# prevent. restore checks out the committed commits and nothing else.
+#
+# This also performs the FIRST install: lazy.setup() installs anything missing
+# before the command runs, and restore then pins it.
+- name: Restore the pinned plugin set
+  ansible.builtin.shell:
+    cmd: |
+      set -e
+      nvim --headless "+Lazy! restore" +qa
+      # restore reports its failures to a UI headless neovim does not have and
+      # exits 0 either way, so the tree is CHECKED against the lockfile rather
+      # than assumed. The stamp is written last: an interrupted or partial
+      # restore is retried on the next run rather than remembered as done.
+      nvim --headless -c 'lua require("gx10.provision").plugins()' +qa
+      touch "$HOME/.local/state/nvim/.gx10-plugins-{{ nvim_lock_hash }}"
+    creates: "{{ primary_home }}/.local/state/nvim/.gx10-plugins-{{ nvim_lock_hash }}"
+  become_user: "{{ primary_user }}"
+  become: true
+  environment:
+    PATH: "/usr/local/bin:{{ ansible_facts['env']['PATH'] }}"
+
+# Compiling 35 grammars takes about two minutes on this hardware, and the
+# alternative is that the first person to open a YAML file waits for it
+# interactively. gx10.provision.parsers() exits non-zero if any parser fails,
+# so a broken toolchain fails the play rather than degrading the editor.
+- name: Compile the treesitter parsers
+  ansible.builtin.shell:
+    cmd: |
+      set -e
+      nvim --headless -c 'lua require("gx10.provision").parsers()' +qa
+      touch "$HOME/.local/state/nvim/.gx10-parsers-{{ nvim_parsers_hash }}"
+    creates: "{{ primary_home }}/.local/state/nvim/.gx10-parsers-{{ nvim_parsers_hash }}"
+  become_user: "{{ primary_user }}"
+  become: true
+  vars:
+    # Keyed on the parser LIST and the CLI version, the two things that decide
+    # what gets built.
+    nvim_parsers_hash: "{{ (lookup('file', 'nvim/lua/gx10/parsers.lua') ~ tree_sitter_version) | hash('sha1') }}"
+  environment:
+    PATH: "/usr/local/bin:{{ ansible_facts['env']['PATH'] }}"
+
+- name: Install the language servers
+  ansible.builtin.include_tasks: servers.yml

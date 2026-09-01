@@ -24,6 +24,7 @@ table. If you worked something out at 2am, it belongs here.
 | Find which container or process is using the GPU | [monitoring](monitoring.md#who-is-on-the-gpu) |
 | Add a third node, or replace one | [add-a-node](add-a-node.md) |
 | Put a token somewhere safe, or rotate one | [manage-secrets](manage-secrets.md) |
+| Edit code on the box, and drive tmux from the editor | [edit-code](edit-code.md) |
 | Update packages without breaking CUDA | [upgrade-drivers](upgrade-drivers.md) |
 | Bring the cluster back after a reboot or power loss | [reboot-recover](reboot-recover.md) |
 | Get back in after an SSH lockout | [recover-ssh-lockout](recover-ssh-lockout.md) |
@@ -75,6 +76,8 @@ fixes it. Otherwise:
 | A remote Prometheus cannot scrape this node | [monitoring](monitoring.md#if-you-want-metrics-over-time) |
 | `roles/observability has no default entry point` | [troubleshoot](troubleshoot.md#ansible) |
 | A task reports `changed` every run | [troubleshoot](troubleshoot.md#ansible) |
+| A language has no completion, or nvim is still 0.9.5 | [edit-code](edit-code.md#failure-modes) |
+| `<C-h>` leaves neovim and will not come back | [edit-code](edit-code.md#two-halves) — one half of the config is missing |
 | `make optional TAGS=…` installs nothing but says ok | [troubleshoot](troubleshoot.md#optional-installs-nothing) |
 | Benchmarks, or proving the fabric performs | [benchmark](benchmark.md) |
 
