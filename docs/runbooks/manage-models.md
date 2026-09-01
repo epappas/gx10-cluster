@@ -187,6 +187,18 @@ full and the cache does not explain it.
 | `No space left on device` mid-pull | A `size_gb` understates the repo, so the guard let it through | Correct the catalog entry; `hf cache delete`, then re-run |
 | The guard refuses although the cache is small | Something outside the cache is holding the disk | `gx10-storage` — see [manage-storage](manage-storage.md) |
 | The download task reports `changed` every run | It should not — it compares blob bytes | [troubleshoot](troubleshoot.md#ansible) |
+| `PermissionError: [Errno 13] … /hub/models--…/snapshots/<rev>` | **A container downloaded into this cache as root.** Several serving images run as uid 0 and bind-mount the host cache at `/hf`, so the repo directory, `blobs/`, `refs/`, `snapshots/` and `.no_exist/` come back owned by `root` — and your own `hf download` can no longer write there | `sudo chown -R "$USER:$USER" ~/.cache/huggingface/hub`, then re-run. Seen here as 213 root-owned entries after one workspace restart-looped |
+
+**That last one is worth understanding rather than just fixing**, because it is
+silent until it is not. A container that runs as root and writes to the shared
+cache leaves it in a state where the *next* download — by you, by Ansible, by a
+different workspace — fails on a path it did not create. Nothing warns at the
+time; the damage surfaces later and looks like a permissions bug in the tool
+that hit it. Check with:
+
+```bash
+find ~/.cache/huggingface/hub ! -user "$USER" | head
+```
 
 ## A note on the disk
 

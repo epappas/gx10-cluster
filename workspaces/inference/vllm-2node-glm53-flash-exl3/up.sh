@@ -39,6 +39,59 @@ MODEL=${MODEL:-Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw}
 SERVED=${SERVED_NAME:-glm-5.3-flash-exl3}
 DRAFT_MODEL=${DRAFT_MODEL:-incoai/GLM-5.3-Flash-DFlash2}
 
+# THE MODEL HAS TO BE A PATH, AND RESOLVING IT IS THIS SCRIPT'S JOB.
+#
+# The overlay's multimodal loader joins the model string with a filename
+# instead of resolving through the Hub, so a bare repo id becomes a literal
+# relative path and the server dies before it downloads anything:
+#     FileNotFoundError: [Errno 2] No such file or directory:
+#     'Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw/processor_config.json'
+# With `restart: unless-stopped` that is not a failure you notice - it is a
+# loop. Measured here from a cold cache: 31 restarts, 20 MB downloaded in 20
+# minutes, and `ws up` had already printed its success banner and exited.
+#
+# So: if MODEL still looks like a repo id, turn it into the snapshot directory
+# AS THE CONTAINER SEES IT (/hf is the host HF cache, mounted by
+# twonode_launch). And refuse up front when the weights are not there, because
+# the container cannot fetch them itself - a clear message now beats a restart
+# loop that looks like a slow download.
+if [[ $MODEL == */* && $MODEL != /* ]]; then
+    _hf=${HF_HOME:-$HOME/.cache/huggingface}
+    _snap="$_hf/hub/models--${MODEL//\//--}/snapshots"
+    # PICK THE RIGHT SNAPSHOT, not just the first one. Two things put more
+    # than one directory under snapshots/: MODEL_REVISION pins one, and a
+    # container that died mid-load leaves a STUB behind - the failed run here
+    # left 024db9f7 holding 6 files next to the real 25a44fdb holding 143.
+    # Taking `head -1` got the stub, and vLLM failed with a WorkerProc
+    # initialization error rather than anything about missing weights.
+    # Prefer the pinned revision; otherwise take the snapshot with the most
+    # files in it, which is the one that finished downloading.
+    if [[ -n ${MODEL_REVISION:-} && -d $_snap/$MODEL_REVISION ]]; then
+        _rev=$MODEL_REVISION
+    else
+        _rev=$(for _d in "$_snap"/*/; do
+                   [[ -d $_d ]] || continue
+                   printf '%s %s\n' "$(find "$_d" -maxdepth 1 | wc -l)" "$(basename "$_d")"
+               done | sort -rn | head -1 | cut -d' ' -f2)
+    fi
+    if [[ -n $_rev ]]; then
+        MODEL="/hf/hub/models--${MODEL//\//--}/snapshots/$_rev"
+        echo "model     resolved to snapshot $_rev"
+    else
+        echo "weights not cached: $MODEL" >&2
+        echo "  the container cannot fetch these itself - see the note above." >&2
+        echo "  download here, then re-run:" >&2
+        echo "    ml && hf download $MODEL${MODEL_REVISION:+ --revision $MODEL_REVISION}" >&2
+        echo "    ml && hf download $DRAFT_MODEL" >&2
+        echo "  then copy to the peer over the cable, not the WAN:" >&2
+        echo "    ./stage-weights.sh" >&2
+        exit 1
+    fi
+    # --revision is meaningless once MODEL is a local path, and vLLM rejects
+    # the combination rather than ignoring it.
+    unset MODEL_REVISION
+fi
+
 # JIT caches, on the host. Triton and TileLang compile kernels on first use and
 # cache them under /root, which on an overlay filesystem does not survive
 # `docker rm`. Recreating the container therefore re-JITs mid-collective on
@@ -179,19 +232,36 @@ MODEL_ARGS=(
     # experts as BF16 and the model no longer fits on two nodes.
     --quantization "${QUANTIZATION:-exl3}"
 
-    # 0.87 of 121 GiB, and the tightest utilisation in this repo. It needs
-    # ~106 GiB free AFTER vLLM's own ~9 GiB of init - kits that run a desktop
-    # session or a resident dashboard miss it by under a GiB and fail the
-    # startup memory check. The documented fallback is 0.86 with
-    # MAX_MODEL_LEN=800000, which fits with margin.
-    --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.87}"
+    # 0.82, LOWERED FROM 0.87 BECAUSE 0.87 DOES NOT START HERE. It needs
+    # ~106 GiB free after vLLM's own ~9 GiB of init, and a node running a
+    # desktop session misses it by under a GiB - rank 1 refused with
+    #   ValueError: Free memory on device cuda:0 (103.52/121.63 GiB) on startup
+    #   is less than desired GPU memory utilization (0.86, 104.6 GiB)
+    # and rank 0 then reported the peer's death as a gloo "Connection closed by
+    # peer", which points at the network rather than at the memory check.
+    #
+    # It is also the swap fix. At 0.87/1M both nodes sat at 97% memory and
+    # vllm-bench-serve disqualified its own run - "swap +2205 MB SINCE START -
+    # NOT A VALID RESULT" - after completing zero points. At 0.82 swap held
+    # flat at 4 GiB / 3 GiB across an acceptance run, a sweep and a quality
+    # gate. A number measured while swapping is not a number.
+    --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.82}"
 
     # 1M, and it allocates - see the arithmetic in workspace.yml. Lowering this
     # to "free" KV is the first wrong move: logged pool tokens are roughly
     # concurrency x this cap, and the hybrid floor (mamba state + the drafter's
     # sliding window) is mostly length-independent, so a smaller cap shrinks
     # the pool it was supposed to enlarge.
-    --max-model-len "${MAX_MODEL_LEN:-1000000}"
+    # 128K, NOT 1M. 1M is what the recipe asks for and what the KV pool cannot
+    # hold once the utilisation above is honest. vLLM computes the ceiling for
+    # you and it moves between boots as free memory drifts:
+    #   To serve at least one request with the model's max seq len (400000),
+    #   13.59 GiB KV cache is needed, which is larger than the available KV
+    #   cache memory (12.19 GiB) ... estimated maximum model length is 200704
+    # then 196608 hit the same wall at 11.98 GiB. 131072 leaves margin for that
+    # drift and yields GPU KV cache size: 136,212 tokens. Raise it if your
+    # nodes are headless.
+    --max-model-len "${MAX_MODEL_LEN:-131072}"
 
     # REQUIRED, and the one value here with no alternative. The SM12x
     # sparse-MLA kernel accepts only packed `fp8_ds_mla`. bf16 KV has no sparse

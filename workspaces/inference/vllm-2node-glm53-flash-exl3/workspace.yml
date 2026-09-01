@@ -2,7 +2,7 @@ name: vllm-2node-glm53-flash-exl3
 kind: inference
 engine: vllm
 provenance: verified
-summary: GLM-5.3-Flash at EXL3 4bpw across both nodes, 1M context, DFlash2 drafts
+summary: GLM-5.3-Flash EXL3 4bpw across both nodes - 66.4 tok/s, 0.962 acceptance, 128K context
 
 # VERIFIED on odysseus + poseidon, and the hard part - the overlay image, the
 # mandatory kpool patch, the DFlash2 drafter - all works:
@@ -10,11 +10,27 @@ summary: GLM-5.3-Flash at EXL3 4bpw across both nodes, 1M context, DFlash2 draft
 #   block_table.py: kpool tail slot-map patched     <- the correctness fix
 #   NET/IB ... RoCE ... speed=200000                <- both rails
 #   GPU KV cache size: 602,033 tokens
-#   ws up spec-decode-accept   1.00 1.00 1.00 1.00 1.00 0.95 0.95  (k=7)
-#                              aggregate 0.985, 67.4 tok/s, TTFT 0.54s
-#                              prose 0.358 - published figures are 0.92 / 0.33
-#   ws up vllm-quality-gate    4/4 clean across concurrency 1,2
-#   ws up vllm-prefill-ladder  990-1024 tok/s cold at 8k/16k
+#   ws up spec-decode-accept   1.00 0.99 0.99 0.97 0.97 0.92 0.88  (k=7)
+#                              structured 0.962, 6.74 of 8 accepted per step,
+#                              66.4 tok/s median, TTFT 0.48s
+#                              prose 0.324, 2.27/step, 26.2 tok/s, TTFT 0.64s
+#                              (published figures are 0.92 / 0.33)
+#   concurrency sweep          24.1 / 39.9 / 53.7 tok/s at 1 / 4 / 16 streams
+#   ws up vllm-quality-gate    16/18 - both failures are "hit max_tokens=1024,
+#                              too short to classify", not correctness
+#   GPU KV cache size          136,212 tokens
+#
+# THE FIRST SET OF NUMBERS HERE WAS NOT EVIDENCE, and that is worth recording.
+# It read "aggregate 0.985, 67.4 tok/s" from a run whose output went to a
+# terminal and was never written to a file. The re-measurement above is close
+# to it - so the old figure was not wrong - but "close to a number nobody can
+# open" is not the standard this repo holds itself to. Numbers here now come
+# with a log.
+#
+# AND THE FIRST BENCH RUN WAS INVALID, which the tool said out loud:
+#   odysseus ... mem 97%  swap +2205 MB SINCE START - NOT A VALID RESULT
+# vllm-bench-serve never completed a point. Swap growth is the disqualifying
+# condition, so the answer was headroom rather than a retry.
 #
 # THREE THINGS THIS BOX NEEDED THAT THE PUBLISHED RECIPE DOES NOT SAY.
 #

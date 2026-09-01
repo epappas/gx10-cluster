@@ -436,8 +436,42 @@ hardware, with rank 1 on the peer. The evidence, per workspace:
 | Workspace | Peer-node proof | Measured |
 |---|---|---|
 | `vllm-2node-tp2` | `ws-vllm-2node` on both hosts; the peer's container logs `rank=1` and **1396 `NET/IB`, zero `NET/Socket`** | Nemotron-120B NVFP4: 24.2 / 67.1 / 131.6 tok/s at 1 / 4 / 16 streams; `17*23` → `391` |
-| `vllm-2node-glm53-flash-exl3` | `up.sh` printed `rank 1  poseidon  192.168.1.68   (headless)` | GLM-5.3-Flash EXL3 4bpw, DFlash2 aggregate acceptance 0.985 |
+| `vllm-2node-glm53-flash-exl3` | `rank 1  poseidon  192.168.1.68   (headless)`; peer container logs **1409 `NET/IB` + `rank=1`**, rank 0 logs 1416, neither logs `NET/Socket` | see the table below — re-measured, because the first attempt was not valid |
 | `vllm-2node-deepseek-v4-flash` | same two-rank launcher | DSpark acceptance 1.00 across 5 draft positions at 79.9 tok/s |
+
+### GLM-5.3-Flash, measured properly the second time
+
+The first attempt at this one **produced no valid number and I very nearly
+reported one anyway.** `vllm-bench-serve` never completed a single point — the
+log ends on `no point has completed yet`, `~/.local/state/gx10-bench/` holds
+its `.log` with no `cN-*.json` beside it, and the tool had already disqualified
+the run itself:
+
+```
+odysseus  gpu [#########-] 95%  mem [#########-] 97%  swap +2205 MB SINCE START - NOT A VALID RESULT
+```
+
+Both nodes were at 97% memory. **Swap growth is the invalidation criterion**,
+so the fix was headroom, not a retry: `GPU_MEMORY_UTILIZATION=0.82` and
+`MAX_MODEL_LEN=131072` instead of 0.87/1M. Swap then sat at 4 GiB / 3 GiB and
+did **not move** across the acceptance run, the sweep, or the quality gate.
+
+| | Result |
+|---|---|
+| KV pool | `GPU KV cache size: 136,212 tokens` |
+| Structured acceptance | **0.962** — ladder `1.00 0.99 0.99 0.97 0.97 0.92 0.88`, 6.74 accepted/step of 8 |
+| Structured decode | **66.4 tok/s** median, TTFT 0.48 s |
+| Prose acceptance | 0.324, 2.27 accepted/step — a steep decay is normal on prose |
+| Prose decode | 26.2 tok/s, TTFT 0.64 s |
+| Concurrency sweep | 24.1 / 39.9 / 53.7 tok/s at 1 / 4 / 16 streams |
+| `vllm-quality-gate` | 16/18; both failures are `hit max_tokens=1024, too short to classify`, not correctness |
+
+Two things this corrects. The number previously carried here — 67.4 tok/s,
+aggregate 0.985 — came from a run whose output was never written to a file;
+the honest figures are **66.4 tok/s and 0.962**, close enough that the old one
+was not wrong, but it was not evidence either. And the context length is
+**128K, not 1M**: 1M is what the recipe asks for, and it does not fit
+alongside a peer running a desktop session.
 
 `NET/IB` with no `NET/Socket` is the line that matters: it is the difference
 between "two nodes" and "two nodes talking over TCP", which looks like
