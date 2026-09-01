@@ -132,6 +132,20 @@ return {
   {
     "nvim-tree/nvim-tree.lua",
     cmd = { "NvimTreeToggle", "NvimTreeFindFile" },
+    init = function()
+      -- `nvim .` and `nvim ~/src/thing` have to open the tree. netrw is in
+      -- init.lua's disabled list and this plugin is lazy, so without this a
+      -- directory argument opens an empty unnamed buffer and gives no hint
+      -- that anything went wrong - which is the first thing anyone types.
+      --
+      -- Loading it here rather than handling the buffer ourselves: nvim-tree's
+      -- own hijack_directories does the work once the plugin is loaded, and
+      -- init runs before the argument's buffer is read.
+      local arg = vim.fn.argv(0)
+      if type(arg) == "string" and arg ~= "" and vim.fn.isdirectory(arg) == 1 then
+        require("lazy").load({ plugins = { "nvim-tree.lua" } })
+      end
+    end,
     keys = {
       { "<leader>e", "<cmd>NvimTreeToggle<cr>", desc = "File tree" },
       { "<leader>E", "<cmd>NvimTreeFindFile<cr>", desc = "Reveal file in tree" },
