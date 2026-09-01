@@ -140,6 +140,26 @@ reported reproducer used ~18k tokens of system prompt and tool schemas.
 | Nothing answers on `BASE_URL` | No server up | Start a serving workspace first |
 | Throughput is fine and the gate still fails | **That is the entire point of this workspace** | |
 
+## Reasoning models and `--max-tokens`
+
+`MAX_TOKENS` defaults to 1024, and on a model that thinks at length that is not
+always enough for `</think>` to arrive. When it does not, the reply is genuinely
+empty while the whole budget was billed — which is a real detector, and one of
+the failures this gate exists for — so the gate reports it and exits non-zero.
+
+**It also tells you which case you are in.** A budget artefact carries a second
+line:
+
+```
+- empty-with-2048-tokens-billed (reasoning never closed)
+- hit max_tokens=2048, too short to classify
+```
+
+That second line is the tell. Raise `--max-tokens` and re-run before reading it
+as a server fault; an empty reply that finished *without* hitting the cap has no
+such line and is the real thing. Measured here: Nemotron 3.5 Lightning needs
+more than 2048 on some prompts, Qwen3.8-27B more than 1024.
+
 ## Sources
 
 - <https://github.com/tonyd2wild/DeepSeek-v4-Flash-0731-DSpark-1M-NVFP4-KV-2x-DGX-Spark>

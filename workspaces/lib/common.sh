@@ -71,6 +71,23 @@ ws_all() {  # every workspace name, kind-sorted
 #
 # Returns 0 if every requirement holds. Prints one line per requirement either
 # way, because "what exactly is missing" is the only useful output here.
+# Are every model this manifest names already on disk? Used by the disk guard
+# to tell "no room to download" apart from "nothing left to download". Same two
+# cache layouts as the weights report further down, for the same reason.
+ws_weights_cached() {
+    local m=$1 v any=0
+    local hf=${HF_HOME:-$HOME/.cache/huggingface}
+    local lc=${LLAMA_CACHE:-$hf/llama.cpp}
+    while read -r v; do
+        [[ -z $v ]] && continue
+        any=1
+        [[ -d "$hf/hub/models--${v//\//--}" ]] && continue
+        compgen -G "$lc/${v//\//_}_*" >/dev/null && continue
+        return 1
+    done < <(ws_list_field "$m" models)
+    (( any ))
+}
+
 ws_preflight() {
     local m=$1 fail=0 v need have
 
@@ -103,7 +120,17 @@ ws_preflight() {
         local probe=$cache
         while [[ ! -d $probe && $probe == */* ]]; do probe=${probe%/*}; done
         have=$(df -BG --output=avail "${probe:-/}" 2>/dev/null | awk 'NR==2 {gsub(/G/,""); print $1+0}')
+        # min_disk_gb IS ROOM FOR THE DOWNLOAD, and once the download has
+        # happened that room is spent - by the very file it was reserved for.
+        # Enforcing it afterwards fails a workspace whose weights are sitting
+        # on the disk it just measured, which is how llamacpp-deepseek-v4-pro
+        # reported "needs 360 GB free, has 242" on the one node that could
+        # actually serve it. up.sh has skipped the guard on a present file
+        # since that was found; this is the same rule in `ws check`, which is
+        # where people look first.
         if (( ${have:-0} >= need )); then ok "disk ${have} GB free at $cache (needs ${need})"
+        elif ws_weights_cached "$m"; then
+            ok "disk ${have} GB free at $cache (under ${need}, but the weights are already here)"
         else bad "disk: needs ${need} GB free at $cache, has ${have:-0} GB"; fail=1; fi
     fi
 
@@ -135,10 +162,23 @@ ws_preflight() {
 
     while read -r v; do
         [[ -z $v ]] && continue
-        # HF caches as models--<org>--<name>. Absence is a warning, not a
-        # failure: the engine downloads on first run, it just takes a while.
+        # TWO CACHE LAYOUTS, because two downloaders write here.
+        #
+        #   transformers/vLLM/SGLang   $HF_HOME/hub/models--<org>--<name>/
+        #   llama.cpp                  $LLAMA_CACHE/<org>_<repo>_<file>.gguf
+        #
+        # The llama.cpp workspaces point LLAMA_CACHE inside HF_HOME so both
+        # live on the filesystem min_disk_gb above actually measured - but the
+        # NAMING still differs, and checking only the hub layout reports a
+        # cached 91 GB GGUF as "first run downloads them" every time.
+        #
+        # Absence is a warning either way, not a failure: the engine downloads
+        # on first run, it just takes a while.
+        local hf=${HF_HOME:-$HOME/.cache/huggingface}
         local slug="models--${v//\//--}"
-        if [[ -d "${HF_HOME:-$HOME/.cache/huggingface}/hub/$slug" ]]; then ok "weights cached: $v"
+        local lc=${LLAMA_CACHE:-$hf/llama.cpp}
+        if [[ -d "$hf/hub/$slug" ]]; then ok "weights cached: $v"
+        elif compgen -G "$lc/${v//\//_}_*" >/dev/null; then ok "weights cached: $v (llama.cpp)"
         else warn "weights NOT cached: $v (first run downloads them)"; fi
     done < <(ws_list_field "$m" models)
 

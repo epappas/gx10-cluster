@@ -379,7 +379,7 @@ Honest gaps, each labelled where it appears:
 | The **benchmark suite installs but has never been run** | [so labelled](docs/runbooks/benchmark.md) |
 | The history sampler's timer is not started on these nodes | |
 | The tier-2 items in [tune-network](docs/runbooks/tune-network.md) are unmeasured hypotheses | |
-| **Every workspace is `unverified`** — written from vendor docs and the sources in each manifest, not from a completed run | `ws list` shows this in yellow |
+| **Most workspaces are `unverified`** — written from vendor docs and the sources in each manifest, not from a completed run. The ones that have been run are `verified`; one is `blocked` | `ws list` colours all three — green, yellow, red |
 
 Expect to fix something the first time you run a workspace. When you do: fix the
 recipe, flip `provenance: verified`, and say what changed. That is the same rule

@@ -6,7 +6,7 @@
 | | |
 |---|---|
 | Kind | `bench` — a client. It **coexists** with a serving workspace |
-| Engine | any OpenAI-compatible vLLM server with `/metrics` and `/tokenize` |
+| Engine | any OpenAI-compatible server that also serves vLLM's `/metrics` **and** `/tokenize` — [which is narrower than it sounds](#which-servers-it-can-measure) |
 | Reads | `$BASE_URL` (default `http://127.0.0.1:8888/v1`), plus `/metrics` and `/tokenize` at the **root** |
 | Needs | python3. No GPU, no unified memory, no peer |
 | Provenance | `unverified` — the protocol is published, the verdicts are ours, neither has been run on this hardware |
@@ -135,6 +135,24 @@ ws up vllm-prefill-ladder --rungs 16000,100000,300000
 Exit status is non-zero when a rung was **invalid** — contaminated by the
 cache, or miscalibrated. Never because a number was low: this tool has no
 opinion about what fast is.
+
+## Which servers it can measure
+
+`engine: any` in the manifest means *any OpenAI-compatible server that also
+serves vLLM's `/tokenize` and `/metrics`* — which is narrower than it sounds,
+and the ladder now says so on the first call rather than part way in.
+
+| Server | Result |
+|---|---|
+| vLLM | full ladder, including the cold-run proof off `vllm:prefix_cache_*` |
+| SGLang with `--enable-metrics` | rungs measure; the cold-run proof is absent, not passing |
+| **llama.cpp** | **refused, with a message.** Its `/tokenize` wants `{"content": ...}` and answers a chat body `200 OK` with an empty token list |
+
+That last row is why the check is explicit rather than a `len(tokens)`
+fallback. An empty list read as a length is **zero**, every rung then
+calibrates against a prompt nobody measured, and the table that comes out looks
+completely normal. A wrong number here is worse than no number, so the ladder
+stops and names the endpoint.
 
 ## What it cannot tell you
 

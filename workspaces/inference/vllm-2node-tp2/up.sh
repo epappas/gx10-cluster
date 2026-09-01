@@ -37,6 +37,28 @@ MODEL_ARGS=(
     --enable-prefix-caching --enable-chunked-prefill
 )
 
+# A REASONING PARSER, WHICH THIS WORKSPACE DID NOT USED TO SET, and the omission
+# was defensible right up until you ran it. This is the GENERIC two-node recipe
+# - bring your own model - so hardcoding one model's parser would be wrong. But
+# it ships a DEFAULT model, and that model reasons: without a parser the trace
+# lands in `content` with its delimiters intact, and
+# `ws up vllm-quality-gate` against this server returned
+#
+#   4/4 requests failed ... special-token-leak ['</think>']
+#
+# on an otherwise perfectly healthy TP=2 deployment. A leaked `</think>` is not
+# cosmetic: a client that renders content verbatim shows the model's private
+# reasoning to the user.
+#
+# So it is a variable with the shipped model's answer as its default, and empty
+# turns it off - which is what a BYO model that does not reason wants, and what
+# a model whose parser is not in this vLLM's registry needs. `nemotron_v3` is
+# the Nemotron-3 family parser; the registry is
+#   docker run --rm --entrypoint python3 $IMAGE -c \
+#     'from vllm.reasoning import ReasoningParserManager as M; print(sorted(M.list_registered()))'
+REASONING_PARSER=${REASONING_PARSER-nemotron_v3}
+[[ -n $REASONING_PARSER ]] && MODEL_ARGS+=( --reasoning-parser "$REASONING_PARSER" )
+
 echo "model   $MODEL  TP=2"
 twonode_up
 echo

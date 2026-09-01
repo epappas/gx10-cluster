@@ -82,9 +82,12 @@ else
 fi
 echo
 
-# The project name MUST match what `ws` computes (`ws-<directory>`), or `ws
-# logs` and `ws down` would address a project this script never created.
-docker compose --project-name "ws-$(basename "$PWD")" up -d "$@"
+# The project name MUST match what `ws` computes, or `ws logs` and `ws down`
+# would address a project this script never created. `ws up` exports it; the
+# fallback covers running this script by hand. (This directory's name happens
+# to need no sanitising - the dotted ones next to it do, which is why the
+# canonical mapping lives in `ws` and is passed down rather than re-derived.)
+docker compose --project-name "${WS_PROJECT:-ws-$(basename "$PWD")}" up -d "$@"
 
 cat <<NEXT
 

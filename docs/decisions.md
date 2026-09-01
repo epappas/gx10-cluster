@@ -2071,7 +2071,7 @@ repo **delete** something it had written down as a fact.
 [workspaces/README.md](../workspaces/README.md) carried a matrix row saying
 **SGLang cannot run NVFP4**, with a reason: a quantised `lm_head`. That
 observation was real — it was measured on `unsloth/Qwen3.8-27B-NVFP4`, and
-`sglang-qwen3.8-27b-gguf` exists because of it. What was wrong was the *noun*.
+`sglang-qwen3.8-27b-int4` exists because of it. What was wrong was the *noun*.
 It is a property of **that checkpoint**, not of the engine, and the matrix
 stated it as an engine capability.
 

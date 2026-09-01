@@ -10,7 +10,7 @@
 | Nodes | **1** |
 | Endpoint | `http://127.0.0.1:8888/v1` |
 | Needs | ~40 GB unified · Docker |
-| Provenance | `unverified` — written from the sources below, never run on this hardware |
+| Provenance | **`verified`** — run on this hardware, and it moved one default into a documented knob. [The MTP trade](#mtp-costs-the-entire-prefix-cache) |
 
 ## What
 
@@ -37,12 +37,52 @@ Two container decisions worth knowing:
   binary compatible, which is why the CUDA-13 *container* works where the wheel
   does not.
 
+## MTP costs the entire prefix cache
+
+**Measured here, on this checkpoint, and it is the most important thing on this
+page.** Qwen3.8-27B is a hybrid — `Qwen3_5ForConditionalGeneration`, mamba
+groups plus attention — and vLLM says out loud what MTP does to it:
+
+```
+Speculative decoding (method=mtp) is enabled but no KV cache group could be
+identified as the draft model's, so every group -- including Mamba groups
+[0, 1, 2] -- will be treated as a draft group. A Mamba group cannot satisfy the
+widened lookup window that implies, so prefix-cache reuse across requests will
+be disabled
+```
+
+It means it. Two byte-identical requests back to back, on the shipped default:
+
+| | `SPEC_METHOD=mtp` (default) | `SPEC_METHOD=none` |
+|---|---|---|
+| Prefix-cache hits | **0**, on 471,925 queried tokens | 1,568 of 4,032 |
+| Cold 8k prefill | 5.83 s TTFT · 1364 tok/s | 3.34 s TTFT · 2384 tok/s |
+| **Follow-up turn** (`ws up vllm-prefill-ladder`) | 3.53 s TTFT, **nothing reused** | **0.22 s TTFT**, 7840 of 7980 reused |
+| Decode, concurrency 1 (`ws up vllm-bench-serve`) | **16.4 tok/s** | 10.6 tok/s |
+| Acceptance (`ws up spec-decode-accept`) | 1.00 / 1.00 structured, k=2 | n/a |
+
+**So it is a real trade and it genuinely goes both ways.** MTP is worth ~55% on
+single-stream decode. Prefix caching is worth **15×** on the second turn of a
+conversation — and chat resends the whole history every turn, so that is the
+number most workloads here actually feel.
+
+The default stays `mtp`, because that is what this workspace has always shipped
+and it is the right answer for one-shot generation. **If you are pointing an
+agent at this** — [`deepseek-harness`](../../agent/deepseek-harness/README.md),
+or anything that holds a conversation — put `SPEC_METHOD=none` in `.env` and
+measure it yourself:
+
+```bash
+SPEC_METHOD=none ws up vllm-qwen3.8-27b-nvfp4
+BASE_URL=http://127.0.0.1:8888/v1 ws up vllm-prefill-ladder --rungs 8000
+```
+
 ## When to use it — and when not
 
 | Use it when | Use something else when |
 |---|---|
 | You want the best single-node throughput here | You want the memory back → [`llamacpp-qwen3.8-27b-gguf`](../llamacpp-qwen3.8-27b-gguf/README.md) |
-| You want NVFP4 specifically | You want SGLang's scheduler → [`sglang-qwen3.8-27b-gguf`](../sglang-qwen3.8-27b-gguf/README.md), on **GGUF** — see below |
+| You want NVFP4 specifically | You want SGLang's scheduler → [`sglang-qwen3.8-27b-int4`](../sglang-qwen3.8-27b-int4/README.md), on **GGUF** — see below |
 | You are about to benchmark or gate a server | The model does not fit one node → [two-node serving](../../../docs/runbooks/two-node-serving.md) |
 
 **SGLang cannot serve this checkpoint.** Its `lm_head` is quantised and SGLang
@@ -110,6 +150,7 @@ default, then `medium`, `low`, `none`).
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| `Prefix cache hit rate: 0.0%` forever, and follow-up turns re-prefill the whole history | MTP disables prefix-cache reuse on this hybrid checkpoint — vLLM warns once, at startup | `SPEC_METHOD=none` in `.env`. [The trade](#mtp-costs-the-entire-prefix-cache) |
 | 503 for minutes after start | Weights still loading | Expected. `ws logs -f` |
 | OOM, or swap growing | Another workload holds the pool, or utilisation too high | `ws down` the other; lower `GPU_MEMORY_UTILIZATION` |
 | Killed under load with no error in the log | `earlyoom` — it targets the largest-RSS process, which is *always* the model server | `make verify` checks for this; `systemctl disable --now earlyoom` |

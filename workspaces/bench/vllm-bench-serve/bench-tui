@@ -93,14 +93,29 @@ A bench workspace needs something to bench. Start one first:
   ws up vllm-qwen3.8-27b-nvfp4        # or any other inference workspace
   ws up vllm-2node-deepseek-v4-flash"
 
-# MODEL is what goes in the request body, and it must be the SERVED name. The
-# tokenizer cannot be loaded from a served name like 'qwen3.8-27b', so it is a
-# separate value - this is the single most common way a first bench run dies,
-# several minutes in, with a HF 404.
-MODEL=${MODEL:-$(curl -sf --max-time 5 "$ROOT_URL/v1/models" \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"][0]["id"])' 2>/dev/null)}
+# TWO NAMES, AND THEY ARE NOT THE SAME NAME. MODEL goes in the request body and
+# must be the SERVED name; the TOKENIZER is loaded from the Hub by `vllm bench
+# serve` itself and must be the REPO id. Every serving workspace in this repo
+# passes --served-model-name, so defaulting one to the other made the first
+# bench run die - several minutes in, after the container start - with
+#
+#   OSError: qwen3.8-27b is not a local folder and is not a valid model
+#   identifier listed on 'https://huggingface.co/models'
+#
+# Both are discoverable, from the same one call. OpenAI's model object carries
+# `root`, and vLLM sets it to the actual model path while `id` carries the
+# served alias - so a server with no --served-model-name has them equal and a
+# server with one has exactly the two strings needed here. Asking for both in
+# a .env, as this did, is two things to get out of step.
+read -r _served _root < <(curl -sf --max-time 5 "$ROOT_URL/v1/models" \
+    | python3 -c 'import json,sys
+d = json.load(sys.stdin)["data"][0]
+print(d["id"], d.get("root") or d["id"])' 2>/dev/null)
+MODEL=${MODEL:-${_served:-}}
 [[ -n ${MODEL:-} ]] || die "cannot determine the served model name; set MODEL in .env"
-TOKENIZER=${TOKENIZER:-$MODEL}
+# Falls back to MODEL rather than failing: a non-vLLM server may not publish
+# `root`, and for those the two names usually are the same.
+TOKENIZER=${TOKENIZER:-${_root:-$MODEL}}
 
 mkdir -p "$RESULT_DIR" || die "cannot create $RESULT_DIR"
 
@@ -351,11 +366,29 @@ read_nodes() {
 }
 
 # --- the bench itself ------------------------------------------------------
+# `vllm bench serve` APPENDS --endpoint to --base-url, and --endpoint defaults
+# to /v1/completions. So the ROOT goes here, not $BASE_URL: passing the OpenAI
+# base gave every request /v1/v1/completions, and the bench reported
+# "Successful requests: 0, Failed requests: 32" with a bare `Error 9: Not
+# Found` and a summary table of zeroes - which reads as a dead server rather
+# than a wrong URL.
+#
+# The endpoint follows the backend, because the two are not independent: the
+# `vllm` backend speaks /v1/completions and `openai-chat` speaks
+# /v1/chat/completions, and the default does not move when --backend does.
+bench_endpoint() {
+    case "$BACKEND" in
+        openai-chat) printf '/v1/chat/completions' ;;
+        *)           printf '/v1/completions' ;;
+    esac
+}
+
 bench_args() {  # $1 concurrency  $2 num_prompts  $3 filename  $4 result dir
     printf '%s\n' \
         bench serve \
         --backend "$BACKEND" \
-        --base-url "$BASE_URL" \
+        --base-url "$ROOT_URL" \
+        --endpoint "$(bench_endpoint)" \
         --model "$MODEL" \
         --tokenizer "$TOKENIZER" \
         --dataset-name random \
@@ -381,9 +414,16 @@ start_bench() {  # $1 concurrency  $2 num_prompts  $3 filename -> BENCH_PID
         # we want a different subcommand of the same binary. --network host so
         # 127.0.0.1 means the same thing inside as out; a bridge would make the
         # obvious BASE_URL wrong in a way that reads as "server is down".
+        # AS YOU, NOT AS ROOT. The container writes its JSON and HTML into
+        # $RESULT_DIR on the host, and the image's default user is root - so a
+        # sweep left a results directory its owner could not delete, on a box
+        # where "the disk filled up" is the failure this repo worries about
+        # most. HOME comes along because huggingface_hub wants a writable one
+        # for its lock files and uid 1000 has no home inside this image.
         docker run --rm --name "$RUN_NAME" --network host \
+            --user "$(id -u):$(id -g)" \
             --entrypoint vllm \
-            -e "HF_TOKEN=${HF_TOKEN:-}" -e HF_HOME=/hf \
+            -e "HF_TOKEN=${HF_TOKEN:-}" -e HF_HOME=/hf -e HOME=/hf \
             -v "${HF_HOME:-$HOME/.cache/huggingface}:/hf" \
             -v "$RESULT_DIR:/results" \
             "$IMAGE" "${args[@]}" >>"$LOGFILE" 2>&1 &
@@ -672,8 +712,23 @@ STATUS="done"
 render "$TOTAL" 0 0
 
 printf '\n  %sresults%s  %s\n' "$c_bold" "$c_off" "$RESULT_DIR"
-printf '  %sJSON per point, plus an HTML timeline each - open one to see the%s\n' "$c_dim" "$c_off"
-printf '  %sper-request picture this view deliberately does not try to draw:%s\n' "$c_dim" "$c_off"
-printf '    xdg-open %s/*.html\n\n' "$RESULT_DIR"
+# POINT AT IT ONLY IF IT IS THERE. --plot-timeline is passed on every point and
+# is not always honoured: vllm/vllm-openai ships without the extra the plotter
+# needs, and the failure is a UserWarning inside a log nobody opens -
+#   UserWarning: Failed to generate timeline plot: Please install vllm[bench]
+# - after which this text used to send people to `xdg-open *.html` for files
+# that were never written. A tool that reports an artefact it did not produce
+# is the same class of wrong as a bench that reports a number it did not
+# measure.
+if compgen -G "$RESULT_DIR/*.html" >/dev/null; then
+    printf '  %sJSON per point, plus an HTML timeline each - open one to see the%s\n' "$c_dim" "$c_off"
+    printf '  %sper-request picture this view deliberately does not try to draw:%s\n' "$c_dim" "$c_off"
+    printf '    xdg-open %s/*.html\n\n' "$RESULT_DIR"
+else
+    printf '  %sJSON per point. NO HTML timeline was written - the image has no%s\n' "$c_dim" "$c_off"
+    printf '  %splotter (pip install "vllm[bench]"), and vLLM only warns about it%s\n' "$c_dim" "$c_off"
+    printf '  %sin the log. The JSON has every per-request field either way:%s\n' "$c_dim" "$c_off"
+    printf '    jq . %s/*.json\n\n' "$RESULT_DIR"
+fi
 printf '  %sa point whose KV bar pegged at 100%% measured preemption, not%s\n' "$c_dim" "$c_off"
 printf '  %sthroughput. So did any point that showed swap growing.%s\n' "$c_dim" "$c_off"

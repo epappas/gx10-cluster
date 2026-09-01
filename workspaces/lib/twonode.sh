@@ -80,7 +80,26 @@ twonode_common_env() {  # -> COMMON_ENV array
       -e "NCCL_IB_ADDR_FAMILY=AF_INET"
       # There is no NVLink between two Sparks, so NVLS has nothing to accelerate.
       -e "NCCL_NVLS_ENABLE=0"
-      -e "NCCL_DEBUG=${NCCL_DEBUG:-WARN}"
+      # INFO, NOT WARN, AND ONLY TWO SUBSYSTEMS. The thing this whole library
+      # exists to prevent is NCCL silently falling back to TCP - it works, at a
+      # fraction of the speed, so it reads as a slow model rather than a broken
+      # container. Both this file and every two-node README tell you to confirm
+      # the transport with
+      #
+      #   docker logs ws-vllm-2node 2>&1 | grep -E 'NET/IB|NET/Socket'
+      #
+      # and at WARN that line is never emitted, so the check printed NOTHING on
+      # a healthy RoCE cluster and NOTHING on a TCP one. An instruction that
+      # cannot distinguish the failure from the success is worse than none.
+      #
+      # NCCL_DEBUG_SUBSYS bounds the cost rather than removing it: INIT and NET
+      # measured ~1600 lines over a TP=2 startup here, against the
+      # per-collective firehose plain INFO gives for the life of the server.
+      # It is a startup burst, and `docker logs | grep` is how you read it
+      # anyway. NCCL_DEBUG=WARN in .env restores the quiet - at the cost of the
+      # only check that distinguishes RoCE from TCP.
+      -e "NCCL_DEBUG=${NCCL_DEBUG:-INFO}"
+      -e "NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS:-INIT,NET}"
       # Not a privacy gesture - a crash. vLLM's usage reporter shells out to
       # py-cpuinfo, which returns EMPTY output on Grace/aarch64 and is then
       # JSON-parsed: the stats thread dies with JSONDecodeError in the middle
@@ -188,9 +207,31 @@ twonode_launch() {  # $1 = rank, $2 = "local"|<peer host>, $3 = this rank's IP
     fi
 }
 
+# PULL ON BOTH NODES BEFORE LAUNCHING EITHER, and do it where it is visible.
+#
+# `docker run` pulls a missing image implicitly, which is fine on one machine
+# and bad here for two reasons. The peer's pull happens inside an `ssh ... docker
+# run` whose output this library discards, so a 20 GB overlay image looks like a
+# hang with no progress and no explanation - measured here at over ten minutes,
+# during which `ws up` appears to have done nothing. And the two ranks then race:
+# rank 0 starts the rendezvous while rank 1 is still pulling, which is exactly
+# the "one rank waiting for a peer that never arrives" failure this file exists
+# to prevent.
+#
+# Pulling first makes the wait explicit and the launch simultaneous. It is a
+# no-op when both nodes already have the image, which is the common case.
+twonode_pull() {
+    echo "==> $IMAGE on $(hostname)"
+    docker pull -q "$IMAGE" >/dev/null || return 1
+    [[ -n ${PEER:-} ]] || return 0
+    echo "==> $IMAGE on $PEER (this is the slow one on a cold node)"
+    ssh -n -o BatchMode=yes "$PEER" "docker pull -q $(printf '%q' "$IMAGE")" >/dev/null
+}
+
 twonode_up() {
     twonode_resolve || return 1
     twonode_common_env
+    twonode_pull || { echo "image pull failed - see above" >&2; return 1; }
 
     local peer_mgmt
     peer_mgmt=$(getent hosts "$PEER" | awk '{print $1; exit}')
@@ -248,6 +289,22 @@ twonode_down() {
 #
 # rsync is resumable and idempotent: an interrupted run costs only time, and
 # re-running verifies what is already there.
+# The Hub CLI, wherever it actually is. `hf` is NOT on PATH on a stock node -
+# roles/ml installs huggingface_hub into $ml_venv (~/venvs/ml) and links only
+# the llama.cpp binaries into ~/.local/bin - so "download it here first: hf
+# download <repo>" was an instruction that returned `command not found`. Same
+# order the sglang-nemotron workspace resolves it in, for the same reason.
+twonode_hf_cli() {
+    local c
+    for c in hf huggingface-cli; do
+        command -v "$c" >/dev/null 2>&1 && { printf '%s' "$c"; return 0; }
+    done
+    for c in "${ML_VENV:-$HOME/venvs/ml}/bin/hf" "${ML_VENV:-$HOME/venvs/ml}/bin/huggingface-cli"; do
+        [[ -x $c ]] && { printf '%s' "$c"; return 0; }
+    done
+    return 1
+}
+
 twonode_stage_model() {  # $1 = HF repo id (org/name)
     local repo=${1:?twonode_stage_model: HF repo id required}
     local slug="models--${repo//\//--}"
@@ -255,8 +312,23 @@ twonode_stage_model() {  # $1 = HF repo id (org/name)
     local src="$hf/hub/$slug"
 
     [[ -d $src ]] || {
+        local cli
+        cli=$(twonode_hf_cli) || cli=""
         echo "not in this node's cache yet: $repo" >&2
-        echo "  download it here first:  hf download $repo" >&2
+        if [[ -n $cli ]]; then
+            # `ml` is the repo's own alias for activating $ml_venv
+            # (roles/shell), which is how docs/runbooks/manage-models.md spells
+            # this. It is an INTERACTIVE alias, so a script cannot use it -
+            # hence the resolved path here and the alias in the hint.
+            echo "  download it here first:  ml && hf download $repo" >&2
+            echo "  or, without the alias:   $cli download $repo" >&2
+        else
+            echo "  no hf CLI found. roles/ml puts one in ~/venvs/ml/bin:" >&2
+            echo "    ~/venvs/ml/bin/hf download $repo" >&2
+            echo "  or borrow the one in the serving image:" >&2
+            echo "    docker run --rm -e HF_HOME=/hf -v $hf:/hf --entrypoint python3 \\" >&2
+            echo "      \$IMAGE -c \"from huggingface_hub import snapshot_download as d; d('$repo')\"" >&2
+        fi
         return 1
     }
 

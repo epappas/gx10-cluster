@@ -1,8 +1,28 @@
 name: vllm-bench-serve
 kind: bench
 engine: vllm
-provenance: unverified
+provenance: verified
 summary: Concurrency sweep with `vllm bench serve`, rendered live in the terminal
+
+# VERIFIED on a GB10, against both the single-node and the two-node servers in
+# this repo - live view, both-node telemetry, JSON per point. It took TWO fixes
+# to get there, and each made every run in this repo fail before it:
+#
+#   --base-url took $BASE_URL, which ends in /v1, and `vllm bench serve`
+#   APPENDS --endpoint (default /v1/completions) to it. Every request went to
+#   /v1/v1/completions: "Successful requests: 0, Failed requests: 32", a bare
+#   `Error 9: Not Found`, and a summary table of zeroes that reads as a dead
+#   server rather than a wrong URL.
+#
+#   --tokenizer defaulted to the SERVED name. Every serving workspace here
+#   passes --served-model-name, so the bench tried to fetch a Hub repo called
+#   `qwen3.8-27b` and died with an OSError minutes in. Both names come off
+#   /v1/models now - `id` is the served alias, `root` is the repo.
+#
+# Also: --plot-timeline is passed and vllm/vllm-openai cannot honour it (no
+# vllm[bench] extra). The closing text no longer points at HTML that was never
+# written, and the bench container runs as the invoking user so its results are
+# deletable.
 
 # THE FIRST WORKSPACE THAT NEEDS A SERVER RATHER THAN A GPU. Every other recipe
 # here starts a model; this one measures one that is already up, which is why

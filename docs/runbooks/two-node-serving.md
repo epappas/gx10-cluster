@@ -338,6 +338,35 @@ cd workspaces/inference/vllm-2node-tp2
 bash -x ./up.sh          # see exactly the two docker command lines it generates
 ```
 
+## The image has to be on BOTH nodes, and the pull is not visible
+
+`docker run` pulls a missing image implicitly. On one machine that is fine; on
+two it produces the least helpful failure in this runbook, because **the peer's
+pull happens inside an `ssh … docker run` whose output the launcher discards**.
+
+Measured here with `vllm-2node-glm53-flash-exl3`'s 20.9 GB overlay image on a
+cold peer: `ws up` printed its banner and then appeared to do **nothing for over
+ten minutes** — no container on either node, no progress, no error. The ranks
+also race in that window: rank 0 opens the rendezvous while rank 1 is still
+pulling, which is the "one rank waiting for a peer that never arrives" failure
+the shared launcher exists to prevent.
+
+`workspaces/lib/twonode.sh` now pulls on **both** nodes before launching either,
+and says which node it is waiting on:
+
+```
+==> ghcr.io/miaai-lab/…:exl3 on odysseus
+==> ghcr.io/miaai-lab/…:exl3 on poseidon (this is the slow one on a cold node)
+```
+
+It is a no-op once both nodes have the image, which is every run after the
+first. If you want to front-load it yourself:
+
+```bash
+IMG=ghcr.io/miaai-lab/glm-5.3-flash-2x-dgx-sparks:exl3
+docker pull "$IMG" & ssh <peer> "docker pull $IMG" & wait
+```
+
 ## Failure modes
 
 | Symptom | Cause | Fix |
@@ -385,7 +414,7 @@ one whose 164 GiB makes the difference material:
 
 ```bash
 cd workspaces/inference/vllm-2node-glm53-flash-exl3
-hf download Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw   # once, here
+ml && hf download Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw   # once, here
 ./stage-weights.sh                                  # then to the peer, over the cable
 ```
 
@@ -401,8 +430,17 @@ is the *only* thing that moves the memory line
 
 ## Provenance
 
-All three two-node workspaces are `unverified`: written from the vendor docs and the
-published 2× DGX Spark recipes cited in their manifests, not from a completed
-run on this hardware. The **fabric** measurements in this runbook are
-first-hand — 22.7 GB/s busbw, the NCCL device discovery, the MTU results — the
-**serving** ones are not. See [provenance](../README.md#provenance).
+All three two-node workspaces are `verified` — run to a served endpoint on this
+hardware, with rank 1 on the peer. The evidence, per workspace:
+
+| Workspace | Peer-node proof | Measured |
+|---|---|---|
+| `vllm-2node-tp2` | `ws-vllm-2node` on both hosts; the peer's container logs `rank=1` and **1396 `NET/IB`, zero `NET/Socket`** | Nemotron-120B NVFP4: 24.2 / 67.1 / 131.6 tok/s at 1 / 4 / 16 streams; `17*23` → `391` |
+| `vllm-2node-glm53-flash-exl3` | `up.sh` printed `rank 1  poseidon  192.168.1.68   (headless)` | GLM-5.3-Flash EXL3 4bpw, DFlash2 aggregate acceptance 0.985 |
+| `vllm-2node-deepseek-v4-flash` | same two-rank launcher | DSpark acceptance 1.00 across 5 draft positions at 79.9 tok/s |
+
+`NET/IB` with no `NET/Socket` is the line that matters: it is the difference
+between "two nodes" and "two nodes talking over TCP", which looks like
+slowness rather than like a fault. The fabric measurements — 22.7 GB/s busbw,
+the NCCL device discovery, the MTU results — were already first-hand.
+See [provenance](../README.md#provenance).

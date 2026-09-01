@@ -1,8 +1,28 @@
 name: llamacpp-deepseek-v4-flash-gguf
 kind: inference
 engine: llama.cpp
-provenance: unverified
+provenance: verified
 summary: DeepSeek-V4-Flash UD-IQ2_M on ONE node, with room for DSpark drafts
+
+# VERIFIED on a GB10 (odysseus), and the memory arithmetic above holds exactly:
+# 90.9 GB of UD-IQ2_M loads with -ngl 999 and serves /v1/chat/completions at
+# ~15 tok/s, 96 GB resident of 121, NO SWAP. That last clause is the one worth
+# having - this is the workspace the header calls "most likely to run the box
+# out of memory", and at the shipped quant it does not.
+#
+# Needs llama_cpp_version >= b10717 like its siblings: b6100 downloads all
+# 90.9 GB and then dies on `unknown model architecture: 'deepseek4'`.
+#
+# ONE FINDING, and it is the quantisation rather than the recipe.
+# `ws up vllm-quality-gate` returned 1/2 with
+#   empty-with-58-tokens-billed (reasoning never closed)
+# and 58 is NOT the token cap - the reply ended on its own, empty, with the
+# reasoning block never closed. That is a real detector hit, not the
+# budget artefact the gate warns about separately, and UD-IQ2_M is the most
+# aggressive quantisation in this repo at ~2 bits. The prose shape passed.
+# Treat it as the cost of 2-bit on a reasoning model: for output quality, the
+# answer is both nodes at FP8 (ws up vllm-2node-deepseek-v4-flash, verified),
+# not a different single-node quant.
 
 # THE QUANT IS CHOSEN AGAINST THE MEMORY BUDGET, not against the model. From
 # unsloth's own file listing, with what each leaves on a ~112 GB budget:

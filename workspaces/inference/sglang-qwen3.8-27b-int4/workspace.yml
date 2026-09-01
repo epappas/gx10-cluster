@@ -1,0 +1,70 @@
+name: sglang-qwen3.8-27b-int4
+kind: inference
+engine: sglang
+provenance: verified
+summary: Qwen3.8-27B at INT4 W4A16 on SGLang - 13.2 tok/s single, 142 tok/s at 16 streams
+
+# VERIFIED HERE, after the two formats this workspace used to name were both
+# measured failing. `ws up sglang-qwen3.8-27b-int4` serves and answers:
+#
+#   1 stream     117 tok    8.85s     13.2 tok/s
+#   4 streams    462 tok   10.05s     46.0 tok/s   (11.5 per stream)
+#  16 streams   1860 tok   13.10s    142.0 tok/s   ( 8.9 per stream)
+#
+# and 17*23 comes back 391, so it is generating rather than merely listening.
+#
+# --reasoning-parser qwen3 IS NOT COSMETIC. Without it vllm-quality-gate fails
+# 18/18 with special-token-leak ['</think>'] - the whole thinking block is
+# served as the answer. With it, 12/18 pass; the six that remain are all the
+# json task hitting the gate's 1024-token ceiling before the model stops
+# reasoning, which is a thinking budget, not a serving fault.
+#
+# WHY NOT GGUF - the format this workspace used to carry, measured here after
+# the 17.5 GB file downloaded:
+#
+#   ValueError: GGUF model with architecture qwen35 is not supported yet.
+#
+# That is transformers, not SGLang: SGLang reads GGUF through
+# transformers.modeling_gguf_pytorch_utils, whose GGUF_CONFIG_MAPPING in 5.12.1
+# carries 25 architectures, of which the Qwen ones are qwen2, qwen2_moe, qwen3
+# and qwen3_moe. `qwen35` is not among them and no transformers commit adds it,
+# so this is not a stale image to bump.
+#
+# WHY NOT NVFP4, also measured here with the checkpoint local:
+#   Parameter lm_head.weight_scale not found in params_dict
+#   Parameter model.layers.N.k_scale / v_scale not found in params_dict
+# It never reaches a served endpoint. The quantised lm_head is the blocker.
+#
+# WHY INT4 WORKS WHERE THOSE DO NOT: it is compressed-tensors W4A16, which
+# SGLang loads through its own quantisation path rather than through
+# transformers' GGUF reader, and which does not quantise lm_head. On GB10 W4A16
+# runs on Marlin - the same path NVFP4 takes on this hardware.
+#
+# THE ARCHITECTURE WAS NEVER THE PROBLEM, and that is what made this fixable.
+# The NVFP4 attempt failed while matching parameter NAMES, which means SGLang
+# had already built Qwen3_5ForConditionalGeneration - so any format whose
+# weights it can read was always going to serve. BF16 confirms it (loads and
+# answers, at 4.3 tok/s: 54 GB of weights against ~273 GB/s of bandwidth is
+# ~5 tok/s and no tuning changes that). INT4 is 3x faster for the same answers.
+#
+# Compare with the same model on the other two engines, both verified:
+#   ws up vllm-qwen3.8-27b-nvfp4        NVFP4 on vLLM
+#   ws up llamacpp-qwen3.8-27b-gguf     the GGUF, on llama.cpp b10717
+
+requires:
+  gpu_arch: "12.1"
+  min_unified_gb: 40
+  docker: true
+
+images:
+  - lmsysorg/sglang:latest
+
+models:
+  - RedHatAI/Qwen3.8-27B-INT4
+
+endpoints:
+  - "http://127.0.0.1:8900/v1  (OpenAI-compatible)"
+
+sources:
+  - https://docs.sglang.ai/
+  - https://huggingface.co/RedHatAI/Qwen3.8-27B-INT4

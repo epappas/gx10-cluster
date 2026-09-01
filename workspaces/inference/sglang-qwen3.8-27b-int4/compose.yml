@@ -1,0 +1,65 @@
+# SGLang serving Qwen3.8-27B at INT4. See workspace.yml for why this is neither
+# GGUF nor NVFP4 - both were tried on this box, and both fail upstream.
+#
+# No aarch64 tag is published as reliably as vLLM's, so this pins :latest. If
+# the image does not exist for arm64 on your day, that is the first thing to
+# check - `ws check` reports the image as not-pulled, which looks identical to
+# "not yet downloaded".
+services:
+  sglang:
+    image: ${SGLANG_IMAGE:-lmsysorg/sglang:latest}
+    container_name: ws-sglang-qwen38
+    restart: unless-stopped
+    runtime: nvidia
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+      - HF_HOME=/hf
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    volumes:
+      - ${HF_HOME:-${HOME}/.cache/huggingface}:/hf
+    ports:
+      - "${PORT:-8900}:30000"
+    shm_size: ${SHM_SIZE:-16g}
+    ipc: host
+    # MEM_FRACTION IS 0.60, NOT 0.80, AND THAT IS NOT CAUTION - it is what the
+    # box measured. SGLang sizes its pool as a fraction of TOTAL memory and then
+    # cudaMallocs it in one go. On unified memory the page cache is part of that
+    # same pool, and after pulling ~50 GB of weights the cache is holding most
+    # of it:
+    #     free -g  ->  used 11   buff/cache 90   available 110
+    # The cache is reclaimable, but a single large cudaMalloc does not force the
+    # kernel to reclaim it, so 0.80 (97 GB) dies at startup with
+    #     torch.AcceleratorError: CUDA error: out of memory
+    # on a machine reporting 110 GB available. 0.60 is 73 GB, which fits the
+    # 19 GB of INT4 weights and a 64K window with room to spare. Raise it on a
+    # freshly-booted box if you want, and watch it with gx10-top.
+    #
+    # WITHOUT --reasoning-parser THE ANSWERS ARE WRONG, not merely untidy.
+    # Qwen3.8 thinks by default, and with no parser SGLang leaves the whole
+    # <think>...</think> block in `content`. vllm-quality-gate fails all 18
+    # requests on it:
+    #     18/18 requests failed.  first, prose at concurrency 1:
+    #       - special-token-leak ['</think>']
+    #       - prompt echo (filler text reproduced in the answer)
+    # The "prompt echo" is the same cause: the model restates the prompt while
+    # reasoning, and that reasoning is being served as the answer. With the
+    # parser on, the block goes to `reasoning_content` where it belongs and the
+    # gate passes 18/18.
+    #
+    # Comments cannot live inside the `command: >` block below - a folded scalar
+    # has no comment syntax, and a `#` line there becomes an argument.
+    command: >
+      python3 -m sglang.launch_server
+      --model-path ${MODEL:-RedHatAI/Qwen3.8-27B-INT4}
+      --host 0.0.0.0 --port 30000
+      --context-length ${CTX:-65536}
+      --mem-fraction-static ${MEM_FRACTION:-0.60}
+      --reasoning-parser ${REASONING_PARSER:-qwen3}
+      --trust-remote-code
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:30000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: ${START_PERIOD:-15m}

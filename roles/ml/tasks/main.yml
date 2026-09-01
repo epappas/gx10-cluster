@@ -114,6 +114,13 @@
 # CMAKE_CUDA_ARCHITECTURES=121 is correct as written: llama.cpp's own
 # CMakeLists rewrites 12X to 12Xa, because Blackwell's FP4 tensor core
 # instructions are not forward-compatible. No need to spell 121a here.
+#
+# `creates:` is STAMPED WITH THE VERSION, not pointed at llama-cli. The plain
+# binary path made a bump of llama_cpp_version a no-op: the git task checks out
+# the new ref, the build task sees llama-cli already there and skips, and the
+# host keeps serving a binary from the old tree with no task reported changed.
+# That is how a box ends up a year behind its own pin - and the symptom lands
+# in a workspace, as a model whose architecture "is not supported".
 - name: Build llama.cpp with CUDA
   ansible.builtin.shell:
     cmd: |
@@ -122,8 +129,11 @@
             -DGGML_CUDA_FA_ALL_QUANTS=ON -DGGML_NATIVE=ON \
             -DCMAKE_BUILD_TYPE=Release
       cmake --build build --config Release -j{{ ansible_facts['processor_vcpus'] | default(20) }}
+      # The stamp is written LAST, so an interrupted build is retried rather
+      # than remembered as done.
+      touch build/.gx10-built-{{ llama_cpp_version }}
     chdir: "{{ primary_home }}/src/llama.cpp"
-    creates: "{{ primary_home }}/src/llama.cpp/build/bin/llama-cli"
+    creates: "{{ primary_home }}/src/llama.cpp/build/.gx10-built-{{ llama_cpp_version }}"
   become_user: "{{ primary_user }}"
   become: true
   environment:

@@ -22,11 +22,11 @@ the territory.
 |---|---|---|---|---|
 | [`vllm-qwen3.8-27b-nvfp4`](inference/vllm-qwen3.8-27b-nvfp4/README.md) | 1 | ~40 GB | 8888 | **The single-node default.** NVFP4, the format this hardware exists for |
 | [`llamacpp-qwen3.8-27b-gguf`](inference/llamacpp-qwen3.8-27b-gguf/README.md) | 1 | ~24 GB | 8899 | Cheapest here. No container, host binary, starts in seconds |
-| [`sglang-qwen3.8-27b-gguf`](inference/sglang-qwen3.8-27b-gguf/README.md) | 1 | ~28 GB | 8900 | SGLang's scheduler — on GGUF, because it cannot load **this** NVFP4 build |
+| [`sglang-qwen3.8-27b-int4`](inference/sglang-qwen3.8-27b-int4/README.md) | 1 | ~40 GB | 8900 | SGLang's scheduler on this model. INT4 W4A16 — [the only format of three that loads](inference/sglang-qwen3.8-27b-int4/README.md#three-formats-and-only-one-of-them-works) |
 | [`vllm-2node-tp2`](inference/vllm-2node-tp2/README.md) | **2** | ~40 GB/node | 8888 | The **generic** two-node recipe. Bring your own model |
 | [`vllm-2node-deepseek-v4-flash`](inference/vllm-2node-deepseek-v4-flash/README.md) | **2** | ~100 GB/node | 8890 | **The DeepSeek default.** FP8 across the cable, DSpark drafts |
 | [`llamacpp-deepseek-v4-flash-gguf`](inference/llamacpp-deepseek-v4-flash-gguf/README.md) | 1 | ~96 GB | 8891 | V4-Flash on one node at 2-bit, with room for drafts |
-| [`llamacpp-deepseek-v4-pro-gguf`](inference/llamacpp-deepseek-v4-pro-gguf/README.md) | 1 | ~32 GB + **360 GB disk** | 8892 | V4-Pro at 1-bit, mmapped off NVMe. Seconds per token |
+| [`llamacpp-deepseek-v4-pro-gguf`](inference/llamacpp-deepseek-v4-pro-gguf/README.md) | 1 | ~32 GB + **360 GB disk** | 8892 | 1-bit V4-Pro straight off the NVMe — 0.67 tok/s, 7 GB resident. [How](inference/llamacpp-deepseek-v4-pro-gguf/README.md#four-blockers-and-what-each-one-actually-was) |
 | [`vllm-2node-glm53-flash-exl3`](inference/vllm-2node-glm53-flash-exl3/README.md) | **2** | **~106 GB/node** | 8893 | **The GLM default.** EXL3 4bpw, **1M context**, vision, DFlash2 drafts |
 | [`sglang-nemotron35-lightning-nvfp4`](inference/sglang-nemotron35-lightning-nvfp4/README.md) | 1 | ~96 GB | 8894 | **1M context on ONE node.** NVFP4 + DSpark, as published |
 | [`vllm-nemotron35-lightning-nvfp4`](inference/vllm-nemotron35-lightning-nvfp4/README.md) | 1 | ~98 GB | 8895 | The same model where the **acceptance ladder** works |
@@ -47,7 +47,7 @@ the territory.
 |---|---|
 | [`ray`](cluster/ray/README.md) | An **ephemeral** containerised Ray cluster. Not `roles/ray` |
 | [`slurm`](cluster/slurm/README.md) | Job scripts for the Slurm Ansible installs. Daemons stay with Ansible |
-| [`ray-verl`](rl/ray-verl/README.md) | RL post-training (GRPO/PPO). The tightest memory fit in this repo |
+| [`ray-verl`](rl/ray-verl/README.md) | **`blocked`** — the stack runs; Qwen3-8B + a co-resident rollout does not fit 121 GB. [The measurements](rl/ray-verl/README.md#what-actually-happens-on-a-gb10) |
 
 **Running across two nodes?** The mechanism, the prerequisites and the three
 things that fail *quietly* are in
@@ -82,7 +82,7 @@ The single most expensive thing to learn the hard way here:
 | | llama.cpp | vLLM | SGLang |
 |---|---|---|---|
 | **NVFP4** | no | **yes** | **checkpoint-dependent** — see below |
-| **GGUF Q4** (~17–19 GB) | **yes** | yes | yes |
+| **GGUF Q4** (~17–19 GB) | **yes** | yes | **architecture-dependent** — see below |
 | **MixedInt4-AutoRound** (20.8 GB) | no | **yes** | no |
 | **EXL3 / TR3** (4 bpw) | no | **overlay image only** | no |
 
@@ -94,7 +94,7 @@ default: smaller, published everywhere, and no third-party image needed.
 
 **The SGLang cell used to read "NO — quantised `lm_head`", and that was a claim
 about the wrong noun.** It is true of `unsloth/Qwen3.8-27B-NVFP4` — which is
-why [`sglang-qwen3.8-27b-gguf`](inference/sglang-qwen3.8-27b-gguf/README.md)
+why [`sglang-qwen3.8-27b-int4`](inference/sglang-qwen3.8-27b-int4/README.md)
 exists — and false of NVIDIA's Nemotron 3.5 Lightning NVFP4, which SGLang
 serves on day 0 on this hardware. A negative result measured on one checkpoint
 is not a capability claim about an engine
@@ -103,7 +103,24 @@ is not a capability claim about an engine
 | Checkpoint | SGLang | Because |
 |---|---|---|
 | `unsloth/Qwen3.8-27B-NVFP4` | **no** | quantised `lm_head` |
+| `unsloth/Qwen3.8-27B-GGUF` | **no** | `transformers`' GGUF reader has no `qwen35` |
+| `RedHatAI/Qwen3.8-27B-INT4` | **yes** | compressed-tensors W4A16, SGLang's own quant path, unquantised `lm_head` |
+| `Qwen/Qwen3.8-27B` (BF16) | **yes** | but 4.3 tok/s — 54 GB against ~273 GB/s |
 | `nvidia/…-Nemotron-3.5-Lightning-30B-A3B-NVFP4` | **yes** | day-0 support, published GB10 operating point |
+
+**The GGUF cell is architecture-dependent for the same shape of reason.**
+SGLang reads GGUF through `transformers`, whose `GGUF_CONFIG_MAPPING` knows 25
+architectures — `qwen2`, `qwen2_moe`, `qwen3`, `qwen3_moe`, and not `qwen35`.
+That refusal was measured here, after the 17.5 GB file downloaded. **But the
+architecture was never the problem** — the NVFP4 attempt failed while matching
+parameter *names*, which means SGLang had already built
+`Qwen3_5ForConditionalGeneration`, so any format whose weights it can read was
+always going to serve. `sglang-qwen3.8-27b-int4` is `verified` on
+`RedHatAI/Qwen3.8-27B-INT4` at 13.2 tok/s single-stream and 142 tok/s at 16
+([the detail](inference/sglang-qwen3.8-27b-int4/README.md#three-formats-and-only-one-of-them-works)).
+llama.cpp has the same class of limit and it is a **version** rather than a
+wall — `qwen35` landed there, which is why `llama_cpp_version` is pinned past
+it.
 
 **EXL3 is the one row upstream vLLM cannot do at all**, which is why the last
 row says *overlay image*. It is not a fallback for when NVFP4 is unavailable —
@@ -319,9 +336,13 @@ Two more values with no alternative on this hardware:
 - **`--kv-cache-dtype fp8`**, because the SM12x sparse-MLA kernel accepts only
   packed `fp8_ds_mla`. bf16 KV has **no sparse kernel on this arch**, and NVFP4
   KV — which does exist on SM12x — is a **dense MHA** kernel, not sparse MLA.
-- **`--max-num-batched-tokens 1024`**, because 8192-token prefill chunks
-  oversubscribe the GB10 indexer top-k's shared memory and crash a long prompt
-  around 300k tokens. That is a kernel limit, not a throughput preference.
+- **`--max-num-batched-tokens` capped well below 8192**, because 8192-token
+  prefill chunks oversubscribe the GB10 indexer top-k's shared memory and crash
+  a long prompt around 300k tokens. That ceiling is a kernel limit, not a
+  throughput preference. The value *under* it is measured rather than chosen:
+  the shipped default is **2048**, which the published cold-prefill ladder puts
+  +16% over 1024 at 8k — and 3584 and 4096 both below it
+  ([the table](inference/vllm-2node-glm53-flash-exl3/README.md)).
 
 ## Benchmarking a server, which is not `make bench`
 
@@ -489,7 +510,20 @@ an inconvenience to route around.
 Same rule as the docs: **`verified` means it was run on this hardware.**
 `ws list` colours it — green verified, yellow written-but-never-run.
 
-Every workspace here is currently **unverified**. They are written from vendor
+Three values, and `ws list` colours all three:
+
+| | Means | `ws list` |
+|---|---|---|
+| `verified` | run on this hardware, and it worked | green |
+| `unverified` | written from vendor docs and the manifest's sources, never run | yellow |
+| `blocked` | **run here, and something outside this repo refused it** | red |
+
+`blocked` is a measurement, not pessimism, and it exists so that "this cannot
+work today" is visible in the catalogue rather than buried in a README nobody
+reads before starting a 17.5 GB download. When a blocker lifts, re-run and flip
+it back.
+
+Most workspaces here are still **unverified** — written from vendor
 documentation and the sources listed in each `workspace.yml`, not from a
 completed run. Expect to fix something the first time. When you do, fix the
 recipe, flip `provenance`, and say what changed.

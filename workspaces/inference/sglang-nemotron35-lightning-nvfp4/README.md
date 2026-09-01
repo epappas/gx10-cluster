@@ -11,7 +11,7 @@
 | Nodes | **1** |
 | Endpoint | `http://127.0.0.1:8894/v1` |
 | Needs | ~96 GB unified claimed · ~30 GB disk · Docker |
-| Provenance | `unverified` — written from the sources below, never run on this hardware |
+| Provenance | **`verified`** — `./report.sh` on this box: 4,557,963 pool tokens, 13.04 GiB KV, **48** concurrent |
 
 ## What
 

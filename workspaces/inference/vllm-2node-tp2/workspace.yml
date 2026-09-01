@@ -1,8 +1,29 @@
 name: vllm-2node-tp2
 kind: inference
 engine: vllm
-provenance: unverified
+provenance: verified
 summary: Tensor-parallel vLLM across BOTH nodes over RoCE - for models too big for one
+
+# VERIFIED on odysseus + poseidon. 75 GB of NVFP4 sharded TP=2 over RoCE, ~9
+# minutes to /health, 131072 context, and the transport confirmed rather than
+# assumed:
+#   NCCL INFO NET/IB: [0] rocep1s0f0:uverbs0:1/RoCE provider=Mlx5 speed=200000
+#   NCCL INFO NET/IB: [2] roceP2p1s0f0:uverbs2:1/RoCE provider=Mlx5 speed=200000
+# - both ACTIVE rails discovered, both DOWN partitions ignored, exactly as
+# twonode.sh predicts when NCCL_IB_HCA is left unset.
+#
+# THE RUN CHANGED TWO THINGS. `ws up vllm-quality-gate` failed 4/4 on
+# special-token-leak ['</think>'] because this workspace set no reasoning
+# parser - being the GENERIC recipe was the argument for that, and it does not
+# survive shipping a default model that reasons. And the RoCE grep above
+# printed NOTHING before, on a healthy cluster, because NCCL_DEBUG was WARN.
+#
+# ONE THING THAT LOOKS WRONG AND IS NOT: prefix-cache hits stay at 0 for any
+# shared prefix under 8320 tokens. NemotronH is hybrid, so vLLM raises the
+# attention block size to 8320 to match the mamba page - and hits are
+# block-aligned. Past that boundary it is exact: at a 20k history the
+# follow-up reused 16640 of 16640 allowed, 1.00 efficiency, TTFT 5.22s -> 0.97s.
+#   BASE_URL=http://127.0.0.1:8888/v1 ws up vllm-prefill-ladder --rungs 20000 --page 8320
 
 # The case this exists for: a model that does not fit on one GB10 with useful
 # KV cache. The default is the 120B NVFP4 already cached on both nodes - 75 GB
@@ -28,6 +49,13 @@ images:
 
 models:
   - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+
+# The container `ws logs` tails. Named here rather than parsed out of up.sh:
+# these workspaces run `docker run` directly, so there is no compose project
+# for `ws logs` to ask.
+# Rank 0, here. Rank 1 runs the SAME container name on the peer:
+#   ssh <peer> docker logs -f ws-vllm-2node
+container: ws-vllm-2node
 
 endpoints:
   - "http://127.0.0.1:8888/v1  (OpenAI-compatible, on the rank-0 node)"

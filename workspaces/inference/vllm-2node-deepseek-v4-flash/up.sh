@@ -85,9 +85,26 @@ MODEL_ARGS=(
     --reasoning-parser deepseek_v4
     --tool-call-parser deepseek_v4 --enable-auto-tool-choice
 
-    # The FP4 indexer cache belongs to v4's compressed/heavily-compressed
-    # attention. It is in every official launch line for this model.
-    --attention-config '{"use_fp4_indexer_cache": true}'
+    # THE FP4 INDEXER CACHE IS OFF ON THIS HARDWARE, and that is a hardware
+    # fact rather than a tuning choice. It belongs to v4's compressed attention
+    # and it IS in every official launch line for this model - which is exactly
+    # why it was here. On a GB10 it crash-loops the worker at init:
+    #
+    #   ValueError: indexer_kv_dtype='mxfp4' requires Blackwell datacenter GPUs
+    #   (sm_10x, e.g. B200/GB200); sm_120 (consumer Blackwell) and earlier
+    #   architectures are not supported.
+    #
+    # The published recipes this workspace is ported from run on GB200 and
+    # B200. GB10 is sm_121 - consumer Blackwell - so the mxfp4 indexer KV has
+    # no kernel here, the same way NVFP4 on this box goes through Marlin rather
+    # than native FP4 tensor cores (workspaces/README.md's quant matrix).
+    #
+    # `--restart unless-stopped` makes this loud rather than fatal: 20 restarts
+    # in nine minutes, each logging the line above. That is the intended
+    # behaviour and it is how this was found.
+    #
+    # ATTENTION_CONFIG turns it back on for a datacenter Blackwell node,
+    # where it is a real win. Empty is correct on GB10.
 
     # DSpark is why the -DSpark checkpoint exists: a draft module shipped in
     # the same repo. 5 tokens, not the model card's 7 - the card is written for
@@ -118,6 +135,9 @@ MODEL_ARGS=(
     # else's temperature is how two "identical" servers disagree.
     --generation-config vllm
 )
+
+# Opt-in, empty by default - see the note in MODEL_ARGS above.
+[[ -n ${ATTENTION_CONFIG:-} ]] && MODEL_ARGS+=( --attention-config "$ATTENTION_CONFIG" )
 
 echo "model   $MODEL  TP=2  (284B total / 13B active)"
 twonode_up

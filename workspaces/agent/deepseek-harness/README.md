@@ -10,7 +10,7 @@
 | Nodes | 1, and it claims no GPU |
 | Endpoint | `http://127.0.0.1:3080` (web UI) |
 | Needs | Docker. That is all |
-| Provenance | `unverified` — and `dsh` is a **developer preview** by its own README |
+| Provenance | **`verified`** — UI reached on :3080; `dsh` is still a **developer preview** by its own README |
 
 ## What
 
@@ -113,7 +113,7 @@ Two things people get wrong here:
   | 8890 | [`vllm-2node-deepseek-v4-flash`](../../inference/vllm-2node-deepseek-v4-flash/README.md) |
   | 8891 | [`llamacpp-deepseek-v4-flash-gguf`](../../inference/llamacpp-deepseek-v4-flash-gguf/README.md) |
   | 8899 | [`llamacpp-qwen3.8-27b-gguf`](../../inference/llamacpp-qwen3.8-27b-gguf/README.md) |
-  | 8900 | [`sglang-qwen3.8-27b-gguf`](../../inference/sglang-qwen3.8-27b-gguf/README.md) |
+  | 8900 | [`sglang-qwen3.8-27b-int4`](../../inference/sglang-qwen3.8-27b-int4/README.md) |
 
 - **`models[].id` is the *served* name**, which `--served-model-name` set — not
   the HF repo id. `curl -s localhost:8890/v1/models` prints exactly this.
@@ -132,7 +132,7 @@ Two things people get wrong here:
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Nothing on :3080 | First start is downloading the npm tree | `ws logs deepseek-harness -f`; `start_period` is 3m |
+| Nothing on :3080, and `ws status` says `unhealthy` | First start is still resolving the npm tree — measured at ~7.5 minutes and ~476 MB here, during which nothing is listening | Wait, and watch `ws logs deepseek-harness -f` for `dsh web: http://127.0.0.1:3080`. `start_period` is 12m for this reason; health does not trigger a restart, so an `unhealthy` first start is not a loop |
 | Cannot reach the model | `baseURL`, or an empty API key | It is host networking — **if `curl` works from your shell, the same URL works** |
 | UI sits on "Thinking…" until the whole answer lands | A field name, not a stall: these runtimes stream the trace as `reasoning`, OpenAI-compatible clients read `reasoning_content` | Nothing to fix on the server |
 | `./dsh-home` files are root-owned | `DSH_UID`/`DSH_GID` do not match you | Set them; `sudo chown -R $(id -u):$(id -g) dsh-home` |

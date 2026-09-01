@@ -52,9 +52,22 @@ load_env() {
     return 0
 }
 
+# Compose project names accept [a-z0-9][a-z0-9_-]* and NOTHING ELSE - a dot is
+# rejected outright with "invalid project name". Three workspaces here are named
+# after a model whose version has a dot in it (qwen3.8), and one of them is the
+# single-node default this repo's README opens with, so `ws up` on the first
+# thing anyone runs failed on the project name before it reached docker.
+#
+# Mapped rather than stripped: `qwen3.8-27b` and `qwen38-27b` would otherwise
+# both become the same project, and two workspaces sharing a project name is a
+# far worse bug than the one being fixed. Uppercase is folded for the same
+# reason the rule exists. The `container_name:` in each compose file is already
+# dot-free, which is why the containers were never the problem.
+ws_project() { printf 'ws-%s' "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_-' '-')"; }
+
 compose() {  # $1 = dir; rest = compose args
     local d=$1; shift
-    ( cd "$d" && docker compose --project-name "ws-$(basename "$d")" "$@" )
+    ( cd "$d" && docker compose --project-name "$(ws_project "$(basename "$d")")" "$@" )
 }
 
 cmd_list() {
@@ -69,12 +82,16 @@ cmd_list() {
         case "$prov" in
             verified)   col=$c_grn ;;
             unverified) col=$c_yel ;;
+            # `blocked` is red for the same reason an unknown value is: it is
+            # not "untested", it is "tested, and it did not work". Anything
+            # unrecognised keeps falling here too - a manifest with a typo in
+            # provenance should look wrong, not look fine.
             *)          col=$c_red ;;
         esac
         printf '%s%-34s%s %-10s %-9s %s\n' "$col" "$n" "$c_off" \
             "$(ws_field "$m" kind)" "$(ws_field "$m" engine)" "$(ws_field "$m" summary)"
     done
-    printf '\n%sgreen = run on this hardware · yellow = written, never run%s\n' "$c_dim" "$c_off"
+    printf '\n%sgreen = run on this hardware · yellow = written, never run · red = run, and blocked%s\n' "$c_dim" "$c_off"
 }
 
 cmd_show() {
@@ -110,7 +127,14 @@ cmd_up() {
     ws_preflight "$d/workspace.yml" || die "requirements not met - see above"
     load_env "$d"
     if [[ -x "$d/up.sh" ]]; then
-        "$d/up.sh" "$@"
+        # EXPORTED so an up.sh that drives compose itself uses the SAME project
+        # name `ws down`, `ws logs` and `ws status` will look for. Two of them
+        # do, and re-deriving it in each was a real bug: `basename | tr -c ...`
+        # translates the trailing NEWLINE too, so one side computed
+        # `ws-vllm-qwen3-8-27b-nvfp4-` and the other `ws-vllm-qwen3-8-27b-nvfp4`,
+        # and a healthy running container became invisible to `ws status` and
+        # unstoppable by `ws down`.
+        WS_PROJECT=$(ws_project "$(basename "$d")") "$d/up.sh" "$@"
     elif [[ -f "$d/compose.yml" ]]; then
         compose "$d" up -d "$@"
         printf '\n'; ok "started. logs: ws logs $(basename "$d") -f"
@@ -131,14 +155,23 @@ cmd_down() {
 cmd_logs() {
     need_name "${1:-}"; local d; d=$(resolve "$1"); shift
     load_env "$d"
-    # Only compose workspaces have logs to tail. The rest write to a file and
-    # print its path on start - pointing at a README they do not have was worse
-    # than saying nothing.
-    [[ -f "$d/compose.yml" ]] || die "no compose.yml - this workspace logs to a file, and
-its up.sh printed the path when it started. Common ones:
+    [[ -f "$d/compose.yml" ]] && { compose "$d" logs "$@"; return; }
+
+    # NOT EVERY CONTAINER WORKSPACE IS A COMPOSE WORKSPACE. Five recipes here
+    # run `docker run` directly - the two-node launcher cannot use compose at
+    # all, because half the containers are on another machine, and the rest
+    # branch on a speculator in a way a compose `command:` cannot express.
+    # Their logs are in `docker logs`, and telling their users to go looking in
+    # ~/.local/state for a file that does not exist was worse than the silence
+    # it replaced. The manifest names the container so this does not have to
+    # guess it out of a shell script.
+    local c; c=$(ws_field "$d/workspace.yml" container)
+    [[ -n $c ]] && { exec docker logs "$@" "$c"; }
+
+    die "no compose.yml and no 'container:' in the manifest - this workspace
+logs to a FILE, and its up.sh printed the path when it started. Common ones:
   ~/.local/state/ws-*.log          llama.cpp workspaces
   ~/.local/state/gx10-bench/       vllm-bench-serve"
-    compose "$d" logs "$@"
 }
 
 cmd_status() {

@@ -83,10 +83,18 @@ PROMPTS = {
         "changes how a model server should be sized. Answer in English only. "
         "Do not emit XML, tool calls, or markup."
     ),
+    # "name" IS PINNED TO A LITERAL, and that is not tidiness. Asked for an
+    # unconstrained string called "name", a well-behaved model reaches for the
+    # most salient string in the prompt - which is the `sentinel-<nonce>` this
+    # gate puts at the very top as its cache-buster. The echo detector then
+    # convicts a server that did exactly what it was told. Observed on two
+    # different models on two different engines here, so it is a property of
+    # the prompt rather than of either server, and a gate that condemns a
+    # working server is the one failure this file cannot afford.
     "json": (
         "Reply with a single JSON object and nothing else: keys \"name\" "
-        "(string), \"nodes\" (integer), \"notes\" (string, English). No prose "
-        "before or after it, no code fence."
+        "(string, exactly \"gx10\"), \"nodes\" (integer), \"notes\" "
+        "(string, English). No prose before or after it, no code fence."
     ),
     "code": (
         "Write a short Python function `median(xs)` that returns the median of "

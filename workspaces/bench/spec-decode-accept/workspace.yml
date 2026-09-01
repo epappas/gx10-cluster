@@ -1,8 +1,22 @@
 name: spec-decode-accept
 kind: bench
 engine: any
-provenance: unverified
+provenance: verified
 summary: Is the speculative decoder working - acceptance per DRAFT POSITION
+
+# VERIFIED on a GB10 against vllm-qwen3.8-27b-nvfp4 with MTP at k=2, and
+# against two servers with no speculator at all. Both paths behave as written:
+#
+#   with MTP      structured 1.00 / 1.00, verdict "this is what a working
+#                 drafter looks like"; prose 0.84 / 0.61 with the decay
+#                 correctly called NORMAL rather than a broken mask
+#   without       "no speculative decoding on this server - nothing to
+#                 measure", rather than a confident zero
+#   no /metrics   "cannot read .../metrics: HTTP 501", naming the flag SGLang
+#                 needs, rather than a traceback
+#
+# The class qualifier is doing real work in that first row: the prose ladder on
+# a healthy server has the same shape a broken mask makes.
 
 # THE FAILURE THIS EXISTS FOR, and why no other check in this repo finds it.
 #

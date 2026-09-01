@@ -10,7 +10,7 @@
 | Nodes | **2** |
 | Endpoint | `sbatch` / `squeue` on the controller node |
 | Needs | 1 reachable peer — **and `make optional TAGS=slurm` already run** |
-| Provenance | `unverified` |
+| Provenance | **`verified`** — daemons installed, `srun -N2` green, two-rank `torchrun` confirmed. [What the run changed](#what-running-it-changed) |
 
 ## What
 
@@ -96,10 +96,66 @@ Same image, same `--gpu-memory-utilization`, same `--kv-cache-dtype` as
 [`vllm-qwen3.8-27b-nvfp4`](../../inference/vllm-qwen3.8-27b-nvfp4/README.md).
 Two recipes that drift apart are worse than one you have to read twice.
 
+## What running it changed
+
+**Both sbatch scripts were unsubmittable against the Slurm this repo
+installs.** Every `sbatch` returned:
+
+```
+sbatch: error: Invalid generic resource (gres) specification
+```
+
+because they asked for `--gpus-per-node=1` / `--gpus=1`, and `--gpus*` is a
+**GRES** request. `roles/slurm` configures no GRES, deliberately — its
+`slurm.conf.j2` says *"not the full cgroup/GRES apparatus"* in as many words.
+The two halves of the repo disagreed and the workspace half was wrong: on a
+GB10 each node has exactly **one** GPU, so `--nodes` already allocates it and
+GRES would be bookkeeping for a choice there is nothing to choose. The flags
+are gone.
+
+If you ever add GPUs per node, add `GresTypes`/`Gres` to the **role** first,
+then put the flags back — in that order.
+
+### What the verified run looks like
+
+```bash
+make optional TAGS=slurm     # 15 tasks, 0 failed, both nodes
+sinfo                        # gx10* up infinite 2 idle odysseus,poseidon
+srun -N2 hostname            # odysseus / poseidon
+sbatch --chdir=/tmp workspaces/cluster/slurm/train-2node.sbatch /tmp/your.py
+```
+
+```
+rank=0 host=odysseus master=odysseus:29500 world=2
+rank=1 host=poseidon master=odysseus:29500 world=2
+```
+
+**That one line is the whole hosts-split argument, visible.** `MASTER` is the
+*management* name from `scontrol show hostnames`, while `scontrol show node`
+reports `NodeAddr=192.168.100.10` on the *interconnect* — the rendezvous uses
+the always-up NIC, and NCCL picks the RoCE data path independently.
+
+### There is no shared filesystem
+
+`train-2node.sbatch` runs your script **by path on every node**, so the path
+must resolve on both. Submitting from a directory the peer does not have also
+produces:
+
+```
+slurmstepd-poseidon: error: couldn't chdir to `/home/epappas/gx10-cluster':
+No such file or directory: going to /tmp instead
+```
+
+Harmless for `hostname`, not harmless for a script with relative paths. `scp`
+the script to both nodes and pass `--chdir` to somewhere that exists on both.
+
 ## Failure modes
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| `sbatch: error: Invalid generic resource (gres) specification` | A `--gpus*` flag against a Slurm with no GRES configured | Fixed in both shipped scripts. Do not re-add `--gpus*` without adding `Gres` to `roles/slurm` first |
+| `couldn't chdir to <dir>: going to /tmp instead` | The submitting directory does not exist on the peer — there is no shared filesystem | `--chdir` to a path both nodes have, and `scp` your script there |
+| Your script runs on rank 0 and `No such file or directory` on rank 1 | Same cause: the script exists on one node only | `scp` it to both |
 | `srun` hangs, no error mentioning munge | Munge keys differ between nodes | Re-run `make optional TAGS=slurm` with **no** `--limit` |
 | A node is marked down for no stated reason | `NodeAddr` points at an interconnect address the node does not hold | The role asserts this; `gx10-interconnect` |
 | `sinfo`: command not found | The daemons were never installed | `make optional TAGS=slurm` |

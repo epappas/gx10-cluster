@@ -1,34 +1,70 @@
 name: ray-verl
 kind: rl
 engine: ray+verl
-provenance: unverified
-summary: verl RL (GRPO/PPO) on Ray, vLLM rollouts, FSDP training
+provenance: verified
+summary: GRPO post-training across BOTH nodes - Qwen3-1.7B, gsm8k, reward rising over 3 steps
 
-# RL post-training is the hardest thing in this repo to fit on a GB10, and the
-# constraint is memory, not compute. A run holds the policy, a reference copy,
-# optimiser state AND the rollout engine at once - on unified memory those all
-# come out of the same 121 GB that also holds the page cache.
+# VERIFIED ON TWO NODES. `./ray-cluster.sh up` then `NNODES=2 ws up ray-verl`
+# runs verl's GRPO trainer with one GPU per box, the vLLM rollout engine on
+# each, and completes training steps that actually move the policy:
 #
-# So the default recipe is a SMALL policy (Qwen3-8B class). A 27B GRPO run does
-# not fit on one node without offload and aggressive sharding, and pretending
-# otherwise wastes an afternoon discovering it. Scale up only after a small run
-# is green end to end.
+#   val-core/openai/gsm8k/acc/mean@1   0.0167     (baseline, 1319 problems)
+#   step 1   critic/score/mean 0.0078   actor/grad_norm 0.248
+#   step 2   critic/score/mean 0.0234   actor/grad_norm 0.559
+#   step 3   critic/score/mean 0.0313   actor/grad_norm 1.061
+#   actor/perf/max_memory_allocated_gb 16.09     throughput ~97-115 tok/s
 #
-# min_unified_gb is set to 90, not 121: below that you are into swap, and on
-# coherent memory swap is a cliff rather than a slope.
+# Reward rises monotonically and the gradient norm is non-zero, which is the
+# difference between "the loop ran" and "the loop trained" - see the n: 8 note
+# in the config for how long that distinction took to notice.
+#
+# SEVEN THINGS WERE FIXED TO GET HERE, all kept:
+#   1. verlai/verl:latest does not exist (no such tag, ever).
+#   2. No verlai/verl image CONTAINS verl - by design, per their install docs.
+#   3. The rollout could not execute on GB10 -> docker/Dockerfile builds
+#      gx10/verl:sm121 on vllm/vllm-openai, the base this repo already trusts.
+#   4. No dataset - verl defaults to $HOME inside the CONTAINER.
+#      `ws up ray-verl --prepare-data` builds it.
+#   5. The config REPLACED verl's schema instead of extending it.
+#   6. verl asks transformers for FlashAttention2, which the base does not
+#      carry -> attn_implementation: sdpa under override_config, and
+#      patches/0001 for the four bert_padding helpers verl imports directly.
+#   7. Tied embeddings broke the bucketed weight sync -> patches/0002.
+#
+# AN EARLIER DIAGNOSIS HERE WAS WRONG AND IS WORTH RECORDING. This file used to
+# say the blocker was sm_121 kernels, citing verl's image torch arch list. That
+# was not the cause: the vLLM image this repo serves from every day reports the
+# IDENTICAL list -
+#   archs ['sm_80','sm_90','sm_100','sm_110','sm_120']   device cc (12, 1)
+# - and runs fine, because sm_120 and sm_121 are binary compatible. The real
+# difference was vLLM's OWN CUDA extensions, compiled without an sm_121 target
+# in verl's image and with one in this repo's. Swapping the base fixed it.
+#
+# A SECOND WRONG DIAGNOSIS, also worth recording: this file used to say a
+# second node would make Qwen3-8B fit. It does not. FSDP does shard the policy
+# across both ranks, and it is still not enough - full-parameter Adam on 8.19B
+# parameters costs ~65.6 GB per rank on top of the ~55 GB this box has already
+# spent before the trainer allocates anything. 8B was measured OOMing at
+# 118 GB/121.63 GB three separate ways. The config carries the arithmetic.
+#
+# WHAT IS STILL OUT OF REACH: Qwen3-8B. LoRA is the supported way to fit it and
+# this image cannot serve the adapter (verl 0.9.0 <-> vLLM nightly skew, exact
+# traceback in the config at lora_rank). Full-parameter 8B needs roughly double
+# this cluster.
+
 requires:
   gpu_arch: "12.1"
   min_unified_gb: 90
   docker: true
 
 images:
-  - verlai/verl:latest
+  - gx10/verl:sm121
 
 models:
-  - Qwen/Qwen3-8B
+  - Qwen/Qwen3-1.7B
 
 endpoints:
-  - "http://127.0.0.1:8265  (Ray dashboard, if using the ray workspace)"
+  - "http://127.0.0.1:8265  (Ray dashboard - ray-cluster.sh starts one)"
 
 sources:
   - https://verl.readthedocs.io/en/latest/start/quickstart.html

@@ -1,8 +1,26 @@
 name: vllm-prefill-ladder
 kind: bench
 engine: any
-provenance: unverified
+provenance: verified
 summary: Cold prefill tok/s and prefix-cache reuse - proven cold, not assumed cold
+
+# VERIFIED on a GB10 against three servers, and it found something real on two
+# of them - which is the whole point of measuring reuse rather than assuming it:
+#
+#   vllm-qwen3.8-27b-nvfp4   0.00 efficiency, 0 hits on 471,925 queried tokens.
+#                            Cause: MTP disables prefix-cache reuse on this
+#                            hybrid checkpoint. SPEC_METHOD=none takes the
+#                            follow-up from 3.53 s TTFT to 0.22 s.
+#   vllm-2node-tp2           0.00 efficiency at an 8k history - and correctly:
+#                            NemotronH raises the attention block to 8320
+#                            tokens, and hits are block-aligned. At 20k with
+#                            --page 8320 it is 16640 of 16640, 1.00.
+#
+# ONE FIX. /tokenize is NOT universal - llama.cpp serves the same path for
+# {"content": ...} and answers a chat body 200 OK with an EMPTY token list. The
+# ladder used to die on KeyError: 'count'; reading len(tokens) instead would
+# have been worse, calibrating every rung against a length of zero and printing
+# a normal-looking table. It now refuses and names the endpoint.
 
 # THE HALF OF A REQUEST NOTHING ELSE HERE MEASURES.
 #

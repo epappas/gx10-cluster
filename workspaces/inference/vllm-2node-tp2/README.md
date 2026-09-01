@@ -10,7 +10,7 @@
 | Nodes | **2** — rank 0 serves, rank 1 is headless |
 | Endpoint | `http://127.0.0.1:8888/v1` **on the rank-0 node** |
 | Needs | ~40 GB unified *per node* · Docker · an ACTIVE RDMA port · 1 reachable peer |
-| Provenance | `unverified` — written from the sources below, never run on this hardware |
+| Provenance | **`verified`** — 75 GB sharded TP=2 over RoCE at 200 Gb/s, quality gate 4/4 clean. [What the run changed](#what-running-it-changed) |
 
 ## What
 
@@ -106,10 +106,69 @@ two permanently-DOWN partitions:
 `NET/IB : Using [0]rocep1s0f0:1/RoCE [1]roceP2p1s0f0:1/RoCE`. Pinning a device
 list by hand is how you silently end up on one rail after a cable moves.
 
+## What running it changed
+
+Three things, and two were defects the run found rather than caused.
+
+**It had no reasoning parser.** Being the *generic* two-node recipe was the
+argument against hardcoding one — and it does not survive shipping a default
+model that reasons. `ws up vllm-quality-gate` failed **4/4 on
+`special-token-leak ['</think>']`** on an otherwise perfectly healthy
+deployment: the trace landed in `content` with its delimiter intact, which any
+client that renders content verbatim shows to the user. `REASONING_PARSER` now
+defaults to `nemotron_v3` for the shipped model and is **empty-able** for a BYO
+one. With it, the same gate is 4/4 clean.
+
+**The RoCE check printed nothing.** This page and `up.sh` both tell you to run
+
+```bash
+docker logs ws-vllm-2node 2>&1 | grep -E 'NET/IB|NET/Socket'
+```
+
+and at the old `NCCL_DEBUG=WARN` that line is never emitted — so the check
+looked identical on a RoCE cluster and on one that had silently fallen back to
+TCP, which is the single failure the two-node library exists to prevent. The
+launcher now defaults to `NCCL_DEBUG=INFO` with `NCCL_DEBUG_SUBSYS=INIT,NET`
+(~1600 lines of startup burst), and the check answers:
+
+```
+NCCL INFO NET/IB: [0] rocep1s0f0:uverbs0:1/RoCE provider=Mlx5 speed=200000
+NCCL INFO NET/IB: [2] roceP2p1s0f0:uverbs2:1/RoCE provider=Mlx5 speed=200000
+```
+
+Both ACTIVE rails, both DOWN partitions ignored — exactly what
+`workspaces/lib/twonode.sh` predicts with `NCCL_IB_HCA` left unset.
+
+### And one thing that looks wrong and is not
+
+**Prefix-cache hits stay at 0 for any shared prefix shorter than 8320 tokens.**
+NemotronH is hybrid, so vLLM logs
+
+```
+Setting attention block size to 8320 tokens to ensure that attention page size
+is >= mamba page size.
+```
+
+and cache hits are **block-aligned**. An 8k conversation therefore reuses
+nothing at all, forever, on a server whose caching is working perfectly. Past
+the boundary it is exact:
+
+```bash
+BASE_URL=http://127.0.0.1:8888/v1 ws up vllm-prefill-ladder --rungs 20000 --page 8320
+#   20k   TTFT 5.22 s   3835 tok/s
+#   follow-up  TTFT 0.97 s   16640 of 16640 reused, 1.00 efficiency
+```
+
+Pass `--page 8320` or the ladder measures against the 3584 default and warns
+about a shortfall that is really a page-size mismatch.
+
 ## Failure modes
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| `special-token-leak ['</think>']` from the quality gate | No reasoning parser for a model that reasons | `REASONING_PARSER` in `.env`; default is `nemotron_v3` |
+| The `NET/IB` grep prints nothing | `NCCL_DEBUG=WARN` never emits that line | Now `INFO`+`INIT,NET` by default. If you set `NCCL_DEBUG=WARN` back, you give up this check |
+| Prefix cache hit rate stuck at 0.0% | Shared prefix shorter than the 8320-token hybrid attention block | Expected. Measure above the boundary with `--page 8320` |
 | Hangs at init, no error | Ranks never met — gloo picked `docker0` or the VPN, or the flags differ | The library sets `GLOO_SOCKET_IFNAME`/`TP_SOCKET_IFNAME`; if you hand-rolled it, set them |
 | Hangs before the first step | ufw dropping NCCL's bootstrap (ephemeral ports) | `sudo ufw status verbose \| grep 'gx10 peer node'`, then `make apply TAGS=remote` |
 | Works, but slow | Fell back to TCP — container missing `/dev/infiniband` or `memlock` | `grep -E 'NET/IB\|NET/Socket'` in the logs |

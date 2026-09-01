@@ -1,0 +1,287 @@
+# verl GRPO on a single GB10. Values chosen for MEMORY headroom, not speed.
+#
+# THIS FILE EXTENDS verl's OWN CONFIG - it does not replace it, and that
+# distinction is what stopped the workspace running. `verl.trainer.main_ppo` is
+# declared as `@hydra.main(config_path="config", config_name="ppo_trainer")`,
+# and every example verl ships overrides values on the COMMAND LINE rather than
+# swapping the file. Pointing --config-name at a standalone file instead threw
+# away every structured default underneath it, and the trainer died on the
+# first key it expected and did not find:
+#
+#   omegaconf.errors.ConfigAttributeError: Key 'use_kl_loss' is not in struct
+#       full_key: actor_rollout_ref.actor.use_kl_loss
+#       object_type=dict
+#
+# `object_type=dict` is the tell: `actor` had become a plain mapping instead of
+# verl's dp_actor schema. The searchpath below lets Hydra resolve `ppo_trainer`
+# out of the installed package, and `_self_` last means everything in this file
+# still wins over it.
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+#
+# Every knob below that looks conservative is conservative on purpose: on
+# unified memory the trainer, the rollout engine and the OS page cache share
+# one pool, so the usual "GPU has 80 GB, use 75" reasoning does not transfer.
+# Treat this as a starting point that fits, then raise one number at a time.
+#
+# UNVERIFIED: written from verl's documented schema, not from a completed run
+# on this hardware. Expect to fix at least one key name on first use, and see
+# workspaces/README.md for how to report back what you changed.
+data:
+  # PATHS, NOT DEFAULTS, and their absence was the second thing that stopped
+  # this workspace from running at all. verl's own default is
+  # `~/data/rlhf/gsm8k/train.parquet` - which is $HOME INSIDE THE CONTAINER,
+  # i.e. /root, i.e. a path nothing in this repo creates and no host mount
+  # reaches. A run with no `train_files` therefore fails on a missing file
+  # after loading Ray and the trainer.
+  #
+  # /work is this directory, bind-mounted. up.sh refuses to start until these
+  # two exist and prints the one command that makes them.
+  train_files: /work/data/gsm8k/train.parquet
+  val_files: /work/data/gsm8k/test.parquet
+  train_batch_size: 16
+  max_prompt_length: 1024
+  # 2048, NOT 1024, AND THE REASON IS VISIBLE IN THE METRICS. Qwen3 answers in
+  # thinking mode by default, and at 1024 the first step came back with
+  #     response_length/clip_ratio:0.75    critic/score/mean:0.0
+  #     actor/pg_loss:0.0                  actor/grad_norm:0.0
+  # Three quarters of the rollouts hit the cap mid-reasoning, so the gsm8k
+  # scorer found no answer to extract and every sample in the group scored 0.
+  # GRPO's advantage is the deviation from the GROUP mean, so a group with a
+  # uniform reward has zero advantage everywhere and the step, though it runs
+  # end to end, updates nothing. A truncation limit is not a neutral knob here
+  # - it silently turns training into a no-op.
+  max_response_length: 2048
+  # TURN QWEN3'S THINKING MODE OFF, or the reward is 0 no matter how long you
+  # let it generate. verl scores gsm8k with method="strict":
+  #     solutions = re.findall("#### (\\-?[0-9\\.\\,]+)", solution_str[-300:])
+  # i.e. the literal string the dataset's own prompt asks for ("output the
+  # final answer after \"####\"") has to appear in the last 300 characters.
+  # Qwen3's chat template defaults to thinking mode, and a thinking response
+  # spends its budget in <think>...</think> and then trails off, so `####`
+  # never lands where the scorer looks. That is why raising
+  # max_response_length from 1024 to 2048 cut truncation from 0.75 to 0.25 and
+  # still left critic/score/mean at exactly 0.0 - length was only half of it.
+  apply_chat_template_kwargs:
+    enable_thinking: false
+
+actor_rollout_ref:
+  model:
+    # QWEN3-1.7B, NOT THE 8B THIS FILE WAS ORIGINALLY WRITTEN FOR, and the
+    # swap is what turned this workspace from "starts and dies" into "trains".
+    # See lora_rank below for the full arithmetic; the short version is that a
+    # full-parameter Adam step on 8.19B parameters needs ~65.6GB per rank on
+    # top of the ~55GB this box has already spent on page cache, /dev/shm and
+    # the worker processes before the trainer allocates anything, and 8B was
+    # measured OOMing at 118GB/121.63GB three separate ways (Ray's monitor at
+    # 0.95, at 0.97, and with the monitor off, where the kernel took it after
+    # eating all 15GB of swap).
+    #
+    # 1.7B trains in 16.09GB allocated / 23.55GB reserved per rank - measured,
+    # from actor/perf/max_memory_allocated_gb - which leaves the box room to
+    # breathe. Every Qwen3 below 8B ties its embeddings, which needed the fix
+    # in patches/0002; that patch is why this line can say 1.7B at all.
+    #
+    # For 8B: use two of these boxes per rank, or wait for an image whose vLLM
+    # and verl agree about LoRA (again, see lora_rank).
+    path: Qwen/Qwen3-1.7B
+    # sdpa, NOT flash_attention_2. verl asks transformers for FA2 by default
+    # and the vLLM base image does not ship the standalone flash-attn package
+    # (vLLM has its own kernels, which is a different thing):
+    #   ImportError: FlashAttention2 has been toggled on, but it cannot be
+    #   used due to the following error: the package for FlashAttention2
+    #   doesn't seem to be installed.
+    # sdpa is torch-native, present everywhere, and this is the TRAINER's
+    # attention - the rollout engine is vLLM and unaffected by it.
+    # It goes under override_config, which is where HFModelConfig reads it
+    # (verl/workers/config/model.py: override_config.get("attn_implementation",
+    # "flash_attention_2")). As a top-level model key it is a TypeError.
+    override_config:
+      attn_implementation: sdpa
+    # Gradient checkpointing is not optional here - it is the difference
+    # between fitting and not.
+    enable_gradient_checkpointing: true
+    # LoRA, AND IT IS THE ONLY THING THAT MAKES 8B FIT - not a quality choice.
+    #
+    # The arithmetic, measured on this box rather than assumed. FSDP1 under
+    # mixed precision keeps an fp32 master shard, so a full-parameter Adam step
+    # on 8.19B parameters across two ranks costs, per rank:
+    #     fp32 master weights   16.4 GB   (verl prints this: "After FSDP,
+    #                                      memory allocated (GB): 15.26")
+    #     Adam exp_avg + _sq    32.8 GB
+    #     bf16 params + grads   16.4 GB
+    #                          --------
+    #                           65.6 GB
+    # and the same log line says what was already gone before the actor even
+    # loaded: "Before FSDP, memory allocated (GB): 0.00 ... device memory
+    # used/total (GB): 54.67/121.63". Nothing of that 54.67 is the trainer - it
+    # is page cache from reading 16GB of safetensors, Ray's object store in
+    # /dev/shm, and the worker processes. Unified memory means none of it is
+    # subtracted from a separate GPU budget; there is one pool. 65.6 + 54.7 is
+    # over 121 before the rollout engine asks for anything, and the run dies
+    # exactly where the arithmetic says it will:
+    #     ray.exceptions.OutOfMemoryError: 5 worker(s) were killed due to the
+    #     node running low on memory ... was 118.14GB / 121.63GB (0.971305)
+    #         verl/trainer/ppo/ray_trainer.py line 1344, in _update_actor
+    #
+    # Rank 32 on all-linear trains ~40M parameters instead of 8.19B, which
+    # takes the 65.6 GB above down to under 1 GB. The base weights stay frozen
+    # and bf16 - 8.2 GB per rank sharded - and that is the whole difference.
+    #
+    # ...AND YET LoRA IS OFF, because this image cannot serve the adapter it
+    # would produce. verl 0.9.0 syncs LoRA to the rollout engine as an adapter
+    # rather than merging it into the base weights, and vLLM's
+    # column_parallel_linear.set_lora in this nightly indexes lora_a_i.shape[1]
+    # on a tensor verl hands over one-dimensional:
+    #     File "vllm/lora/layers/column_parallel_linear.py", line 342, in set_lora
+    #         index, 0, : lora_a_i.shape[0], : lora_a_i.shape[1]
+    #     IndexError: tuple index out of range
+    #   ...from verl/workers/rollout/vllm_rollout/utils.py line 368, in
+    #      _update_weights -> self.add_lora(lora_request)
+    # That is a version skew between two pinned halves, not a setting, so there
+    # is no value of lora_rank that avoids it. Set this to 32 again once the
+    # image carries a vLLM and a verl built against each other.
+    #
+    # Full-parameter fits instead - but ONLY with the cluster-side memory fixes
+    # in ray-cluster.sh (Ray's OOM monitor off, object store 4GB, /dev/shm 4g).
+    # Those three together took ~20GB of counted-but-idle memory out of the
+    # peak, which is the difference between the OOM above and a step.
+    lora_rank: 0
+  actor:
+    strategy: fsdp
+    ppo_mini_batch_size: 8
+    ppo_micro_batch_size_per_gpu: 1
+    # NO KL PENALTY, AND THIS IS A MEMORY DECISION WITH A MEASURED PRICE TAG.
+    # verl only instantiates the frozen reference policy when one of
+    # actor.use_kl_loss / algorithm.use_kl_in_reward is on, and on a coherent
+    # -memory box that copy is not free: FSDP1 under mixed precision keeps an
+    # fp32 master shard, so the reference costs 16.4GB per rank of the same
+    # 121GB the actor and the rollout engine are already fighting over.
+    #
+    # With it on, the run reaches the actor update and Ray kills the workers:
+    #   ray.exceptions.OutOfMemoryError: 5 worker(s) were killed due to the
+    #   node running low on memory. Memory on the node (IP: 192.168.1.70) was
+    #   118.23GB / 121.63GB (0.972068)
+    #                            ...in verl/trainer/ppo/ray_trainer.py
+    #                                  line 1344, in _update_actor
+    # It is the actor update specifically, not the rollout - by then vLLM has
+    # already slept (free_cache_engine defaults to true) and lowering
+    # gpu_memory_utilization from 0.30 to 0.20 moved the peak by nothing.
+    #
+    # KL-free GRPO is not a workaround invented here; it is what DAPO and
+    # Dr. GRPO run, and the group-relative advantage does the regularising the
+    # KL term would otherwise do. Turn both back on if you shrink the policy.
+    use_kl_loss: false
+    optim:
+      lr: 1e-6
+    fsdp_config:
+      # Offloading to "CPU" on a coherent-memory box does not move bytes across
+      # PCIe - there is one pool - but it does let FSDP release its own
+      # allocator pressure, which is the thing that OOMs first.
+      param_offload: true
+      optimizer_offload: true
+  rollout:
+    name: vllm
+    # THE ROLLOUT ENGINE STARTS LAST AND GETS WHAT IS LEFT, and this number is
+    # measured rather than reasoned. 0.35 was the original guess; on this box
+    # it fails, because vLLM checks FREE memory at ITS startup, not total:
+    #
+    #   ValueError: Free memory on device cuda:0 (25.82/121.63 GiB) on startup
+    #   is less than desired GPU memory utilization (0.35, 42.57 GiB)
+    #
+    # By then the policy, the reference copy and the optimiser state are already
+    # resident - ~96 GiB of the 121 - so the honest ceiling is 25.8/121.6 =
+    # 0.21, and 0.18 leaves room for the OS to breathe. Note that param_offload
+    # and optimizer_offload above do NOT buy this back: on coherent memory
+    # "offload to CPU" moves nothing, there is one pool.
+    #
+    # Raise it only after lowering something else - a smaller policy, or
+    # rollout.n - and watch it with gx10-top while it starts.
+    gpu_memory_utilization: 0.20
+
+    # PIN THE ROLLOUT WINDOW TO WHAT THIS RUN ACTUALLY GENERATES. Left unset,
+    # vLLM takes the checkpoint's own max_position_embeddings - 40960 for
+    # Qwen3-8B - and then refuses to start because the KV cache for a window
+    # nothing here will ever use does not fit in the fraction above:
+    #
+    #   ValueError: To serve at least one request with the model's max seq len
+    #   (40960), 5.62 GiB KV cache is needed, which is larger than the
+    #   available KV cache memory (5.47 GiB)
+    #
+    # This is max_prompt_length + max_response_length - the longest sequence a
+    # rollout can produce. Raise it with them or not at all.
+    max_model_len: 3072   # max_prompt_length + max_response_length
+    # DO NOT LET vLLM SLEEP ON UNIFIED MEMORY. Sleep mode ends with a sanity
+    # check in the vLLM worker:
+    #     free_after, _ = torch.cuda.mem_get_info()
+    #     assert free_after - free_before >= 0, \
+    #         "Memory usage increased after sleeping."
+    # On a discrete GPU that is a safe assertion, because nothing else allocates
+    # from that pool. On GB10 `mem_get_info` reports the whole machine, so the
+    # trainer gathering an FSDP shard on the very same node during the call is
+    # enough to make free memory go DOWN across a correct sleep, and the engine
+    # dies with a message about its own memory that is really about someone
+    # else's:
+    #     RuntimeError: Worker failed with error 'Memory usage increased after
+    #     sleeping.'
+    # It is left ON (verl's default) because full-parameter training genuinely
+    # needs the rollout engine's memory back during the actor update - the
+    # assertion is a real hazard here, not a theoretical one, and the mitigation
+    # is the memory headroom created in ray-cluster.sh rather than switching it
+    # off. If you do hit it, `free_cache_engine: false` trades
+    # gpu_memory_utilization worth of permanent residency for never sleeping.
+    # Gather the FSDP shards one layer at a time when syncing weights to vLLM
+    # instead of materialising the whole model at once. Costs a little time per
+    # step and removes a full-model-sized spike from the peak this config
+    # exists to control.
+    layered_summon: true
+    tensor_model_parallel_size: 1
+    # GROUP SIZE, and GRPO has nothing to work with if it is too small. The
+    # advantage of a sample is its reward minus the mean reward of its GROUP,
+    # so a group whose members all score the same contributes exactly zero
+    # gradient - and with n: 2 on a task the policy fails most of the time,
+    # almost every group is a pair of zeros. Runs at n: 2 completed three steps
+    # with critic/score/mean:0.0 and actor/grad_norm:0.0 throughout: the loop
+    # was healthy, the signal was not there. 8 is the low end of what verl's
+    # own examples use.
+    n: 8
+    # verl requires one of log_prob_micro_batch_size / _per_gpu to be set and
+    # refuses to guess - it is a mutually-exclusive pair with no default, so a
+    # config that omits both fails validation before any weight is loaded.
+    # 1, for the same memory reason as ppo_micro_batch_size_per_gpu above.
+    log_prob_micro_batch_size_per_gpu: 1
+  ref:
+    # Kept for the moment you set use_kl_loss back to true - with it false, verl
+    # never builds this worker and none of these values are read.
+    log_prob_micro_batch_size_per_gpu: 1
+    fsdp_config:
+      param_offload: true
+
+algorithm:
+  adv_estimator: grpo
+  # The other half of the switch above: either one of these being true is what
+  # makes verl build the reference policy.
+  use_kl_in_reward: false
+
+trainer:
+  # THE V1 TRAINER NEEDS A DEPENDENCY THIS IMAGE DOES NOT HAVE, and it is a
+  # version-skew problem rather than a bug in either half. verl 0.9.0's
+  # TaskRunnerV1 does an unconditional `import transfer_queue`, which is not on
+  # PyPI and is not in verlai/verl:vllm023.aarch64.dev1 (built for an older
+  # verl). The run reaches Ray, starts the task, and dies with
+  # ModuleNotFoundError inside a Ray actor - which reads as a Ray failure.
+  #
+  # `use_v1: false` takes main_ppo_v0's TaskRunner, which the image can satisfy.
+  # It logs a deprecation warning and it is the right trade today; the durable
+  # fix is a verl image built for 0.9.x, at which point delete these two lines.
+  use_v1: false
+  n_gpus_per_node: 1
+  nnodes: 2
+  total_epochs: 1
+  logger: [console]

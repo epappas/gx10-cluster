@@ -163,6 +163,29 @@ must not contain.
 of this workspace; a tidy directory is a bad trade for twenty minutes of
 measurement.
 
+## On a speculative server, this measures the FLOOR
+
+`vllm bench serve` drives `--dataset-name random`, and **random tokens are
+unpredictable by construction** — so a drafter accepts almost none of them. The
+live view says so plainly, and it is not a fault:
+
+```
+draft accepted   0%   1.00 tok/step   below ~25% -> draft path, not config
+```
+
+Measured here on the same servers, same day:
+
+| Server | This sweep (random) | `spec-decode-accept` (real text) |
+|---|---|---|
+| `vllm-2node-deepseek-v4-flash` | 6.5 tok/s @ conc 1 | **79.9 tok/s**, acceptance 1.00 |
+| `vllm-nemotron35-lightning-nvfp4` | 41.6 tok/s @ conc 1 | **160.0 tok/s**, acceptance 1.00 |
+
+**Both numbers are true and they answer different questions.** Use this sweep
+to find the concurrency knee and to catch preemption or paging; use
+[`spec-decode-accept`](../spec-decode-accept/README.md) for the throughput a
+user actually feels. Quoting a random-dataset tok/s as "the model's speed" on a
+speculative server understates it by 2–12×.
+
 ## Sources
 
 - <https://docs.vllm.ai/en/latest/cli/bench/serve/>

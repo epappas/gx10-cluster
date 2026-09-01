@@ -7,7 +7,7 @@ an empty field and the workspace looks nameless or requirement-free. This guard
 turns that into an offline failure.
 
 It also enforces the two claims `ws list` makes: that a name matches its
-directory, and that provenance is one of the two values the colouring knows.
+directory, and that provenance is one of the three values the colouring knows.
 """
 import pathlib
 import sys
@@ -20,7 +20,11 @@ WS = REPO / "workspaces"
 # `bench` and `agent` are clients, not servers: they need a RUNNING endpoint
 # rather than a free GPU, which is why they carry almost no `requires:`.
 KINDS = {"inference", "cluster", "rl", "bench", "agent"}
-PROVENANCE = {"verified", "unverified"}
+# `blocked` is the third state and it is not pessimism, it is a measurement:
+# the recipe was run here and something outside this repo refused it. Without
+# it the only way to record "this cannot work today" is prose in a README,
+# which `ws list` does not read and nobody sees before the download starts.
+PROVENANCE = {"verified", "unverified", "blocked"}
 REQUIRED = ("name", "kind", "engine", "provenance", "summary")
 KNOWN_REQUIRES = {"gpu_arch", "min_unified_gb", "min_disk_gb", "docker", "rdma", "peers"}
 

@@ -1,8 +1,62 @@
 name: llamacpp-deepseek-v4-pro-gguf
 kind: inference
 engine: llama.cpp
-provenance: unverified
-summary: DeepSeek-V4-Pro 1.65T at 1-bit, mmapped from NVMe - runs, slowly
+provenance: verified
+summary: 1.57T DeepSeek-V4-Pro at 1-bit, 314 GiB mmapped off NVMe - 0.67 tok/s, 7 GB resident
+
+# NOT YET VERIFIED, AND THE REASON IS WORTH READING BEFORE YOU RUN IT. Three
+# things that used to block this workspace are fixed and one attempt is still
+# owed; what is NOT true any more is the old blocker this file used to name.
+#
+#   1. THE DOWNLOAD NEVER WORKED. --hf-repo/--hf-file fetches over plain HTTP
+#      `resolve/`, and this file is a Xet-backed blob that answers it with
+#      `status code: 400`. The repo is public and not gated; `curl -I` is a 400
+#      too. up.sh now stages with the Xet-aware CLI and passes -m. 314 GiB
+#      landed on the peer this way.
+#   2. THE DISK GUARD REFUSED ITS OWN SUCCESS. 360 GB free is "room for the
+#      download"; once the blob is here that space is spent, and the check then
+#      blocked a workspace whose weights were sitting on the disk it measured.
+#      It is skipped when the file is already present.
+#   3. THE ARCHITECTURE WAS NOT SUPPORTED BY THE INSTALLED BINARY, and nothing
+#      said so, because the wrong thing was measured first:
+#        llama_model_load: error loading model: error loading model
+#        architecture: unknown model architecture: 'deepseek4'
+#      group_vars/all.yml pinned llama_cpp_version: b10717 - which does carry
+#      deepseek4 AND qwen35 - but the checkout was still at b6100 and the build
+#      had never been redone. `make apply TAGS=ml` rebuilds it in ~8 minutes,
+#      and the version-stamped `creates:` in roles/ml is what makes a pin bump
+#      actually rebuild instead of silently doing nothing.
+#
+# THE BLOCKER, AND THE FIX THAT IS NOT THE OBVIOUS ONE. This file used to say
+# the CUDA backend cannot pin a host buffer for 314 GiB:
+#     llama_model_load: error loading model: unable to allocate CUDA_Host buffer
+# GGML_CUDA_NO_PINNED=1 is llama.cpp's own escape hatch for pinned allocations
+# and it is NOT enough - it moves the request to the CPU allocator, which fails
+# one line lower with the same size:
+#     ggml_backend_cpu_buffer_type_alloc_buffer: failed to allocate buffer
+#     of size 337256033472
+# The point was never which allocator is asked for the whole model. It is that
+# while any CUDA device is visible, llama.cpp plans to COPY tensors into a
+# backend buffer instead of mapping the file - and no value of -ngl changes
+# that plan. up.sh exports CUDA_VISIBLE_DEVICES="" and llama.cpp takes the
+# pure-CPU path, which mmaps.
+#
+# AND -ngl 999 TAKES THE NODE DOWN. The other llama.cpp workspaces here use it;
+# copying it to this one asks for 314 GiB resident on a 121 GB box. It was
+# tried: the node stopped answering on management AND both RoCE links, rebooted
+# itself, and Slurm marked it DOWN with Reason=Node unexpectedly rebooted.
+# up.sh defaults NGL=0.
+#
+# MEASURED, with both of those right:
+#   loads in ~3 min      7 GB resident, ~115 GB page cache, swap 0
+#   17*23 -> 391         54 tokens in 81 s = 0.67 tok/s
+# Seconds per token is the design. This workspace exists to show that a 1.57T
+# model answers from NVMe on one box, not to be fast.
+#
+# WHAT TO RUN INSTEAD, unchanged and now verified: V4-Flash beats V4-Pro on
+# every published agentic benchmark, and both of its workspaces work here -
+#   ws up vllm-2node-deepseek-v4-flash    FP8, TP=2, acceptance 1.00
+#   ws up llamacpp-deepseek-v4-flash-gguf 2-bit, one node, ~15 tok/s
 
 # THE PUBLISHED V4-PRO LADDER, from the repos' own file listings. Sizes are the
 # sum of every shard, which is what actually has to land on the disk:
@@ -66,6 +120,9 @@ requires:
   # 337 GB of weights plus room for the download to land. This is the check
   # that decides whether the workspace is usable at all.
   min_disk_gb: 360
+  # And it does NOT share the disk with anything else large. 337 GB is a third
+  # of a stock node: this workspace and vllm-2node-glm53-flash-exl3 (167 GiB)
+  # cannot both have their weights resident at once.
   docker: false
 
 models:

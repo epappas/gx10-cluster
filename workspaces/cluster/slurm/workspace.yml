@@ -1,8 +1,37 @@
 name: slurm
 kind: cluster
 engine: slurm
-provenance: unverified
+provenance: verified
 summary: Batch submission recipes for the Slurm installed by roles/slurm
+
+# VERIFIED on odysseus + poseidon, after `make optional TAGS=slurm` (15 tasks,
+# 0 failed). sinfo shows both nodes idle, `srun -N2 hostname` reaches both, and
+# train-2node.sbatch runs a real two-rank torchrun:
+#
+#   rank=0 host=odysseus master=odysseus:29500 world=2
+#   rank=1 host=poseidon master=odysseus:29500 world=2
+#
+# which is the documented split working: MASTER comes from `scontrol show
+# hostnames` on the MANAGEMENT name, while slurm.conf's NodeAddr sits on the
+# interconnect (192.168.100.x). Both are visible in that one line.
+#
+# THE RUN FOUND A CONTRADICTION BETWEEN THE TWO HALVES OF THIS REPO, and the
+# workspace half was the wrong one. Both sbatch scripts asked for
+# `--gpus-per-node=1` / `--gpus=1`, and every submission failed:
+#
+#   sbatch: error: Invalid generic resource (gres) specification
+#
+# `--gpus*` is a GRES request; roles/slurm configures no GRES and its
+# slurm.conf.j2 says so deliberately ("not the full cgroup/GRES apparatus").
+# On a GB10 each node has exactly one GPU, so --nodes already allocates it and
+# GRES would be bookkeeping for a choice there is nothing to choose. The flags
+# are gone, with the reasoning in each script.
+#
+# ONE THING TO KNOW BEFORE YOU SUBMIT: there is NO SHARED FILESYSTEM here.
+# train-2node.sbatch runs your script by path on every node, so the path must
+# resolve on both - slurmstepd also warns `couldn't chdir to <cwd>: going to
+# /tmp instead` when the submitting directory does not exist on the peer.
+# scp the script (and use --chdir) or put it somewhere both nodes have.
 
 # Slurm is the one thing here that is NOT containerised, and that is a
 # considered exception rather than an oversight.

@@ -6,11 +6,14 @@
 #
 #SBATCH --job-name=vllm-serve
 #SBATCH --nodes=1
-#SBATCH --gpus=1
 #SBATCH --time=08:00:00
 #SBATCH --output=%x-%j.log
 set -euo pipefail
 
+# NO --gpus, for the same reason as train-2node.sbatch: `--gpus*` is a GRES
+# request and roles/slurm configures no GRES on purpose, so this script used to
+# fail at submission with "Invalid generic resource (gres) specification".
+# --nodes=1 takes the whole node, which on a GB10 is the whole (single) GPU.
 MODEL=${MODEL:-unsloth/Qwen3.8-27B-NVFP4}
 PORT=${PORT:-8888}
 

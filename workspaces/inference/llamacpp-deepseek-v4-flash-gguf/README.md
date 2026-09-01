@@ -10,7 +10,7 @@
 | Nodes | **1** |
 | Endpoint | `http://127.0.0.1:8891/v1` |
 | Needs | ~96 GB unified (108 with drafts) · ~110 GB disk · no Docker |
-| Provenance | `unverified` — written from the sources below, never run on this hardware |
+| Provenance | **`verified`** — 90.9 GB loads, ~15 tok/s, 96 GB resident, **no swap**. [One quality finding](#what-2-bit-costs) |
 
 ## What
 
@@ -104,10 +104,45 @@ you genuinely know better.
 DeepSeek's own numbers, not the Qwen table: **temperature 1.0, top_p 1.0,
 min_p 0.01**. Use `top_p 0.95` for agentic work.
 
+## What the run measured
+
+| | |
+|---|---|
+| Weights | 90.9 GB UD-IQ2_M, all layers offloaded (`-ngl 999`) |
+| Resident | **96 GB of 121 — and no swap**, which is the claim that mattered |
+| Decode | ~15 tok/s (78 tokens in 5.1 s) |
+| Needs | `llama_cpp_version` ≥ **b10717** — b6100 downloads all 90.9 GB and then dies on `unknown model architecture: 'deepseek4'` |
+
+The header's memory arithmetic holds exactly. This is the workspace most likely
+to run the box out of memory, and at the shipped quant it does not.
+
+## What 2-bit costs
+
+`ws up vllm-quality-gate` came back **1/2**:
+
+```
+CONC   OK   TOK/S  SHAPE  DETAIL
+   1  1/2       7  json   empty-with-58-tokens-billed (reasoning never closed)
+```
+
+**58 is not the token cap** — the reply ended on its own, empty, with the
+reasoning block never closed. So this is a genuine detector hit, not the
+`max_tokens` artefact the gate documents separately. The prose shape passed.
+
+UD-IQ2_M is the most aggressive quantisation in this repo at ~2 bits, and this
+is what that buys you. **For output quality the answer is not a different
+single-node quant** — it is both nodes at FP8:
+
+```bash
+ws up vllm-2node-deepseek-v4-flash    # verified: 6/6 gate clean, acceptance 1.00
+```
+
 ## Failure modes
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| 90.9 GB downloads, then `unknown model architecture: 'deepseek4'` | `llama_cpp_version` predates the release that learned this model | Pin ≥ `b10717` in `group_vars/all.yml`, then `make apply TAGS=ml` |
+| Empty replies with the reasoning block unclosed, well under `max_tokens` | 2-bit quantisation on a reasoning model | Expected at UD-IQ2_M. Use both nodes at FP8 for quality |
 | `only N GB available and this needs ~96` | Something else holds the pool | `ws down` the other workspace, or `gx10-top` to find it |
 | `llama-server not found` | `roles/ml` has not run | `make apply TAGS=ml` |
 | Swap growing during generation | The draft model, a desktop session, or both | Drop `DRAFT_FILE`, or `sudo systemctl set-default multi-user.target` |

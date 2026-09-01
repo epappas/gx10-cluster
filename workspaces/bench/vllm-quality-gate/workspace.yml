@@ -1,8 +1,23 @@
 name: vllm-quality-gate
 kind: bench
 engine: any
-provenance: unverified
+provenance: verified
 summary: Is the server answering CORRECTLY - cold-prefill and concurrency failures
+
+# VERIFIED on a GB10, and it earned its keep on the first real run: 4/4
+# special-token-leak ['</think>'] against vllm-2node-tp2, which was serving a
+# reasoning model with no reasoning parser. Nothing else in this repo noticed -
+# the tok/s numbers were normal and the answers were correct, they just carried
+# the model's private reasoning in `content`. That workspace now sets a parser
+# and the same gate is 4/4 clean.
+#
+# ONE FALSE POSITIVE WAS REMOVED IN THE PROCESS, which matters more than a
+# true one: the `json` shape asked for a "name" string without saying what,
+# so a well-behaved model reached for the most salient string in the prompt -
+# the `sentinel-<nonce>` this gate plants as its cache-buster - and the echo
+# detector convicted it. Seen on two models on two engines, so it was the
+# prompt. "name" is pinned to a literal now. A gate that condemns a working
+# server is the one failure this workspace cannot afford.
 
 # THE THIRD QUESTION. `make bench` asks whether the HARDWARE is fit to run
 # work. `vllm-bench-serve` asks how FAST a model server is. Neither notices a

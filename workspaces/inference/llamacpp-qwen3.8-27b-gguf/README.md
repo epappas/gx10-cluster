@@ -10,7 +10,7 @@
 | Nodes | **1** |
 | Endpoint | `http://127.0.0.1:8899/v1` |
 | Needs | ~24 GB unified · no Docker · no RDMA |
-| Provenance | `unverified` — written from the sources below, never run on this hardware |
+| Provenance | **`verified`** — run on this hardware. Needs `llama_cpp_version` ≥ the one that knows `qwen35`; see below |
 
 ## What
 
@@ -23,6 +23,30 @@ still `llama-server` and not a recycled number.
 There is **no compose file and no image pull**. `roles/ml` compiles llama.cpp
 for `sm_121` on the host, and running that binary avoids a second CUDA
 userspace inside a container.
+
+**Which makes the host binary's version load-bearing**, in a way a container
+recipe's is not. llama.cpp learns a model's architecture in the release that
+learns the model, so a pin older than the checkpoint cannot load it:
+
+```
+error loading model architecture: unknown model architecture: 'qwen35'
+```
+
+That is what `llama_cpp_version: b6100` (2025-08-06) did here, **after
+downloading 17.5 GB** — the pin is in `group_vars/all.yml` and it is now
+`b10717`, which knows `qwen35`, `qwen35moe` and `deepseek4`. Two things follow:
+
+- **Bumping the pin alone did not use to rebuild.** `roles/ml`'s build task is
+  stamped with the version now, because a `creates:` on the binary path let a
+  host sit a year behind its own pin with no task reported changed.
+- **`up.sh` no longer reports a pid for a process that is already gone.** It
+  waits a few seconds, and if `llama-server` exited it prints the end of the
+  log and fails — rather than printing a port nothing is listening on.
+
+**Weights land in `$HF_HOME/llama.cpp`, not `~/.cache/llama.cpp`.** `up.sh`
+sets `LLAMA_CACHE` for it, so the free-space figure `ws check` measures is the
+filesystem the download actually lands on — which matters the moment anyone
+takes this repo's own advice and moves `HF_HOME` to a bigger disk.
 
 ## Why
 
@@ -46,7 +70,7 @@ many concurrent streams; llama.cpp is better at getting out of the way.
 | Use it when | Use something else when |
 |---|---|
 | You want most of the unified pool back for something else | You want maximum tokens/s under concurrency → [`vllm-qwen3.8-27b-nvfp4`](../vllm-qwen3.8-27b-nvfp4/README.md) |
-| You want a served model *now*, with no image pull | You need structured output / a better scheduler → [`sglang-qwen3.8-27b-gguf`](../sglang-qwen3.8-27b-gguf/README.md) |
+| You want a served model *now*, with no image pull | You need structured output / a better scheduler → [`sglang-qwen3.8-27b-int4`](../sglang-qwen3.8-27b-int4/README.md) |
 | Docker is broken, or you are debugging around it | The model does not fit one node → [two-node serving](../../../docs/runbooks/two-node-serving.md) |
 | You are pairing it with an agent or a client workspace | |
 

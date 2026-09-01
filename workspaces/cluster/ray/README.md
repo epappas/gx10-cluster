@@ -10,7 +10,7 @@
 | Nodes | **2** (head + one worker per reachable peer) |
 | Endpoints | `http://127.0.0.1:8265` (dashboard) · `ray://127.0.0.1:10001` (client) |
 | Needs | ~16 GB unified · Docker · 1 reachable peer |
-| Provenance | `unverified` |
+| Provenance | **`verified`** — 2 nodes, SPREAD tasks on both, and a real GB10 in a `num_gpus=1` task |
 
 ## What
 
@@ -92,6 +92,8 @@ reported and skipped rather than failing the run.
 | `unreachable, skipped` for a peer | SSH failed | `ssh <peer> true`; see [run-distributed](../../../docs/runbooks/run-distributed.md) |
 | Ray sees the nodes but jobs are slow | Object transfers on the wrong interface | `roles/ray` binds `--node-ip-address` to the interconnect; this workspace binds management. For big object transfers, prefer the role |
 | Only one node has the weights | The HF cache is per node — nothing is shared | `make models` on both |
+| `libcuda.so.1: cannot open shared object file` inside a `num_gpus=1` task, on a cluster whose `ray status` shows `2.0 GPU` | `rayproject/ray` is not a CUDA base image, so it does not set `NVIDIA_VISIBLE_DEVICES` and `--runtime nvidia` injects nothing — while `--num-gpus=1` advertises a GPU anyway | Fixed in `up.sh`. If you copy the `docker run` by hand, carry `-e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=compute,utility` with it |
+| `nvidia-smi: command not found` in a task | Expected — the image ships the **driver** (injected), not the CUDA toolkit | Bring your own runtime (`torch`, `jax`); `ray status` and `libcuda` are the things that must work |
 
 ## Sources
 

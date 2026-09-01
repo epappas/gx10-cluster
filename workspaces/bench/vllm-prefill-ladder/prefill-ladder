@@ -252,9 +252,36 @@ def build_user_text(n_filler: int, salt: str) -> str:
 
 
 def tokenize(base: str, model: str, messages: list[dict], timeout: float) -> int:
+    """Prompt length in tokens, from the server's own tokenizer.
+
+    THE SCHEMA IS NOT UNIVERSAL, and this workspace says `engine: any`. vLLM's
+    /tokenize answers a chat body with {"count": N, "tokens": [...]}. llama.cpp
+    serves the same PATH with a different contract - it wants {"content": ...}
+    and returns {"tokens": [...]} - so a vLLM-shaped request there is answered
+    200 OK with an EMPTY token list.
+
+    That empty list is the case worth being careful about. Reading len(tokens)
+    unconditionally would take 0 as the prompt overhead, calibrate every rung
+    against a length nobody measured, and print a tok/s table that looks
+    entirely normal. A wrong number here is worse than no number, so an empty
+    answer to a non-empty prompt is treated as "this server does not implement
+    the endpoint this tool needs" and said out loud.
+    """
     with _post(_root(base) + "/tokenize", {"model": model, "messages": messages},
                timeout) as r:
-        return int(json.loads(r.read().decode())["count"])
+        doc = json.loads(r.read().decode())
+    if isinstance(doc, dict):
+        if isinstance(doc.get("count"), int):
+            return int(doc["count"])
+        toks = doc.get("tokens")
+        if isinstance(toks, list) and toks:
+            return len(toks)
+    die("this server's /tokenize does not answer a chat body the way vLLM does "
+        f"(got {json.dumps(doc)[:120]}).\n"
+        "  The ladder sizes every rung with it, so without it there is no rung -\n"
+        "  a prefill number against an unknown prompt length is not a measurement.\n"
+        "  llama.cpp is the common case: it serves /tokenize for {\"content\": ...}\n"
+        "  only, and answers a chat body with an empty list.")
 
 
 def calibrate(base: str, model: str, target: int, salt: str,

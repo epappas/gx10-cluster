@@ -1,13 +1,27 @@
 name: llamacpp-qwen3.8-27b-gguf
 kind: inference
 engine: llama.cpp
-provenance: unverified
+provenance: verified
 summary: Qwen3.8-27B UD-Q4_K_XL GGUF, OpenAI API, lowest memory
 
 # The cheap option: ~17-19 GB at 4-bit against NVFP4's ~22.6 GB, and it runs on
 # the llama.cpp roles/ml already built for sm_121 - no container, no image
 # pull. Slower than vLLM for batch serving; better when you want the memory
 # back for something else.
+#
+# VERIFIED on a GB10 (odysseus): 16.34 GiB of UD-Q4_K_XL loads with -ngl 999
+# and answers /v1/chat/completions. `ws up vllm-quality-gate` against it comes
+# back clean at concurrency 1.
+#
+# AND IT IS VERIFIED AGAINST A VERSION, which is the part that transfers. This
+# is the only kind of workspace here whose engine is a HOST BINARY, so the pin
+# in group_vars/all.yml is part of the recipe rather than part of the machine:
+# b6100 downloaded the whole 17.5 GB and then died with
+#   error loading model architecture: unknown model architecture: 'qwen35'
+# because llama.cpp learns an architecture in the release that learns the
+# model. b10717 knows qwen35 / qwen35moe / deepseek4, which covers all three
+# llama.cpp workspaces here. If `ws up` reports that error, the host is behind
+# its own pin: make apply TAGS=ml.
 requires:
   gpu_arch: "12.1"
   min_unified_gb: 24

@@ -387,18 +387,89 @@ one node without heavy sharding, and discovering that costs an afternoon.
 | Model server killed under load, no error | `earlyoom` — it targets the largest-RSS process, which is always the server | `make verify` checks this; `systemctl disable --now earlyoom` |
 | `ws check` fails on disk, not memory | The weights do not fit the NVMe — a 2-bit V4-Pro is ~570 GB | Use the default 1-bit (337 GB), point `HF_HOME` at external storage, or run V4-Flash |
 | A peer shows `no sample` in the bench NODES pane | SSH to it failed, or it is still starting | `ssh <peer> true`; a rebooting node recovers on its own |
-| Bench dies minutes in with a HF 404 | `--served-model-name` ≠ the HF repo id, so the tokenizer cannot be fetched | Set `TOKENIZER` in the bench workspace's `.env` |
+| Bench dies minutes in with a HF 404 | `--served-model-name` ≠ the HF repo id, so the tokenizer cannot be fetched | Fixed — both names now come off `/v1/models` (`id` is the alias, `root` is the repo). `TOKENIZER` in `.env` still overrides |
 | Bench numbers look great but KV was pegged at 100% | You measured preemption | Lower `--max-model-len` or `--max-num-seqs`, then re-run |
 | Bench keeps loading the server after you quit | The TUI was SIGKILLed, so its cleanup never ran and the container outlived it | `ws down vllm-bench-serve` |
-| `dsh` web UI never answers on :3080 | First start downloads the npm tree; `start_period` is 3m | `ws logs deepseek-harness -f` |
+| `dsh` web UI never answers on :3080, and `ws status` says `unhealthy` | First start downloads the npm tree — measured at ~7.5 min / ~476 MB here; `start_period` is 12m for that reason | `ws logs deepseek-harness -f`, and wait for `dsh web: http://127.0.0.1:3080` |
 | `dsh` cannot reach the model | `baseURL` in `dsh-home/settings.yaml`, or an empty API key | It is host networking — if `curl` works from your shell, the same URL works |
+
+## Containers write root-owned files into your cache
+
+**This is a storage problem, not a permissions nicety.** The serving workspaces
+bind-mount `$HF_HOME` into containers that run as root, so anything they
+download lands root-owned — and on a box where "the disk filled up" is the named
+failure mode, a cache you cannot `rm` is the problem behind the problem:
+
+```
+rm: cannot remove '.../models--deepseek-ai--DeepSeek-V4-Flash-DSpark/.no_exist/
+    .../special_tokens_map.json': Permission denied
+```
+
+Two pre-existing entries on this cluster (`models--Qwen--Qwen2.5-14B-Instruct`,
+`models--Qwen--Qwen2.5-7B-Instruct`, 43 GB together) are already root-owned from
+earlier runs. Reclaiming any of it needs `sudo`.
+
+**The pattern to copy is already in the repo.**
+[`deepseek-harness`](../../workspaces/agent/deepseek-harness/compose.yml) maps
+`user: "${DSH_UID:-1000}:${DSH_GID:-1000}"` with a comment explaining exactly
+this, and `vllm-bench-serve` now passes `--user "$(id -u):$(id -g)"` for the
+same reason — its results are deletable.
+
+**Verified here** that the serving image supports it:
+
+```bash
+docker run --rm --user "$(id -u):$(id -g)" -e HF_HOME=/hf -e HOME=/hf \
+    -v ~/.cache/huggingface:/hf --entrypoint bash \
+    vllm/vllm-openai:nightly-aarch64 -c 'id; python3 -c "import vllm"'
+# uid=1000 ... HF cache writable ... vllm imports OK
+```
+
+**And why it has not been applied to the serving workspaces yet.** It is one
+line per file and it is *not* uniformly safe:
+
+| | |
+|---|---|
+| `HOME` must be writable | The images assume a root `HOME`; `-e HOME=/hf` covers it, but that is a second change, not a free one |
+| **`vllm-2node-glm53-flash-exl3` would break** | It mounts JIT caches at `/root/.triton/cache` and `/root/.tilelang/cache`. A non-root uid cannot write those, and the workspace's own comments explain that losing them re-JITs mid-collective and trips NCCL's 600 s watchdog |
+| Checkpoint downloads differ from result files | The bench container writes only results; a serving container writes the shared cache, so a wrong uid there is worse, not better |
+
+So it needs a start-to-serve test **per image**, plus per-workspace handling of
+the `/root` paths — not a blind `sed`. Until then: `sudo` is the reclaim path,
+and `ws down` before `rm` so nothing is holding the files.
 
 ## Provenance
 
-**Every workspace here is currently `unverified`** — written from vendor docs
-and the sources in each `workspace.yml`, not from a completed run on this
-hardware. `ws list` shows this in yellow.
+`ws list` colours three states:
 
-Expect to fix something on first use. When you do: fix the recipe, flip
-`provenance: verified`, and note what changed. That is the same rule the rest
-of these docs follow ([provenance](../README.md#provenance)).
+| | Means | Colour |
+|---|---|---|
+| `verified` | run on this hardware, and it worked | green |
+| `unverified` | written from vendor docs and the manifest's sources, never run | yellow |
+| `blocked` | **run here, and something outside this repo refused it** | red |
+
+`blocked` is a measurement rather than a mood, and it exists so that "this
+cannot work today" is visible in the catalogue instead of buried in a README
+nobody reads before starting a large download.
+
+**Expect to fix something on first use** — the ones already flipped to
+`verified` each needed at least one, and the fixes were rarely in the place the
+symptom pointed at:
+
+| Workspace | What the first run found |
+|---|---|
+| `llamacpp-qwen3.8-27b-gguf` | `llama_cpp_version` was 13 months old, so a 17.5 GB download ended in `unknown model architecture: 'qwen35'` |
+| `vllm-2node-tp2` | no reasoning parser, so the quality gate failed 4/4 on a leaked `</think>` — and the documented RoCE check emitted nothing at `NCCL_DEBUG=WARN` |
+| `ray` | `--num-gpus=1` advertised a GPU the container did not have: `rayproject/ray` is not a CUDA base image, so `--runtime nvidia` injected nothing |
+| `vllm-bench-serve` | `--base-url` was given the `/v1` base that `vllm bench serve` appends its endpoint to, so every request 404'd |
+| `vllm-qwen3.8-27b-nvfp4` | MTP disables prefix-cache reuse on this hybrid checkpoint — 0 hits, ever |
+| `sglang-qwen3.8-27b-int4` | Neither GGUF (`transformers` has no `qwen35` reader) nor NVFP4 (quantised `lm_head`) loads — but the NVFP4 error was matching parameter *names*, so the architecture was already built and INT4 W4A16 serves fine. Renamed from `-gguf` |
+| `vllm-2node-tp2`, `vllm-2node-glm53-flash-exl3` | `ws up` looked hung for 10+ min on a cold peer — the peer's implicit image pull is invisible inside `ssh … docker run`, and the ranks race |
+| `slurm` | Both shipped `sbatch` scripts asked for `--gpus*` against a Slurm that configures no GRES, so every submission failed |
+| `vllm-2node-glm53-flash-exl3` | `MODEL` had to be a snapshot **path** — the overlay's mm loader joins the repo id with a filename |
+| `ray-verl` | Seven fixes, incl. rebuilding verl on this repo's vLLM base and two source patches. Trains across **both** nodes on Qwen3-1.7B; Qwen3-8B full-parameter needs ~65.6 GB/rank on top of ~55 GB already spent, and does not fit on two |
+| `llamacpp-deepseek-v4-pro-gguf` | `GGML_CUDA_NO_PINNED` is *not* the fix — the loader just asks the CPU allocator for the same 337 GB. While any CUDA device is visible llama.cpp copies tensors instead of mapping the file, at any `-ngl`. `CUDA_VISIBLE_DEVICES=""` is what mmaps |
+| `llamacpp-*` (all) | **A pin is not a build.** `llama_cpp_version` said `b10717` while the checkout sat at `b6100` — `llamacpp-qwen3.8-27b-gguf` was marked green on a binary that could not load its own model. `make apply TAGS=ml` |
+
+When you fix one: fix the recipe, flip `provenance`, and note what changed.
+That is the same rule the rest of these docs follow
+([provenance](../README.md#provenance)).

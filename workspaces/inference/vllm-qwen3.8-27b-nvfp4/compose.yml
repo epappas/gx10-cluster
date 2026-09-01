@@ -30,6 +30,10 @@ services:
     # rather than the container.
     shm_size: ${SHM_SIZE:-16g}
     ipc: host
+    # SPEC_FLAG comes from up.sh next to this file, and is empty when
+    # SPEC_METHOD=none. It cannot be a literal here: `none` means "no flag at
+    # all", and a compose `command:` cannot branch. up.sh also escapes the JSON
+    # quotes, which compose would otherwise strip - see the note there.
     command: >
       --model ${MODEL:-unsloth/Qwen3.8-27B-NVFP4}
       --served-model-name ${SERVED_NAME:-qwen3.8-27b}
@@ -41,7 +45,7 @@ services:
       --kv-cache-dtype ${KV_CACHE_DTYPE:-fp8}
       --reasoning-parser qwen3
       --trust-remote-code
-      --speculative-config '{"method":"mtp","num_speculative_tokens":${SPEC_TOKENS:-2}}'
+      ${SPEC_FLAG:-}
     healthcheck:
       # /health, not /v1/models: the latter answers before the weights finish
       # loading, so a dependent service would start talking to a server that

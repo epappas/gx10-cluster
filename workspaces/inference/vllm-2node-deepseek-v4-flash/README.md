@@ -11,7 +11,7 @@
 | Nodes | **2** — rank 0 serves, rank 1 is headless |
 | Endpoint | `http://127.0.0.1:8890/v1` **on the rank-0 node** |
 | Needs | ~100 GB unified *per node* · ~170 GB disk · Docker · ACTIVE RDMA · 1 peer |
-| Provenance | `unverified` — written from the sources below, never run on this hardware |
+| Provenance | **`verified`** — DSpark acceptance **1.00 across all 5 draft positions**, 79.9 tok/s. [One flag had to come off](#the-fp4-indexer-cache-is-off-here-on-purpose) |
 
 ## What
 
@@ -159,10 +159,81 @@ the fork image.** On that lineage the value falls back to
 `num_nextn_predict_layers = 1`; the server boots, speculates one token per step,
 reports nothing unusual, and you lose most of the speed the fork was taken for.
 
+## The FP4 indexer cache is off here, on purpose
+
+**`--attention-config '{"use_fp4_indexer_cache": true}'` is in every official
+launch line for this model, and it crash-loops the worker on a GB10:**
+
+```
+ValueError: indexer_kv_dtype='mxfp4' requires Blackwell datacenter GPUs
+(sm_10x, e.g. B200/GB200); sm_120 (consumer Blackwell) and earlier
+architectures are not supported.
+```
+
+The recipes this workspace is ported from run on **GB200 and B200**. GB10 is
+`sm_121` — consumer Blackwell — so the mxfp4 indexer KV has no kernel here, the
+same way [NVFP4 on this box goes through Marlin](../../README.md) rather than
+native FP4 tensor cores.
+
+It is now **opt-in** via `ATTENTION_CONFIG`, empty by default, so a datacenter
+Blackwell node can turn it back on where it is a real win:
+
+```bash
+ATTENTION_CONFIG='{"use_fp4_indexer_cache": true}' ws up vllm-2node-deepseek-v4-flash
+```
+
+`--restart unless-stopped` made this loud rather than fatal — **20 restarts in
+nine minutes**, each logging the line above. That is the intended behaviour and
+it is how this was found.
+
+## What the run measured
+
+| | |
+|---|---|
+| Time to `/health` | **7m20s**, ~149 GiB of FP8 across two nodes |
+| KV cache | 10.22 GiB per node at util 0.80, 131072 context |
+| Transport | RoCE on both rails — `NET/IB … speed=200000` |
+| **DSpark acceptance, structured** | **1.00 / 1.00 / 1.00 / 1.00 / 1.00** (k=5), 5.00 accepted per step |
+| Decode, structured | **79.9 tok/s**, TTFT 0.26 s |
+| DSpark acceptance, prose | 0.47 aggregate — the documented healthy shape, not a fault |
+| Quality gate | **6/6 clean** across concurrency 1, 2 |
+| Cold prefill | 709–779 tok/s (8k, 16k) |
+| Concurrency sweep | 6.5 → 30.8 tok/s across 1→6 streams, 112/112 requests OK — **the no-speculation floor**, see below |
+| Follow-up turn | **11.18 s → 0.47 s TTFT**, 7680 tokens reused |
+
+**`vllm-bench-serve` measures the FLOOR here, not the speed.** It drives
+`--dataset-name random`, and random tokens are unpredictable by construction —
+DSpark accepts ~0% of its drafts on them, so the sweep reports this server with
+its speculator effectively off:
+
+```
+CONC   OUT TOK/S   TTFT ms   ITL ms   req/s
+  1         6.5      830.1    84.89    0.05
+  2        20.0      534.1   108.80    0.16
+  4        26.4      930.9   159.70    0.21
+  6        30.8     1001.5   202.02    0.24   <- --max-num-seqs 6
+```
+
+The same server measures **79.9 tok/s** on real structured text at concurrency
+1, where acceptance is 1.00. Both numbers are true; use the sweep to find the
+concurrency knee and `spec-decode-accept` for what a user actually feels.
+
+**Getting the weights onto both nodes is the slow part, and there is a fast
+path.** Each rank loads from its own disk, so 149 GiB has to land twice.
+[`stage-weights.sh`](../vllm-2node-glm53-flash-exl3/stage-weights.sh)'s
+mechanism rsyncs over the interconnect — **measured at 487 MB/s, 170 GB in
+about six minutes** against hours of WAN for a second Hub download:
+
+```bash
+ml && hf download deepseek-ai/DeepSeek-V4-Flash-DSpark   # once, here
+# then, from workspaces/lib/twonode.sh: twonode_stage_model <repo>
+```
+
 ## Failure modes
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| The container restarts every ~25 s, logging `indexer_kv_dtype='mxfp4' requires Blackwell datacenter GPUs` | The FP4 indexer cache has no kernel on `sm_121` | Already off by default. Do not set `ATTENTION_CONFIG` on a GB10 |
 | Hangs at init | Ranks never met, or flags differ between ranks | Both ranks come from one script, so this means the peer's environment differs — check the image digest |
 | Works, but slow | TCP fallback | `grep -E 'NET/IB\|NET/Socket'` in the logs |
 | Boots fine, dies under real traffic | Speculative verify buffers — `GPU_MEMORY_UTILIZATION` slightly too high | Try `0.78` |

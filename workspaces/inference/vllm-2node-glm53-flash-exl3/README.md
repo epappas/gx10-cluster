@@ -13,7 +13,7 @@
 | Endpoint | `http://127.0.0.1:8893/v1` **on the rank-0 node** |
 | Model id | `glm-5.3-flash-exl3` |
 | Needs | **~106 GB unified *per node*** · ~180 GB disk *per node* · Docker · ACTIVE RDMA · 1 peer |
-| Provenance | `unverified` — ported from the sources below, never **run** on this hardware. What *was* checked here is at the bottom |
+| Provenance | **`verified`** — kpool patch applied, DFlash2 acceptance **0.985**, gate 4/4. [Three things this box needed](#three-things-this-box-needed) |
 
 ## What
 
@@ -128,8 +128,8 @@ that uses it.
 
 ```bash
 # Once: get 164 GiB onto BOTH nodes without paying for it twice
-hf download Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw
-hf download incoai/GLM-5.3-Flash-DFlash2
+ml && hf download Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw
+ml && hf download incoai/GLM-5.3-Flash-DFlash2
 ./stage-weights.sh                 # rsync to the peer over the CABLE
 
 ws check vllm-2node-glm53-flash-exl3      # on BOTH nodes
@@ -227,10 +227,84 @@ The per-position ladders behind those two, both from the same healthy server:
 **A healthy prose ladder collapses.** Read a suspected draft-path fault off the
 *structured* run, where a working drafter stays above ~0.8 the whole way.
 
+## Three things this box needed
+
+The overlay image, the mandatory kpool patch and the DFlash2 drafter all work
+exactly as written. Getting there took three changes the published recipe does
+not mention.
+
+### 1. `MODEL` must be a path, not a repo id
+
+```
+FileNotFoundError: [Errno 2] No such file or directory:
+  'Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw/processor_config.json'
+```
+
+**The file is present** — in the local snapshot *and* on the Hub. The overlay's
+multimodal loader joins the model string with a filename instead of resolving
+through the Hub, so a repo id becomes a bogus relative path. Point `MODEL` at
+the snapshot directory **as the container sees it**:
+
+```bash
+SHA=$(basename "$(ls -d ~/.cache/huggingface/hub/models--Mia-AiLab--GLM-5.3-Flash-EXL3-TR3-4bpw/snapshots/*/ | head -1)")
+MODEL=/hf/hub/models--Mia-AiLab--GLM-5.3-Flash-EXL3-TR3-4bpw/snapshots/$SHA \
+  ws up vllm-2node-glm53-flash-exl3
+```
+
+Both nodes resolved the **same** snapshot sha, which is what makes a shared
+path safe here. Check that before assuming it.
+
+### 2. `0.87` does not fit — by 0.95 GiB
+
+Exactly as this workspace's own note predicts:
+
+```
+ValueError: Free memory on device cuda:0 (104.87/121.63 GiB) on startup is
+less than desired GPU memory utilization (0.87, 105.82 GiB)
+```
+
+### 3. And `800000` still did not fit at `0.86`
+
+```
+16.44 GiB KV cache is needed, which is larger than the
+available KV cache memory (14.25 GiB)
+```
+
+**`600000` does**, at 602,033 pool tokens. So the headline 1M figure is a
+property of the reference kit's headroom, not of the model — the arithmetic in
+[`workspace.yml`](workspace.yml) stays correct, the free memory on *this* pair
+is simply lower.
+
+```bash
+MODEL=$CSNAP GPU_MEMORY_UTILIZATION=0.86 MAX_MODEL_LEN=600000 \
+  ws up vllm-2node-glm53-flash-exl3
+```
+
+### What it measured once up
+
+| | |
+|---|---|
+| kpool correctness patch | `block_table.py: kpool tail slot-map patched` |
+| Transport | RoCE, both rails at 200 Gb/s |
+| KV pool | 602,033 tokens |
+| **DFlash2, structured** | **1.00 1.00 1.00 1.00 1.00 0.95 0.95** (k=7) — aggregate **0.985** vs. 0.92 published |
+| Decode | 67.4 tok/s, TTFT 0.54 s |
+| DFlash2, prose | 0.358 aggregate vs. 0.33 published — the documented healthy decay |
+| Quality gate | **4/4 clean** at concurrency 1, 2 |
+| Cold prefill | 990–1024 tok/s at 8k/16k, ~1.95 s/chunk |
+
+**One number left open:** prefix-cache reuse measured **0.50** efficiency (3584
+of 7168 allowed) rather than the ~1.0 the hybrid-page argument predicts. Not
+chased — it is a throughput question, not a correctness one, and the ladder
+reports it honestly rather than rounding it up.
+
 ## When it fails
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| `FileNotFoundError: '<repo-id>/processor_config.json'` | The overlay's mm loader treats the repo id as a directory | Pass `MODEL` as the container-visible snapshot path |
+| `Free memory … less than desired GPU memory utilization (0.87, …)` | This pair has under a GiB less headroom than the reference kit | `GPU_MEMORY_UTILIZATION=0.86` |
+| `16.44 GiB KV cache is needed … available (14.25 GiB)` | 800k context does not fit the KV left at 0.86 | `MAX_MODEL_LEN=600000` |
 | Startup memory check refuses, by a hair | 0.87 needs ~106 GiB free *after* vLLM's ~9 GiB init; a desktop session or dashboard is holding it | `gx10-top` to find it, or `GPU_MEMORY_UTILIZATION=0.86` + `MAX_MODEL_LEN=800000` |
 | `pe_dim must be 64 for fp8_ds_mla` | You are on an upstream vLLM image, not the overlay | Do not override `IMAGE` |
 | Weights load as BF16 and OOM | `--quantization` is not `exl3` | Never `marlin`, never NVFP4 weights |

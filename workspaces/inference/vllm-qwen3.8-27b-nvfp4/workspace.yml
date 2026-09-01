@@ -1,8 +1,20 @@
 name: vllm-qwen3.8-27b-nvfp4
 kind: inference
 engine: vllm
-provenance: unverified
+provenance: verified
 summary: Qwen3.8-27B NVFP4, OpenAI API, 1M ctx via YaRN
+
+# VERIFIED on a GB10 (odysseus): 22 GB of NVFP4 loads, 72 GiB of KV at 0.84,
+# /v1/chat/completions answers, and all four bench workspaces run against it -
+# quality gate clean at concurrency 1, prefill ladder 1364-2384 tok/s cold,
+# acceptance 1.00/1.00 structured at k=2.
+#
+# AND IT MOVED A DEFAULT INTO A KNOB. The shipped `--speculative-config mtp`
+# disables prefix-cache reuse entirely on this hybrid checkpoint - vLLM warns
+# once at startup and then serves 0 hits on 471,925 queried tokens. That costs
+# a follow-up turn 3.53 s of TTFT where `SPEC_METHOD=none` costs 0.22 s. MTP
+# is still the default because it is worth ~55% on single-stream decode; the
+# README has the table and .env.example has the switch.
 
 # NVFP4 is a Blackwell-only format and GB10 is sm_121, so this is the quant
 # this hardware exists for. It is ALSO the reason there is no SGLang variant of

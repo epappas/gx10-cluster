@@ -203,7 +203,7 @@ swapping is not a measurement of the model.
 | Workspace | Nodes | Unified needed | Disk |
 |---|---|---|---|
 | [`llamacpp-qwen3.8-27b-gguf`](../../workspaces/inference/llamacpp-qwen3.8-27b-gguf/README.md) | 1 | ~24 GB | — |
-| [`sglang-qwen3.8-27b-gguf`](../../workspaces/inference/sglang-qwen3.8-27b-gguf/README.md) | 1 | ~28 GB | — |
+| [`sglang-qwen3.8-27b-int4`](../../workspaces/inference/sglang-qwen3.8-27b-int4/README.md) | 1 | ~28 GB | — |
 | [`vllm-qwen3.8-27b-nvfp4`](../../workspaces/inference/vllm-qwen3.8-27b-nvfp4/README.md) | 1 | ~40 GB | — |
 | [`vllm-2node-tp2`](../../workspaces/inference/vllm-2node-tp2/README.md) | 2 | ~40 GB/node | — |
 | [`ray-verl`](../../workspaces/rl/ray-verl/README.md) | 1 | ~90 GB | — |

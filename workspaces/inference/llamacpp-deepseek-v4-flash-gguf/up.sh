@@ -32,6 +32,24 @@ cd "$(dirname "$(readlink -f "$0")")"
 # shellcheck source=/dev/null
 [[ -f .env ]] && { set -a; . ./.env; set +a; }
 
+# WHERE THE WEIGHTS LAND, and it is not where the rest of this repo puts them.
+# `llama-server --hf-repo/--hf-file` caches under $LLAMA_CACHE, which defaults
+# to ~/.cache/llama.cpp - a DIFFERENT filesystem from $HF_HOME the moment
+# anyone moves the HF cache. That matters twice:
+#
+#   `ws check` measures min_disk_gb at $HF_HOME. Left alone, it would clear a
+#   download that then fills a disk it never looked at - and this repo's own
+#   advice for "not enough room" is HF_HOME=/mnt/big/hf, which without this
+#   line moves the check and not the bytes.
+#
+#   `ws check` also reports "weights cached" by looking under $HF_HOME/hub. A
+#   model downloaded here would never show up there, so an already-cached
+#   ~91 GB reads as "first run downloads them" forever.
+#
+# One cache directory answers both. LLAMA_CACHE is still honoured if set.
+export LLAMA_CACHE=${LLAMA_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}/llama.cpp}
+mkdir -p "$LLAMA_CACHE"
+
 MODEL_REPO=${MODEL_REPO:-unsloth/DeepSeek-V4-Flash-0731-GGUF}
 # The first shard. llama.cpp follows the -0000N-of-0000M naming and fetches the
 # rest itself; naming any other shard fails in a confusing way.
@@ -96,8 +114,45 @@ fi
 
 nohup llama-server "${args[@]}" >>"$LOG" 2>&1 &
 
-echo $! > .pid
+pid=$!
+echo "$pid" > .pid
 echo "llama-server pid $(cat .pid), port $PORT, ctx $CTX, log $LOG"
+
+# DID IT SURVIVE THE FIRST FEW SECONDS? `nohup ... &` always succeeds, so
+# without this the script prints a pid and a port for a process that is
+# already gone and exits 0 - and the caller only finds out by reading a log
+# nobody mentioned was the point. The observed case: a GGUF whose architecture
+# this build of llama.cpp does not know dies about a second after launch, and
+# `ws up` reported it started.
+#
+# NOT a wait for /health. A first run downloads tens to hundreds of GB and then
+# loads it, which is legitimately an hour on the bigger recipes; a readiness
+# gate there would time out on every healthy cold start. Dying is the only
+# thing that is unambiguous this early, so that is all this checks.
+settled=0
+for _ in $(seq 1 "${SETTLE_STEPS:-10}"); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+        echo >&2
+        echo "llama-server exited $(( SECONDS )) s after launch. Last lines of $LOG:" >&2
+        # \r, because llama.cpp's download progress is one enormous CR-joined
+        # line - tail on the raw file shows that and nothing else.
+        tr '\r' '\n' < "$LOG" | grep -v '^ *[0-9]' | tail -15 >&2
+        echo >&2
+        echo "'unknown model architecture' means this llama.cpp is older than the" >&2
+        echo "model. The pin is llama_cpp_version in group_vars/all.yml, and the" >&2
+        echo "build task will NOT redo itself on a bump - see roles/ml." >&2
+        rm -f .pid
+        exit 1
+    fi
+    curl -fsS --max-time 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && { settled=1; break; }
+    sleep 1
+done
+if (( settled )); then
+    echo "ready: http://127.0.0.1:$PORT/v1"
+else
+    echo "still starting - weights download and load before /health answers."
+    echo "  tail -f $LOG"
+fi
 echo "~91 GB off a cold cache is a long first download AND a long first load."
 echo
 echo "watch the memory, not the log - this is the workspace most likely to run"

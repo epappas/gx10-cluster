@@ -1,8 +1,18 @@
 name: ray
 kind: cluster
 engine: ray
-provenance: unverified
+provenance: verified
 summary: Ephemeral 2-node Ray cluster in containers (head + worker)
+
+# VERIFIED on odysseus + poseidon: head and worker come up, `ray status` reports
+# 2 nodes / 40 CPU / 2.0 GPU, SPREAD-scheduled tasks land 12/12 across the pair,
+# and a `num_gpus=1` task gets a real GB10 on each node.
+#
+# THAT LAST CLAUSE WAS THE BUG. rayproject/ray is not a CUDA base image, so it
+# does not set NVIDIA_VISIBLE_DEVICES, so `--runtime nvidia` injected no devices
+# and no libcuda - while `--num-gpus=1` still advertised a GPU per node to the
+# scheduler. A GPU task was accepted, placed, and failed inside the task on a
+# cluster reporting 2.0 GPU. up.sh now sets the variable; see the note there.
 
 # This is NOT roles/ray, and the difference is deliberate.
 #
@@ -20,6 +30,13 @@ requires:
 
 images:
   - rayproject/ray:latest-py312-aarch64
+
+# The container `ws logs` tails. Named here rather than parsed out of up.sh:
+# these workspaces run `docker run` directly, so there is no compose project
+# for `ws logs` to ask.
+# The HEAD's container. The worker on each peer is `ws-ray-worker`, and its
+# logs are on that machine: ssh <peer> docker logs -f ws-ray-worker.
+container: ws-ray-head
 
 endpoints:
   - "http://127.0.0.1:8265  (Ray dashboard)"

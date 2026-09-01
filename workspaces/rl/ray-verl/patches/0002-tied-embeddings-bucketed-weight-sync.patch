@@ -1,0 +1,30 @@
+diff --git a/verl/workers/rollout/vllm_rollout/utils.py b/verl/workers/rollout/vllm_rollout/utils.py
+index a015e8f..43daeec 100644
+--- a/verl/workers/rollout/vllm_rollout/utils.py
++++ b/verl/workers/rollout/vllm_rollout/utils.py
+@@ -369,6 +369,25 @@ class vLLMColocateWorkerExtension:
+             logger.info(f"vLLM load weights, loaded_params: {len(weights)}")
+         else:
+             param_updates, buffer_updates, named_buffers = split_buffer_updates(self.model_runner.model, weights)
++            # Tied embeddings and bucketed transfer do not mix. vLLM's
++            # load_weights skips lm_head.weight on a tied model and then checks
++            # that its tie partner was loaded in the SAME call - but the trainer
++            # streams weights in buckets, so embed_tokens.weight usually arrives
++            # in a different one and the check fails on a model that is in fact
++            # fine:
++            #   ValueError: 'lm_head.weight' was skipped because it is tied to
++            #   'model.embed_tokens.weight' in Qwen3ForCausalLM, but
++            #   'model.embed_tokens.weight' was not found in the checkpoint, so
++            #   the tied weight is uninitialized.
++            # Dropping lm_head.weight is correct rather than merely quieting:
++            # on a tied model vLLM's lm_head IS embed_tokens, so the bucket
++            # carrying embed_tokens.weight already updates both. Without this,
++            # every tied checkpoint is unusable as a policy - which is every
++            # Qwen3 below 8B.
++            if param_updates and getattr(
++                self.model_runner.vllm_config.model_config.hf_config, "tie_word_embeddings", False
++            ):
++                param_updates = [(n, t) for n, t in param_updates if not n.endswith("lm_head.weight")]
+             # Add the FP8 related logic here as sharding manager has been deprecated.
+             # Check if FP8 quantization is enabled and apply appropriate weight loading
+             if is_fp8_model(self.model_runner.vllm_config):

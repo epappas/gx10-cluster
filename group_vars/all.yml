@@ -140,8 +140,20 @@ uv_tools:
 
 # Pinned, not `master`. The point of this repo is that both boxes come up
 # identical; cloning whatever HEAD happens to be that day defeats it.
+#
+# THE PIN IS ALSO A MODEL-SUPPORT DECISION, which b6100 (2025-08-06) made the
+# hard way: llama.cpp learns a new architecture in the same release it learns
+# the model, so a pin that is a year old cannot load a model that is not.
+# `ws up llamacpp-qwen3.8-27b-gguf` downloaded 17.5 GB and then died with
+#   error loading model architecture: unknown model architecture: 'qwen35'
+# b10717 knows `qwen35`, `qwen35moe` and `deepseek4`, which is what the three
+# llama.cpp workspaces actually ask for. Verified on this hardware: builds
+# clean for sm_121 and serves Qwen3.8-27B UD-Q4_K_XL over the OpenAI API.
+#
+# Bumping this ALONE does not rebuild - see the `creates:` guard in
+# roles/ml/tasks/main.yml, which is stamped with this value for that reason.
 build_llama_cpp: true
-llama_cpp_version: b6100
+llama_cpp_version: b10717
 
 install_ollama: true
 # Pinned and installed from the release tarball, not `curl | sh` as root - the

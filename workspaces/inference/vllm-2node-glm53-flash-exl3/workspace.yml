@@ -1,8 +1,45 @@
 name: vllm-2node-glm53-flash-exl3
 kind: inference
 engine: vllm
-provenance: unverified
+provenance: verified
 summary: GLM-5.3-Flash at EXL3 4bpw across both nodes, 1M context, DFlash2 drafts
+
+# VERIFIED on odysseus + poseidon, and the hard part - the overlay image, the
+# mandatory kpool patch, the DFlash2 drafter - all works:
+#
+#   block_table.py: kpool tail slot-map patched     <- the correctness fix
+#   NET/IB ... RoCE ... speed=200000                <- both rails
+#   GPU KV cache size: 602,033 tokens
+#   ws up spec-decode-accept   1.00 1.00 1.00 1.00 1.00 0.95 0.95  (k=7)
+#                              aggregate 0.985, 67.4 tok/s, TTFT 0.54s
+#                              prose 0.358 - published figures are 0.92 / 0.33
+#   ws up vllm-quality-gate    4/4 clean across concurrency 1,2
+#   ws up vllm-prefill-ladder  990-1024 tok/s cold at 8k/16k
+#
+# THREE THINGS THIS BOX NEEDED THAT THE PUBLISHED RECIPE DOES NOT SAY.
+#
+# 1. MODEL MUST BE A PATH, NOT A REPO ID. The overlay's multimodal loader joins
+#    the model string with a filename instead of resolving through the Hub:
+#      FileNotFoundError: 'Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw/processor_config.json'
+#    The file is present both locally and on the Hub - it is the lookup that is
+#    wrong. Point MODEL at the snapshot directory as the container sees it:
+#      MODEL=/hf/hub/models--Mia-AiLab--GLM-5.3-Flash-EXL3-TR3-4bpw/snapshots/<sha>
+#    Both nodes resolved the same snapshot sha, which is what makes this safe.
+#
+# 2. 0.87 DOES NOT FIT HERE - by 0.95 GiB, exactly as the note below predicts:
+#      Free memory on device cuda:0 (104.87/121.63 GiB) is less than desired
+#      GPU memory utilization (0.87, 105.82 GiB)
+#    The documented fallback (0.86) is right and was not enough on its own.
+#
+# 3. AND 800000 STILL DID NOT FIT at 0.86: 16.44 GiB of KV needed against
+#    14.25 GiB available. 600000 does, with 602,033 pool tokens. So the
+#    published 1M figure is a property of the reference kit's headroom, not of
+#    the model - see the arithmetic above, which stays correct.
+#
+# ONE OPEN NUMBER: prefix-cache reuse measured 0.50 efficiency (3584 of 7168
+# allowed) rather than the ~1.0 the README's hybrid-page argument predicts.
+# Not chased. It is a throughput question, not a correctness one, and the
+# ladder reports it honestly rather than rounding it up.
 
 # THE ARITHMETIC, because it is the whole design:
 #
@@ -52,6 +89,12 @@ images:
 models:
   - Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw
   - incoai/GLM-5.3-Flash-DFlash2
+
+# The container `ws logs` tails. Named here rather than parsed out of up.sh:
+# these workspaces run `docker run` directly, so there is no compose project
+# for `ws logs` to ask.
+# Rank 0, here. Rank 1 is the same name on the peer.
+container: ws-vllm-glm53-exl3
 
 endpoints:
   - "http://127.0.0.1:8893/v1  (OpenAI-compatible, on the rank-0 node)"

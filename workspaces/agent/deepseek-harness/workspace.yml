@@ -1,8 +1,19 @@
 name: deepseek-harness
 kind: agent
 engine: dsh
-provenance: unverified
+provenance: verified
 summary: DeepSeek Harness web UI, pointed at a model this cluster is serving
+
+# VERIFIED on a GB10: `ws up` -> npx resolves the package tree into ./dsh-home
+# -> `dsh web: http://127.0.0.1:3080` -> the UI serves 200, with profiles/ and
+# storages/ created and owned by the invoking user rather than root. `ws down`
+# removes it cleanly.
+#
+# ONE NUMBER CHANGED. start_period was 3m and the first start took ~7.5 minutes
+# of npm resolution before anything bound the port, so `ws status` reported
+# `unhealthy` most of the way through a perfectly good start. Health does not
+# drive `restart: unless-stopped`, so nothing was actually looping - it just
+# read as broken. 12m now.
 
 # WHAT THIS IS FOR. The inference workspaces give you an OpenAI-compatible
 # endpoint; nothing here has ever given you something to USE it with. dsh is

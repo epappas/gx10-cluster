@@ -10,7 +10,7 @@
 | Nodes | **1** |
 | Endpoint | `http://127.0.0.1:8895/v1` |
 | Needs | ~98 GB unified claimed · ~30 GB disk · Docker |
-| Provenance | `unverified` — written from the sources below, never run on this hardware |
+| Provenance | **`verified`** — 160 tok/s structured with DSpark k=3, acceptance 1.00 across the ladder |
 
 ## What
 

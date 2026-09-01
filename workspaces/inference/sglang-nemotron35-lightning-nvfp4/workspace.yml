@@ -1,8 +1,29 @@
 name: sglang-nemotron35-lightning-nvfp4
 kind: inference
 engine: sglang
-provenance: unverified
+provenance: verified
 summary: Nemotron 3.5 Lightning 30B-A3B NVFP4 + DSpark, 1M context, one node
+
+# VERIFIED on a GB10 (odysseus), and the allocation table below is no longer a
+# quotation from someone else's kit. ./report.sh on this box, at the shipped
+# mem-fraction-static 0.78:
+#
+#   pool tokens        4,557,963     (the published kit: ~4.93M)
+#   KV cache GiB           13.04     (published: ~14.1)
+#   weights GiB           22.819     target + DSpark draft
+#   max running reqs          48     EXACTLY the published figure
+#
+# The claim this workspace was written to make - that SGLang serves NVFP4 on
+# day 0 where the matrix said it could not - holds: `sglang serve` loads the
+# checkpoint, DSpark reports an accept length of 3.2-3.58 of 4 possible, and
+# decode measures 151.5 tok/s structured / 100.1 prose.
+#
+# AND THE DEGRADATION IS HONEST, which is the other thing this workspace is
+# here to demonstrate. `ws up spec-decode-accept` against it prints
+#   "SGLang publishes accept LENGTH and no per-position counters, so this run
+#    cannot convict a broken draft mask - only an idle drafter"
+# and returns no mask verdict, rather than a confident one about a shape it
+# never measured. --enable-metrics is what makes even that much visible.
 
 # THIS WORKSPACE CONTRADICTS THE ENGINE x QUANT MATRIX, and that is the point.
 #
@@ -58,6 +79,11 @@ images:
 models:
   - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
   - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark
+
+# The container `ws logs` tails. Named here rather than parsed out of up.sh:
+# these workspaces run `docker run` directly, so there is no compose project
+# for `ws logs` to ask.
+container: ws-sglang-nemotron35
 
 endpoints:
   - "http://127.0.0.1:8894/v1  (OpenAI-compatible)"

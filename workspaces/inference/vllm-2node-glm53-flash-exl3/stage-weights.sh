@@ -8,8 +8,13 @@
 # fine: the second copy is hours of WAN for bytes that are already sitting on a
 # machine at the end of a cable measured at 22.7 GB/s.
 #
-#   hf download Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw   # once, here
-#   ./stage-weights.sh                                   # then to the peer
+#   ~/venvs/ml/bin/hf download Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw  # once, here
+#   ./stage-weights.sh                                                # to the peer
+#
+# The venv path is not decoration: roles/ml installs huggingface_hub there and
+# links only the llama.cpp binaries onto PATH, so a bare `hf` is
+# command-not-found on a stock node. Run this without the weights and it prints
+# the resolved path for you.
 #
 # rsync is resumable and idempotent - an interrupted transfer costs only time,
 # and re-running verifies what is already there rather than resending it.

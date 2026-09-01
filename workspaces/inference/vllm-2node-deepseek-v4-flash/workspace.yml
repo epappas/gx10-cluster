@@ -1,8 +1,37 @@
 name: vllm-2node-deepseek-v4-flash
 kind: inference
 engine: vllm
-provenance: unverified
+provenance: verified
 summary: DeepSeek-V4-Flash (284B/13B) across both nodes, DSpark spec decoding
+
+# VERIFIED on odysseus + poseidon. ~149 GiB of FP8 sharded TP=2 over RoCE,
+# 7m20s to /health, 131072 context, 10.22 GiB of KV per node, and DSpark doing
+# exactly what the header above claims:
+#
+#   ws up spec-decode-accept   structured  1.00 1.00 1.00 1.00 1.00  (k=5)
+#                              79.9 tok/s decode, 5.00 accepted per step
+#                              prose 0.47 aggregate - the documented shape
+#   ws up vllm-quality-gate    6/6 clean across concurrency 1,2
+#   ws up vllm-prefill-ladder  709-779 tok/s cold; the follow-up turn reused
+#                              7680 tokens and went 11.18 s -> 0.47 s TTFT
+#
+# ONE FLAG HAD TO COME OFF, and it is the one every official launch line for
+# this model carries. `--attention-config '{"use_fp4_indexer_cache": true}'`
+# crash-loops the worker here:
+#
+#   ValueError: indexer_kv_dtype='mxfp4' requires Blackwell datacenter GPUs
+#   (sm_10x, e.g. B200/GB200); sm_120 (consumer Blackwell) and earlier
+#   architectures are not supported.
+#
+# The recipes this was ported from run on GB200/B200; GB10 is sm_121. It is now
+# opt-in through ATTENTION_CONFIG, off by default, with the reasoning in up.sh.
+# `--restart unless-stopped` turned that into 20 restarts in nine minutes, each
+# logging the line above - loud rather than silent, which is how it was found.
+#
+# ALSO WORTH KNOWING: weights have to land on BOTH nodes, and
+# ../vllm-2node-glm53-flash-exl3/stage-weights.sh's mechanism does it over the
+# cable at 487 MB/s measured - 170 GB in about six minutes, against hours of
+# WAN for a second Hub download.
 
 # THE ARITHMETIC, because it is the whole design:
 #
@@ -41,6 +70,12 @@ images:
 
 models:
   - deepseek-ai/DeepSeek-V4-Flash-DSpark
+
+# The container `ws logs` tails. Named here rather than parsed out of up.sh:
+# these workspaces run `docker run` directly, so there is no compose project
+# for `ws logs` to ask.
+# Rank 0, here. Rank 1 is the same name on the peer.
+container: ws-vllm-ds-v4-flash
 
 endpoints:
   - "http://127.0.0.1:8890/v1  (OpenAI-compatible, on the rank-0 node)"

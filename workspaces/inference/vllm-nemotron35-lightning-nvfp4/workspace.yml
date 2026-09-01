@@ -1,8 +1,28 @@
 name: vllm-nemotron35-lightning-nvfp4
 kind: inference
 engine: vllm
-provenance: unverified
+provenance: verified
 summary: Nemotron 3.5 Lightning NVFP4 + DSpark on vLLM - where the acceptance ladder works
+
+# VERIFIED on a GB10 (odysseus), and it is the fastest server in this repo.
+# ~5 minutes to /health, 75.0 GiB of KV at 0.80, 262144 context, DSpark k=3.
+# The claim in the summary above is now measured rather than asserted:
+#
+#   ws up spec-decode-accept    structured  1.00 / 1.00 / 1.00   160.0 tok/s
+#                               prose       0.71 / 0.45 / 0.30    99.4 tok/s
+#   ws up vllm-quality-gate     7/9 clean across concurrency 1,2,4
+#
+# The two gate failures were `empty-with-2048-tokens-billed (reasoning never
+# closed)`, which the gate itself annotates "hit max_tokens, too short to
+# classify" - this model reasons past 2048 tokens on some prompts. Raise
+# --max-tokens before reading that as a server fault.
+#
+# AND THE PREFIX CACHE SURVIVES HERE, unlike vllm-qwen3.8-27b-nvfp4. Both are
+# hybrids, but DSpark names a SEPARATE draft checkpoint, so vLLM can identify
+# the draft KV group and does not have to treat the mamba groups as draft
+# groups. No "prefix-cache reuse will be disabled" warning appears in this
+# server's log. That is the difference between a `mtp` speculator and a
+# `dspark` one on this architecture, and it is worth more than it sounds.
 
 # WHY THIS EXISTS ALONGSIDE THE SGLANG WORKSPACE, rather than instead of it.
 #
