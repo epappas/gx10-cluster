@@ -49,7 +49,7 @@ require("lazy").setup({
   -- to restore it. `:Lazy update` rewrites this copy; copy it back into
   -- roles/editor/files/nvim/lazy-lock.json and commit to move both nodes.
   lockfile = vim.fn.stdpath("config") .. "/lazy-lock.json",
-  install = { colorscheme = { "catppuccin" } },
+  install = { colorscheme = { "vscode" } },
   -- Off on purpose. A background update check on a box that is meant to match
   -- its twin is an invitation to drift, and it costs a network round trip on
   -- every start of an editor that is usually opened over SSH.

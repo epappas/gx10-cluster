@@ -360,7 +360,7 @@ Old versions stay in `/opt/nvim-<version>`; only the symlink moves.
 | Needs | Why | If absent |
 |---|---|---|
 | A Nerd Font | icons in the tree, statusline and completion menu | replacement boxes. Nothing breaks |
-| Truecolor | the catppuccin palette matches the tmux status bar exactly | approximated colours |
+| Truecolor | the VSCode Dark Modern palette matches the tmux status bar exactly | approximated colours |
 | OSC 52 pass-through | `"+y` reaches your **local** clipboard from three SSH hops away | yank stays inside the box |
 
 `tmux.conf` already sets `set-clipboard on` and `allow-passthrough on`; the

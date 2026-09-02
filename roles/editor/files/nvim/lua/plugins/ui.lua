@@ -1,33 +1,31 @@
 -- Managed by gx10-cluster ansible (roles/editor). Local edits are OVERWRITTEN.
 return {
-  -- Catppuccin Mocha, and not for taste: ~/.tmux.conf's status bar is written
-  -- in these exact hex values (#1e1e2e background, #89b4fa accent, #cdd6f4
-  -- text). Any other colourscheme puts a seam across the top of the screen
-  -- where the editor stops and tmux starts.
+  -- VSCode Dark Modern. The colours are NOT only an editor setting: the tmux
+  -- status bar in roles/shell/files/tmux.conf is written in the same hex
+  -- values, so the top of the screen reads as one surface rather than showing
+  -- a seam where the editor stops and tmux starts. Change the palette here and
+  -- that file has to change in the same commit - it is listed at the top of
+  -- tmux.conf for exactly that reason.
   {
-    "catppuccin/nvim",
-    name = "catppuccin",
+    "Mofiqul/vscode.nvim",
     lazy = false,
     priority = 1000,
     opts = {
-      flavour = "mocha",
-      background = { dark = "mocha" },
-      transparent_background = false,
-      integrations = {
-        blink_cmp = true,
-        gitsigns = true,
-        nvim_tree = true,
-        telescope = { enabled = true },
-        treesitter = true,
-        which_key = true,
-        native_lsp = { enabled = true, virtual_text = { errors = { "italic" } } },
-        markdown = true,
-        mason = false,
-      },
+      style = "dark",
+      transparent = false,
+      -- VSCode italicises comments and this is the one place the terminal can
+      -- disagree: an italic that renders as a colour swap is worse than none.
+      -- Left on because the colour carries the meaning either way.
+      italic_comments = true,
+      underline_links = true,
+      -- The file tree keeps the editor background instead of the darker panel
+      -- one. Two backgrounds side by side in a terminal read as a rendering
+      -- fault more often than as a design.
+      disable_nvimtree_bg = true,
     },
     config = function(_, opts)
-      require("catppuccin").setup(opts)
-      vim.cmd.colorscheme("catppuccin")
+      require("vscode").setup(opts)
+      vim.cmd.colorscheme("vscode")
     end,
   },
 
@@ -44,10 +42,9 @@ return {
     opts = function()
       return {
         options = {
-          -- "catppuccin-mocha", not "catppuccin": the plugin registers one
-          -- lualine theme per flavour and there is no bare alias, so the
-          -- obvious name silently falls back to `auto` with a warning.
-          theme = "catppuccin-mocha",
+          -- Set from the colourscheme, so the bar cannot drift from the
+          -- editor the way a hardcoded flavour name did.
+          theme = "vscode",
           globalstatus = true,             -- one bar, matching laststatus = 3
           section_separators = { left = "", right = "" },
           component_separators = { left = "|", right = "|" },
@@ -81,6 +78,20 @@ return {
           },
           lualine_y = { "progress" },
           lualine_z = { "location" },
+        },
+        -- Breadcrumbs, VSCode's line above the buffer. Deliberately the file
+        -- PATH rather than LSP symbols: nvim-navic would add a plugin and 26
+        -- symbol-kind icons that need a Nerd Font to render, and the enclosing
+        -- function is already on screen - treesitter-context below sticks it
+        -- to the top as you scroll. Path plus sticky context is what VSCode's
+        -- breadcrumb row and sticky scroll give you between them.
+        winbar = {
+          lualine_c = {
+            { "filename", path = 3, separator = ">", symbols = { modified = " *", readonly = " ro" } },
+          },
+        },
+        inactive_winbar = {
+          lualine_c = { { "filename", path = 3, separator = ">" } },
         },
         extensions = { "nvim-tree", "lazy", "trouble", "quickfix" },
       }
@@ -152,6 +163,46 @@ return {
       indent = { char = "│" },
       scope = { enabled = true, show_start = false, show_end = false },
       exclude = { filetypes = { "help", "checkhealth", "man", "lazy", "NvimTree", "dbui", "markdown" } },
+    },
+  },
+
+  -- Sticky scroll. VSCode pins the enclosing function, class or YAML key to
+  -- the top of the viewport as you scroll past its opening line; without it
+  -- the answer to "which task am I inside" is a scroll upwards and back.
+  -- Worth more here than in most editors, because ansible task files are long
+  -- lists of near-identical blocks.
+  {
+    "nvim-treesitter/nvim-treesitter-context",
+    event = { "BufReadPost", "BufNewFile" },
+    opts = {
+      -- Three lines, not the default of everything. The context is taken from
+      -- the top of the window, so a deeply nested block can otherwise eat a
+      -- third of a terminal split before you have read a line of code.
+      max_lines = 3,
+      multiline_threshold = 1,
+      trim_scope = "outer",
+      mode = "cursor",
+      -- ASCII, like every other marker in this config: a Nerd Font is a
+      -- client-side setting no play here can make.
+      separator = "-",
+    },
+    keys = {
+      { "<leader>uc", "<cmd>TSContextToggle<cr>", desc = "Sticky context" },
+    },
+  },
+
+  -- Colour swatches, the way VSCode paints #rrggbb and rgb() in place. The
+  -- payload here is theme and status-bar hex: this repo's tmux.conf and the
+  -- colourscheme above are edited as literal colour values, and reading them
+  -- as text is guesswork.
+  {
+    "catgoose/nvim-colorizer.lua",
+    event = "BufReadPre",
+    opts = {
+      -- names = false, or every occurrence of the WORD "red" in prose and in
+      -- ansible output gets a swatch. The hex and rgb() forms are the ones
+      -- that carry a colour.
+      user_default_options = { names = false, css = true, mode = "background" },
     },
   },
 }
