@@ -41,6 +41,23 @@ never downloads an x86-only one, which is what mason's registry hands an
 aarch64 box for about half of these servers. The trade is that adding a server
 means editing `roles/editor`, which is the intended direction.
 
+## Reading the keys
+
+vim's notation, which is what every plugin's documentation uses:
+
+| Written | You press |
+|---|---|
+| `<C-h>` | **Ctrl** and `h` together |
+| `<S-l>` | **Shift** and `l` — i.e. a capital `L` |
+| `<Space>` | the spacebar, which is the leader key |
+| `<Space>tt` | spacebar, release, then `t`, then `t` — a sequence, not a chord |
+| `<Esc>` | escape |
+| `prefix f` | tmux's prefix, `Ctrl+a`, released, then `f` |
+
+The distinction that matters on this box: **`Ctrl+h/j/k/l` needs no prefix and
+works the same inside neovim and inside a plain shell pane**. `Ctrl+a` first is
+only for asking tmux itself to do something.
+
 ## The 30-second version
 
 `<Space>` is the leader. **Press it and wait**: which-key draws the menu, so
@@ -60,6 +77,47 @@ nothing below has to be memorised.
 | `gd` `gr` `K` | definition, references, hover |
 | `<Space>la` | code action |
 | `:GX10Servers` | which language servers are installed and attached |
+
+## Moving around: splits, buffers, panes
+
+Three different things, and only the first four keys are shared between them.
+
+| | Key |
+|---|---|
+| **Move** between splits *and* tmux panes | `<C-h>` `<C-j>` `<C-k>` `<C-l>` |
+| Split the window | `<Space>-` below, `<Space>\|` right (or `<C-w>s` / `<C-w>v`) |
+| Resize | `<C-Up>` `<C-Down>` `<C-Left>` `<C-Right>` |
+| Close this split / every other one | `<Space>q` / `<C-w>o` |
+| Equalise / swap | `<C-w>=` / `<C-w>x` |
+
+Every standard `<C-w>` command still works; only the four navigation keys are
+remapped.
+
+The **tabs along the top are buffers, not splits** — bufferline draws them, and
+they are open files rather than windows:
+
+| | Key |
+|---|---|
+| Next / previous | `<S-l>` / `<S-h>` |
+| Jump to one | `<Space>b1` … `<Space>b4` |
+| Back to the last one | ``<Space>` `` |
+| Close it | `<Space>bd` — `<Space>bD` to discard unsaved changes |
+| Close every other one | `<Space>bo` |
+
+`<Space>bd` is not `:bdelete`, and the difference is the reason it exists: a
+window must always display *some* buffer, so `:bdelete` closes the window along
+with the buffer when it has nothing else to put there — and quits the editor
+when that was the last window. Closing a tab should not do that, so
+`gx10.buffer` points the window at another buffer first (or an empty one) and
+deletes afterwards.
+
+The **file tree** is just a window on the left: `<Space>e` toggles it,
+`<Space>E` reveals the current file in it, and `<C-l>` moves from it back into
+your code.
+
+One side effect worth knowing: `<C-l>` no longer redraws the screen in normal
+mode, because it is "pane right" now. `<Esc>` clears search highlighting, and
+`prefix C-l` clears a shell pane.
 
 ## tmux, from inside the editor
 
@@ -106,6 +164,9 @@ written before anything runs.
 
 ### The tmux side
 
+The prefix is `Ctrl+a` — pressed and released, then the key. What this repo
+adds:
+
 | Key | Does |
 |---|---|
 | `prefix f` | session switcher — git repos under `~/src`, plus anywhere zoxide has seen you work |
@@ -113,6 +174,19 @@ written before anything runs.
 | `prefix g` | `git status` popup, then a shell |
 | `prefix G` | `gx10-top` popup |
 | `prefix C-l` | clear the screen |
+
+And the everyday tmux ones you will want anyway:
+
+| Key | Does |
+|---|---|
+| `prefix \|` / `prefix -` | split the pane right / below, in the same directory |
+| `prefix c` | new window |
+| `prefix z` | zoom this pane full-screen (again to undo) |
+| `prefix d` | detach — everything keeps running, `ta` reattaches |
+| `prefix H/J/K/L` | resize; hold to repeat |
+| `prefix h/j/k/l` | select a pane, for when the prefix-free keys are being eaten by whatever is running |
+| `prefix Enter` | copy mode: `v` selects, `y` copies to your LOCAL clipboard |
+| `prefix r` | reload `~/.tmux.conf` after an apply |
 
 `prefix f` runs `gx10-sessionizer`, which creates the session if it does not
 exist and switches to it if it does. Set `GX10_PROJECT_ROOTS` to change where it

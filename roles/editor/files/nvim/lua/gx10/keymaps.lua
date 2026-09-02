@@ -44,6 +44,13 @@ map("n", "<C-Right>", "<cmd>vertical resize +4<cr>", { desc = "Wider" })
 map("n", "<leader>-", "<C-w>s", { desc = "Split below" })
 map("n", "<leader>|", "<C-w>v", { desc = "Split right" })
 
+-- NOT <cmd>bdelete<cr>, which takes the WINDOW with it when there is nothing
+-- else to show there - and the whole editor when that was the last window. See
+-- gx10.buffer.
+map("n", "<leader>bd", function() require("gx10.buffer").close() end, { desc = "Close buffer" })
+map("n", "<leader>bD", function() require("gx10.buffer").close(0, true) end, { desc = "Close buffer, discard changes" })
+map("n", "<leader>bo", function() require("gx10.buffer").close_others() end, { desc = "Close other buffers" })
+
 map("n", "<S-l>", "<cmd>bnext<cr>", { desc = "Next buffer" })
 map("n", "<S-h>", "<cmd>bprevious<cr>", { desc = "Previous buffer" })
 map("n", "<leader>`", "<cmd>buffer #<cr>", { desc = "Last buffer" })

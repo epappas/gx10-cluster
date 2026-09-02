@@ -92,8 +92,6 @@ return {
     event = "VeryLazy",
     keys = {
       { "<leader>bp", "<cmd>BufferLineTogglePin<cr>", desc = "Pin buffer" },
-      { "<leader>bd", "<cmd>bdelete<cr>", desc = "Delete buffer" },
-      { "<leader>bo", "<cmd>BufferLineCloseOthers<cr>", desc = "Close other buffers" },
       { "<leader>b1", "<cmd>BufferLineGoToBuffer 1<cr>", desc = "Buffer 1" },
       { "<leader>b2", "<cmd>BufferLineGoToBuffer 2<cr>", desc = "Buffer 2" },
       { "<leader>b3", "<cmd>BufferLineGoToBuffer 3<cr>", desc = "Buffer 3" },
