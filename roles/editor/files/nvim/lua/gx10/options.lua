@@ -49,10 +49,25 @@ opt.fillchars = { eob = " " }
 
 -- Folds from treesitter, but everything open on entry. Files that arrive
 -- folded shut are the fastest way to make an editor feel broken.
+--
+-- The fold set is the treesitter `folds` query per language, which already
+-- covers the structural cases - a YAML block, an if/else, a function body.
+-- Consecutive COMMENTS are added on top of it, per language, by
+-- roles/editor's after/queries tree; see nvim_comment_fold_languages.
 opt.foldmethod = "expr"
 opt.foldexpr = "v:lua.vim.treesitter.foldexpr()"
 opt.foldlevel = 99
 opt.foldenable = true
+
+-- auto:1, not a fixed column. Folds were invisible before this: nothing in
+-- the gutter said a line could be folded, so the feature may as well not have
+-- existed. `auto` spends the column only on buffers that actually have folds,
+-- which is why it is not simply "1" next to the always-on signcolumn.
+opt.foldcolumn = "auto:1"
+
+-- Empty means neovim's own fold text: the first line of the fold, with its
+-- real treesitter highlighting, rather than the 1970s `+--  12 lines:` dashes.
+opt.foldtext = ""
 
 -- Big-file guard. A 200 MB JSONL of eval outputs is a plausible thing to open
 -- on this box, and treesitter + LSP on it will hang the UI; gx10.autocmds

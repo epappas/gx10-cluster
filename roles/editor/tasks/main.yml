@@ -190,13 +190,18 @@
   ansible.builtin.set_fact:
     nvim_config_dir: "{{ primary_home }}/.local/share/gx10/nvim-{{ nvim_config_id[:12] }}"
   vars:
-    # Both halves matter. The committed files, and ai.lua.j2 RENDERED - its
-    # content comes from group_vars (the ollama and vLLM endpoints), so a
-    # change there has to produce a new tree exactly like a change to any
-    # other file does.
+    # Every input matters. The committed files; ai.lua.j2 RENDERED, because
+    # its content comes from group_vars (the ollama and vLLM endpoints); and
+    # the comment fold rule together with the LIST of languages it is
+    # installed for, which lives in group_vars too. A change to any of them
+    # has to produce a new tree exactly like a change to any other file does -
+    # otherwise the directory name says the configuration is unchanged while
+    # the thing installed into it is not.
     nvim_config_id: >-
       {{ (lookup('pipe', 'find ' ~ role_path ~ '/files/nvim -type f -print0 | sort -z | xargs -0 sha1sum')
-          ~ lookup('template', 'ai.lua.j2')) | hash('sha1') }}
+          ~ lookup('template', 'ai.lua.j2')
+          ~ lookup('file', role_path ~ '/files/comment-folds.scm')
+          ~ (nvim_comment_fold_languages | to_json)) | hash('sha1') }}
 
 - name: Create the versioned configuration directory
   ansible.builtin.file:
@@ -228,6 +233,39 @@
     group: "{{ primary_user }}"
     mode: "0644"
   become: true
+
+# Comment folding, which nvim-treesitter ships for no language this box
+# compiles - see nvim_comment_fold_languages for the list and for why go and
+# rust are not on it.
+#
+# One file, copied per language, because a treesitter query is addressed by
+# directory: queries/<lang>/folds.scm. `after/` is what makes it ADD to the
+# language's own folds.scm rather than replace it, and the directory has to
+# exist before lazy.nvim builds the runtimepath - which it does here, because
+# this writes into the versioned tree before ~/.config/nvim points at it.
+
+# copy does NOT create the parent directory of its destination - it fails with
+# "Destination directory ... does not exist" - and queries/<lang>/ is a
+# directory per language that nothing else makes.
+- name: Create the fold query directory for each language
+  ansible.builtin.file:
+    path: "{{ nvim_config_dir }}/after/queries/{{ item }}"
+    state: directory
+    owner: "{{ primary_user }}"
+    group: "{{ primary_user }}"
+    mode: "0755"
+  become: true
+  loop: "{{ nvim_comment_fold_languages }}"
+
+- name: Install the comment fold rule for each language
+  ansible.builtin.copy:
+    src: comment-folds.scm
+    dest: "{{ nvim_config_dir }}/after/queries/{{ item }}/folds.scm"
+    owner: "{{ primary_user }}"
+    group: "{{ primary_user }}"
+    mode: "0644"
+  become: true
+  loop: "{{ nvim_comment_fold_languages }}"
 
 # 0700, not the 0755 the rest of this role uses. ~/.config is 0700 on both
 # nodes and that is the sane default for it; a play that quietly widened the

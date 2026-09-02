@@ -380,6 +380,47 @@ lazy_nvim_version: "v11.17.5"
 tree_sitter_version: "0.27.0"
 tree_sitter_sha256: "3a35a2dd961ad842384e982c75daf792c01d1a67e442fc3914d4de37bd8a59cb"
 
+# Languages that get comment folding on top of their structural folds.
+#
+# Every folds.scm nvim-treesitter ships folds the STRUCTURE - a YAML block, an
+# if/else, a function body - and, of the ~220 of them, only perl and typoscript
+# fold comments. So a forty-line header block, which this repo is full of,
+# could not be collapsed at all. roles/editor installs
+# files/comment-folds.scm as after/queries/<lang>/folds.scm for each language
+# here, which ADDS the rule without touching the structural folds.
+#
+# This is a subset of gx10.parsers, not all of it, and each omission is a
+# verified failure rather than an oversight:
+#
+#   go, rust        their folds.scm capture the function AND its block over the
+#                   same range, so a comment fold above one never closes - it
+#                   swallows the function that follows. Checked by closing the
+#                   fold and reading foldclosedend.
+#   markdown, rust, their grammars have no `comment` node at all, so the query
+#   cmake, csv,     fails to load and takes the language's structural folds
+#   regex, vimdoc,  down with it.
+#   gosum
+#   json, diff,     nothing worth folding, or no comments in the format.
+#   gitignore, ...
+#
+# Re-check with a comment block between two blocks of code: close the fold and
+# assert foldclosedend() is the last comment line, not the end of the file.
+nvim_comment_fold_languages:
+  - bash
+  - c
+  - cpp
+  - cuda
+  - hcl
+  - lua
+  - make
+  - ninja
+  - python
+  - sql
+  - terraform
+  - toml
+  - vim
+  - yaml
+
 # Language servers that ship as a release binary. The npm ones are below; rust
 # comes from rustup (roles/dev_rust) and gopls from `go install` (roles/dev_go),
 # in both cases so the server matches the compiler that will be run.

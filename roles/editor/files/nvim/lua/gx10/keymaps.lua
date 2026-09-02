@@ -15,6 +15,19 @@ map("n", "<leader>w", "<cmd>write<cr>", { desc = "Save" })
 map("n", "<leader>q", "<cmd>quit<cr>", { desc = "Quit window" })
 map("n", "<leader>Q", "<cmd>qall<cr>", { desc = "Quit all" })
 
+-- Undo break points. Without these, everything typed between `i` and <Esc> is
+-- a SINGLE undo step, so one `u` after writing a paragraph deletes the whole
+-- paragraph - which reads as "undo is broken" rather than as undo working
+-- exactly as told. <C-g>u closes the current undo block, so `u` walks back a
+-- sentence at a time instead.
+--
+-- This matters more here than in a stock editor because conform calls
+-- `undojoin` before formatting on save: the reformat is folded into the same
+-- undo step as the edit that preceded it, so a coarse block is coarser still.
+for _, ch in ipairs({ ",", ".", ";", ":", "!", "?" }) do
+  map("i", ch, ch .. "<C-g>u", { desc = "Undo break point" })
+end
+
 -- Keep the cursor put. n/N and <C-d>/<C-u> otherwise walk the view off the
 -- screen and you re-orient after every jump.
 map("n", "n", "nzzzv", { desc = "Next match, centred" })
@@ -70,6 +83,13 @@ map("n", "<leader>uw", function() vim.opt.wrap = not vim.opt.wrap:get() end, { d
 map("n", "<leader>us", function() vim.opt.spell = not vim.opt.spell:get() end, { desc = "Spell" })
 map("n", "<leader>un", function() vim.opt.relativenumber = not vim.opt.relativenumber:get() end, { desc = "Relative numbers" })
 map("n", "<leader>ul", function() vim.opt.list = not vim.opt.list:get() end, { desc = "Whitespace" })
+-- Folds are ENABLED but all open (foldlevel 99 in gx10.options), so this is
+-- the switch for "stop folding entirely", not "open everything" - zR already
+-- does that, and zM closes it all again.
+map("n", "<leader>uz", function()
+  vim.opt_local.foldenable = not vim.opt_local.foldenable:get()
+  vim.notify("folds " .. (vim.opt_local.foldenable:get() and "on" or "off"))
+end, { desc = "Folds" })
 map("n", "<leader>ud", function()
   local on = vim.diagnostic.is_enabled()
   vim.diagnostic.enable(not on)
