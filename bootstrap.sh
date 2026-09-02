@@ -15,8 +15,8 @@ cd "$(dirname "$0")"
 # below parses it. Seed from the example rather than failing on a file the
 # clone was never going to contain.
 if [ ! -f inventory.yml ]; then
-    cp inventory.example.yml inventory.yml
-    echo "    ok   seeded inventory.yml from inventory.example.yml - EDIT IT"
+  cp inventory.example.yml inventory.yml
+  echo "    ok   seeded inventory.yml from inventory.example.yml - EDIT IT"
 fi
 
 # ansible.cfg sets vault_password_file, and a MISSING one is a hard error on
@@ -24,23 +24,26 @@ fi
 # so without this the very next check in this script fails with a vault error
 # that has nothing to do with what it was testing.
 if [ ! -f .vault_pass ]; then
-    umask 077
-    printf 'change-me-if-you-add-a-vault\n' > .vault_pass
-    echo "    ok   created a placeholder .vault_pass (no vault file to decrypt yet)"
+  umask 077
+  printf 'change-me-if-you-add-a-vault\n' >.vault_pass
+  echo "    ok   created a placeholder .vault_pass (no vault file to decrypt yet)"
 fi
 
 echo "==> Checking platform"
 arch="$(uname -m)"
-if [[ "$arch" != "aarch64" ]]; then
-    echo "!! Expected aarch64 (GX10 is ARM). Found: $arch" >&2
-    exit 1
+if [[ $arch != "aarch64" ]]; then
+  echo "!! Expected aarch64 (GX10 is ARM). Found: $arch" >&2
+  exit 1
 fi
-command -v nvidia-smi >/dev/null || { echo "!! nvidia-smi not found. Is this DGX OS?" >&2; exit 1; }
+command -v nvidia-smi >/dev/null || {
+  echo "!! nvidia-smi not found. Is this DGX OS?" >&2
+  exit 1
+}
 nvidia-smi --query-gpu=name,driver_version,compute_cap --format=csv,noheader
 
 echo "==> Installing uv"
 if [[ ! -x "$HOME/.local/bin/uv" ]]; then
-    curl -LsSf https://astral.sh/uv/install.sh | sh
+  curl -LsSf https://astral.sh/uv/install.sh | sh
 fi
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -50,7 +53,7 @@ echo "==> Installing ansible"
 # collections but no usable entrypoints. The roles need community.general,
 # ansible.posix and community.crypto.
 if ! command -v ansible-playbook >/dev/null 2>&1; then
-    uv tool install --with ansible ansible-core
+  uv tool install --with ansible ansible-core
 fi
 ansible --version | head -1
 
@@ -62,10 +65,10 @@ echo "==> Installing the pinned collections"
 # protect.
 ansible-galaxy collection install -r requirements.yml
 for c in community.general ansible.posix community.crypto; do
-    ansible-galaxy collection list 2>/dev/null | grep -q "^$c " || {
-        echo "    !!   $c still missing after install" >&2
-        exit 1
-    }
+  ansible-galaxy collection list 2>/dev/null | grep -q "^$c " || {
+    echo "    !!   $c still missing after install" >&2
+    exit 1
+  }
 done
 
 echo "==> Validating the playbook"
@@ -78,18 +81,18 @@ echo "    ok   syntax"
 # Execute a trivial play so the whole config path is exercised for real.
 tmp_play="$(mktemp -t gx10-probe-XXXXXX.yml)"
 trap 'rm -f "$tmp_play"' EXIT
-cat > "$tmp_play" <<'PLAY'
+cat >"$tmp_play" <<'PLAY'
 - hosts: localhost
   connection: local
   gather_facts: false
   tasks: [{ ansible.builtin.debug: { msg: ok } }]
 PLAY
 if ansible-playbook "$tmp_play" >/dev/null 2>&1; then
-    echo "    ok   ansible.cfg loads and a real play runs"
+  echo "    ok   ansible.cfg loads and a real play runs"
 else
-    echo "    !!   ansible.cfg is broken - a real play fails to run:" >&2
-    ansible-playbook "$tmp_play" 2>&1 | head -5 >&2
-    exit 1
+  echo "    !!   ansible.cfg is broken - a real play fails to run:" >&2
+  ansible-playbook "$tmp_play" 2>&1 | head -5 >&2
+  exit 1
 fi
 
 cat <<'EOF'
