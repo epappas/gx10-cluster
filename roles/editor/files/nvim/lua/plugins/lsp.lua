@@ -24,6 +24,27 @@ return {
       local servers = {
         -- Editing this config, and roles/editor's own lua.
         lua_ls = {
+          -- The ONE cmd in this file, against the rule three lines above, and
+          -- not by preference. lua-language-server defaults its log and meta
+          -- directories to paths inside its own install tree, which this role
+          -- unpacks into /opt as root - so the server died on startup with
+          --
+          --   create_directories: "/opt/lua-language-server-3.19.1/log/cache/
+          --   2037801": (sys:13) Permission denied
+          --
+          -- on every Lua buffer, which is every file in this configuration.
+          -- It presents as "lua_ls is not installed" while :GX10Servers
+          -- happily reports the binary as found, because it IS found - it
+          -- starts, fails to make a directory, and exits 1.
+          --
+          -- Pointing both at the user's cache is upstream's own answer and
+          -- keeps /opt read-only, which is the point of a versioned install
+          -- directory. The server creates the directories itself.
+          cmd = {
+            "lua-language-server",
+            "--logpath=" .. vim.fn.stdpath("cache") .. "/lua-language-server/log",
+            "--metapath=" .. vim.fn.stdpath("cache") .. "/lua-language-server/meta",
+          },
           settings = {
             Lua = {
               runtime = { version = "LuaJIT" },
