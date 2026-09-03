@@ -1,0 +1,58 @@
+name: pi-harness
+kind: agent
+engine: pi
+provenance: verified
+summary: Pi terminal coding harness, pointed at a model this cluster is serving
+
+# VERIFIED on a GB10 (odysseus, aarch64, docker 29.2.1). `ws up pi-harness`
+# built the image in ~40 s, seeded pi-agent/models.json, and
+# `ws up pi-harness -p '...'` answered from llamacpp-qwen3.8-27b-gguf on :8899.
+# `pi --list-models` shows the provider; the bash tool runs inside the
+# container and sees /work, not the host. `ws down` removes it cleanly.
+#
+# WHAT THIS IS FOR. deepseek-harness gave this cluster its first CLIENT - a
+# web UI for a model the cluster serves. This is the same idea in the other
+# shape: a terminal harness, in the terminal you are already in.
+#
+#   ws up vllm-qwen3.8-27b-nvfp4    # the model, on the cluster
+#   ws up pi-harness                # the agent, talking to it
+# and no token leaves the house.
+#
+# WHY BOTH. dsh is a preview with a web UI and a plugin model; pi is a
+# published npm package on a weekly release train, with print mode, JSON mode
+# and RPC - so it is the one you can put in a pipe:
+#
+#   ws up pi-harness -p 'summarise this repo' | tee report.md
+#
+# `kind: agent`, not `inference`: it runs no model, claims no GPU, needs no
+# unified memory, and coexists with a serving workspace.
+#
+# TWO HONEST WARNINGS.
+# 1. PI SHIPS NO PERMISSION SYSTEM. That is upstream's own wording. read,
+#    write, edit and bash run with the container user's rights over whatever
+#    is mounted at /work. The container IS the boundary, and PI_WORKSPACE is
+#    the whole of it - which is why it defaults to an empty ./work.
+# 2. HOST NETWORKING gives the container the host's entire network namespace.
+#    It buys the thing that makes this workspace work at all: 127.0.0.1:8888
+#    means the same address on both sides of the mount, so the URL in
+#    models.json is the URL you would curl.
+requires:
+  docker: true
+
+# NO `images:` BLOCK, and that is a measurement rather than an omission. This
+# workspace BUILDS its image; buildkit keeps the node:24-bookworm-slim base in
+# its own cache rather than the image store, so `docker images` does not list
+# it even right after a successful build - and `ws check` would print
+# "not pulled yet (ws up will pull it)" forever, about an image `ws up` does
+# not pull.
+
+container: ws-pi-harness
+
+endpoints:
+  - "your terminal (TUI); `ws up pi-harness -p '...'` for print mode"
+
+sources:
+  - https://github.com/earendil-works/pi
+  - https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/models.md
+  - https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/containerization.md
+  - https://www.npmjs.com/package/@earendil-works/pi-coding-agent
