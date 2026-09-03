@@ -12,24 +12,73 @@ local M = {}
 
 local home = vim.env.HOME or vim.uv.os_homedir()
 
---- nvm keeps node under ~/.nvm/versions/node/<version>/bin and selects one
---- with a shell function, which no non-shell process inherits. The `default`
---- alias file holds the version roles/dev_node aliased, so this resolves the
---- same node the shell would have used.
-local function nvm_bin()
-  local alias = home .. "/.nvm/alias/default"
-  local fd = io.open(alias, "r")
+local nvm_root = home .. "/.nvm"
+
+local function first_line(path)
+  local fd = io.open(path, "r")
   if not fd then return nil end
-  local want = (fd:read("l") or ""):gsub("%s+", "")
+  local line = (fd:read("l") or ""):gsub("%s+", "")
   fd:close()
-  if want == "" then return nil end
-  -- The alias is usually a major ("22") and the directory is the full version,
-  -- so match on the prefix rather than requiring an exact name.
-  local root = home .. "/.nvm/versions/node"
+  return line ~= "" and line or nil
+end
+
+--- Every installed version directory, newest first. The sort is numeric per
+--- component on purpose: sorted as strings, v9 beats v25.
+local function installed_versions()
+  local root = nvm_root .. "/versions/node"
+  local found = {}
+  if not vim.uv.fs_stat(root) then return found end
   for name, kind in vim.fs.dir(root) do
-    if kind == "directory" and (name == want or name == "v" .. want or vim.startswith(name, "v" .. want .. ".")) then
-      return root .. "/" .. name .. "/bin"
+    if kind == "directory" and name:match("^v%d+%.%d+%.%d+$") then
+      found[#found + 1] = name
     end
+  end
+  table.sort(found, function(a, b)
+    local ax, ay, az = a:match("^v(%d+)%.(%d+)%.(%d+)$")
+    local bx, by, bz = b:match("^v(%d+)%.(%d+)%.(%d+)$")
+    if ax ~= bx then return tonumber(ax) > tonumber(bx) end
+    if ay ~= by then return tonumber(ay) > tonumber(by) end
+    return tonumber(az) > tonumber(bz)
+  end)
+  return found
+end
+
+--- nvm keeps node under ~/.nvm/versions/node/<version>/bin and selects one
+--- with a shell function, which no non-shell process inherits. So the version
+--- the shell WOULD have used is worked out here, from the files nvm reads.
+---
+--- ~/.nvm/alias/default does not have to name a version, and on a box nobody
+--- provisioned with roles/dev_node it usually does not: it names another
+--- alias. `node` and `stable` mean "the newest installed"; `lts/*` is a file
+--- pointing at `lts/jod`, which is a file pointing at v22.22.3. Each hop is a
+--- file of its own under ~/.nvm/alias/.
+---
+--- The previous version of this read `default` and matched it straight against
+--- the directory names, so on any of those boxes it returned nil - no node on
+--- PATH, and five language servers whose `#!/usr/bin/env node` shebang cannot
+--- start. That is a failure with no error message anywhere: the servers are
+--- installed, the editor attaches nothing, and `:checkhealth` is happy.
+local function nvm_bin()
+  local want = first_line(nvm_root .. "/alias/default")
+  local have = installed_versions()
+  if not want or #have == 0 then return nil end
+
+  -- Bounded: nothing stops a hand-edited alias file pointing at itself.
+  for _ = 1, 10 do
+    if want == "node" or want == "stable" then
+      return nvm_root .. "/versions/node/" .. have[1] .. "/bin"
+    end
+    -- A version, exact or a prefix - "22" selects v22.22.3. Newest match
+    -- wins, which is nvm's own rule and why `have` is sorted.
+    local prefix = "v" .. want:gsub("^v", "")
+    for _, name in ipairs(have) do
+      if name == prefix or vim.startswith(name, prefix .. ".") then
+        return nvm_root .. "/versions/node/" .. name .. "/bin"
+      end
+    end
+    local next_want = first_line(nvm_root .. "/alias/" .. want)
+    if not next_want or next_want == want then return nil end
+    want = next_want
   end
   return nil
 end
