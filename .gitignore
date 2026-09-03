@@ -36,12 +36,15 @@ inventory.yml
 workspaces/**/.env
 workspaces/**/.pid
 
-# deepseek-harness keeps its config and CREDENTIALS here (.credentials.yaml is
-# a real key store), and `work/` is whatever the agent has been pointed at -
-# someone else's source tree, not ours to publish. settings.example.yaml is the
-# tracked template.
+# The agent workspaces keep their config, CREDENTIALS and sessions here -
+# dsh's .credentials.yaml and pi's auth.json are both real key stores - and
+# `work/` is whatever the agent has been pointed at: someone else's source
+# tree, not ours to publish. The tracked templates are settings.example.yaml
+# and, for pi, the seeding heredoc in its up.sh.
 workspaces/agent/*/dsh-home/*
 !workspaces/agent/*/dsh-home/.gitkeep
+workspaces/agent/*/pi-agent/*
+!workspaces/agent/*/pi-agent/.gitkeep
 workspaces/agent/*/work/*
 !workspaces/agent/*/work/.gitkeep
 

@@ -1,0 +1,66 @@
+name: exo-harness
+kind: agent
+engine: exo
+provenance: verified
+summary: Exo self-modifying agent harness, on a model this cluster is serving
+
+# VERIFIED on a GB10 (odysseus, aarch64, Ubuntu 24.04, docker 29.2.1) against
+# llamacpp-qwen3.8-27b-gguf on :8899. A COLD `ws up` cloned ~/src/exo at the
+# pin, built it, registered the binding and answered a startup prompt from the
+# local server - all with the host toolchain this repo already installs (node
+# 22 via nvm, rust 1.97.1), no mise and no setup.sh. Timings: 1m01s for the exo
+# crate, 47s for the scheduler runner. `ws down` stops both loops and keeps
+# .exo. The harness prompt measured 12.5k tokens at the server.
+#
+# WHY THE HOST AND NOT A CONTAINER. Exo's host loop runs OUTSIDE the sandbox by
+# design and starts a Docker container of its own for tool calls. Running exo
+# inside a container means docker-in-docker, or a shared socket whose mount
+# paths differ on each side - and the first path to break would be
+# /workspace/exo, the mount that lets exo read and rewrite its own source.
+#
+# WHAT MAKES THIS DIFFERENT FROM THE OTHER TWO AGENT WORKSPACES. dsh and pi are
+# harnesses you configure. Exo is a harness that configures ITSELF: it has its
+# own source mounted in its sandbox, tools to rebuild and restart itself, and
+# an append-only event log so it can tell what it already tried. The checkout
+# at ~/src/exo is therefore STATE, not a build directory, and neither up.sh nor
+# down.sh will delete it.
+#
+# THREE HONEST WARNINGS.
+# 1. IT IS BUILT TO MODIFY ITSELF. Prompts, tools, harness policy and its own
+#    Rust and TypeScript are all in scope, and it can clone itself. That is the
+#    feature. Treat the checkout as something that changes without you.
+# 2. THE SANDBOX IS THE BOUNDARY, and it is a plain `ubuntu:24.04` container
+#    with networking enabled by default. Exo's loop - the part holding your
+#    keys and the event log - is NOT in it.
+# 3. THE DEFAULT TEMPLATE IS `minimal`, NOT upstream's `canonical`. Canonical
+#    wires up ExoChat, hosted at exoharness.ai, which would route a
+#    conversation with your own cluster's model through someone else's server.
+#    EXO_TEMPLATE=canonical in .env if you want it anyway.
+#
+# NO `images:` BLOCK. ubuntu:24.04 is exo's sandbox image, pulled by exo when
+# it is missing - listing it here would have `ws check` report on an image this
+# workspace does not itself run.
+requires:
+  docker: true
+  # NOT where the weights go - `ws check` measures free space at $HF_HOME, and
+  # this recipe downloads no weights at all. It is the BUILD TREE, measured
+  # after a cold first run: 11 GB at ~/src/exo, of which target/ is 9.6 GB (a
+  # debug profile with debuginfo, two binaries, one dependency graph) and
+  # node_modules 1.1 GB. 15 leaves room to rebuild after the agent edits
+  # itself. On a box where ~/src and the HF cache are on different filesystems
+  # this check measures the wrong one; it is still the closest thing the
+  # schema can say.
+  min_disk_gb: 15
+
+# NO `container:` EITHER, and this one is measured: exo names its sandbox
+# `exo-<agent-hash>-<conversation-hash>` (observed: exo-d7ab946f4fc20aaf-3ccc4394),
+# so there is no fixed name for `ws logs` to reach. up.sh prints the two log
+# paths and the event-stream command on every start instead.
+
+endpoints:
+  - "your terminal (REPL); scheduler and adapters keep running after /exit"
+
+sources:
+  - https://github.com/exoharness/exo
+  - https://github.com/exoharness/exo/blob/main/exo/docs/EXO-BASICS.md
+  - https://github.com/exoharness/exo/blob/main/docs/RSI.md

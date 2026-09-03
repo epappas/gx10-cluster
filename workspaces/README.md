@@ -40,6 +40,8 @@ the territory.
 | [`spec-decode-accept`](bench/spec-decode-accept/README.md) | Is the **speculative decoder** working? Acceptance per draft **position** — the one failure that costs speed and nothing else |
 | [`vllm-prefill-ladder`](bench/vllm-prefill-ladder/README.md) | How long until the **first** character? Cold prefill tok/s, **proven** cold — the prefix cache makes a rerun look like an optimisation |
 | [`deepseek-harness`](agent/deepseek-harness/README.md) | An agent harness pointed at your own server. **Then use the thing you built** |
+| [`pi-harness`](agent/pi-harness/README.md) | The same idea **in your terminal**, and in a pipe: `-p`, JSON and RPC modes |
+| [`exo-harness`](agent/exo-harness/README.md) | An agent that **rewrites itself** — its own source, mounted in its own sandbox |
 
 ### `cluster` and `rl`
 
@@ -488,22 +490,36 @@ makes. So the collapse convicts only on structured output, the tool returns a
 mask verdict for no other class, and `make check` asserts that the published
 healthy prose ladder comes back clean.
 
-## Then use it: `deepseek-harness`
+## Then use it: the three `agent` workspaces
 
-`kind: agent`. DeepSeek's own agent harness (`dsh`), configured against a model
-**this cluster is serving** rather than against their API:
+`kind: agent`. Every other recipe here gives you an **endpoint**; these are the
+only ones that give you something to *use* it with. All three take a custom
+OpenAI-compatible provider, which is exactly what a GB10 running vLLM is — so
+the pairing is the point, and **no token leaves the house**:
 
 ```bash
-ws up vllm-2node-deepseek-v4-flash    # the model, on the cluster
-ws up deepseek-harness                # the agent, talking to it  -> :3080
+ws up vllm-qwen3.8-27b-nvfp4    # the model, on the cluster
+ws up pi-harness                # the agent, talking to it
 ```
 
-It claims no GPU and no unified memory, so unlike two inference workspaces,
-these two coexist. Two things to know before running it: it is a **developer
-preview** by its own README, and it is an **agent harness** — it executes tool
-calls against whatever you mount at `/work`, on host networking. The default
-mount is an empty `./work`, and that default is the security design rather than
-an inconvenience to route around.
+They claim no GPU and no unified memory, so unlike two inference workspaces,
+an agent and a server coexist. They are three genuinely different tools:
+
+| | Shape | Sandbox | Reach for it when |
+|---|---|---|---|
+| [`deepseek-harness`](agent/deepseek-harness/README.md) | Web UI on `:3080` | The container | You want a browser |
+| [`pi-harness`](agent/pi-harness/README.md) | **TUI**, and `-p`/JSON/RPC | The container | You want it in a **pipe** |
+| [`exo-harness`](agent/exo-harness/README.md) | REPL, host-side, long-running | **Exo starts its own** | You want it to **rewrite itself** |
+
+**Read the warning in each README before running it.** The short version:
+`dsh` is a **developer preview** by its own admission; `pi` ships **no
+permission system** by its own admission; and `exo` is built to **modify its
+own source** and can clone itself. All three execute tool calls, so what you
+mount is the security decision — which is why `deepseek-harness` and
+`pi-harness` both default to an **empty `./work`** rather than to `$HOME`, and
+why `exo-harness` defaults to the `minimal` template rather than to upstream's
+`canonical`, whose ExoChat would route the conversation through
+`exoharness.ai`.
 
 ## Provenance
 
