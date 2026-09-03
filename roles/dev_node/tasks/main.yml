@@ -29,25 +29,73 @@
   become_user: "{{ primary_user }}"
   become: true
 
+# npm cannot tell you whether it changed anything, and the previous attempt to
+# make it - counting the packages in its summary line - was wrong in a way that
+# only a second apply reveals. `npm install -g` against a tree ALREADY at these
+# exact versions prints
+#
+#   changed 7 packages in 986ms
+#
+# every single time. The count is of packages it relinked, not of packages
+# whose version moved, so `changed [1-9]\d* package` matched on every apply of
+# every box and this task reported changed forever. `make idempotence` exists
+# to catch precisely that, and this was the one task it could never get clean.
+#
+# So the guard is the answer rather than npm's account of the question: read
+# the installed versions and install only what is not already pinned. It is the
+# same correction the plugin restore and the parser compile in roles/editor
+# each carry, and for the same reason - a record of the work is not the work.
+#
+# It still relies on npm_globals carrying PINNED specs (pnpm@10.20.0). A bare
+# name has no version to compare against, so it would reinstall on every run
+# and, worse, silently move the box the day upstream publishes.
+- name: Read the globally installed npm packages
+  ansible.builtin.shell:
+    cmd: |
+      set -e
+      . "$HOME/.nvm/nvm.sh"
+      nvm use default >/dev/null
+      npm ls -g --depth 0 --json
+    executable: /bin/bash
+  become_user: "{{ primary_user }}"
+  become: true
+  register: npm_global_ls
+  changed_when: false
+  # npm exits non-zero when it considers anything in the global tree extraneous
+  # or unmet - somebody else's package, not this play's business - and prints
+  # the JSON regardless.
+  failed_when: false
+  # It only reads. Skipped under --check, the install below would look
+  # mandatory on a box that is already exactly right.
+  check_mode: false
+
+# name@version for everything present, which is the shape npm_globals is
+# written in - scoped packages included, since "@scope/pkg" ~ "@" ~ version is
+# how npm spells those too. An entry with no version is an unmet dependency
+# rather than an installed package, so it is dropped rather than compared.
+- name: Work out which pinned packages this box does not have
+  ansible.builtin.set_fact:
+    npm_globals_missing: "{{ npm_globals | reject('in', npm_global_present) | list }}"
+  vars:
+    npm_global_deps: "{{ (npm_global_ls.stdout | default('{}', true) | from_json).dependencies | default({}, true) }}"
+    npm_global_items: "{{ npm_global_deps | dict2items | selectattr('value.version', 'defined') | list }}"
+    npm_global_present: >-
+      {{ npm_global_items | map(attribute='key')
+         | zip(npm_global_items | map(attribute='value.version'))
+         | map('join', '@') | list }}
+
 - name: Install global npm packages
   ansible.builtin.shell:
     cmd: |
       set -e
       . "$HOME/.nvm/nvm.sh"
       nvm use default >/dev/null
-      npm install -g {{ npm_globals | join(' ') }}
+      npm install -g {{ npm_globals_missing | join(' ') }}
     executable: /bin/bash
   become_user: "{{ primary_user }}"
   become: true
-  register: npm_global
-  # npm prints "changed 0 packages" on a no-op, so testing for the substring
-  # "changed" matches every run. Count the actual number instead.
-  #
-  # This only holds because npm_globals carries pinned specs (pnpm@10.20.0).
-  # Bare names ask npm for "latest" every time, so the day upstream publishes a
-  # release the no-op becomes "changed 1 package" - correctly reported, but the
-  # box has just silently moved. Idempotence and reproducibility are the same
-  # fix here.
-  changed_when: >-
-    npm_global.stdout is search('added \d+ package')
-    or npm_global.stdout is search('changed [1-9]\d* package')
+  when: npm_globals_missing | length > 0
+  # It ran only because the check above found a pin missing, and set -e means
+  # reaching the end is proof npm installed it. There is no no-op path through
+  # this task to report ok for.
+  changed_when: true
