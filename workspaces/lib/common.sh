@@ -71,19 +71,53 @@ ws_all() {  # every workspace name, kind-sorted
 #
 # Returns 0 if every requirement holds. Prints one line per requirement either
 # way, because "what exactly is missing" is the only useful output here.
-# Are every model this manifest names already on disk? Used by the disk guard
-# to tell "no room to download" apart from "nothing left to download". Same two
-# cache layouts as the weights report further down, for the same reason.
-ws_weights_cached() {
-    local m=$1 v any=0
+
+# WHERE ONE MODEL IS ON DISK, IF IT IS. Prints the layout it found and returns
+# 0; prints nothing and returns 1 if the model is not cached under any of them.
+#
+# THREE LAYOUTS, because two downloaders write here and one of them changed its
+# mind:
+#
+#   transformers/vLLM/SGLang    $HF_HOME/hub/models--<org>--<name>/
+#   llama.cpp, current builds   $LLAMA_CACHE/models--<org>--<name>/
+#   llama.cpp, older builds     $LLAMA_CACHE/<org>_<repo>_<file>.gguf
+#
+# THE MIDDLE ONE IS THE FIX. llama.cpp's downloader moved to the HF hub layout
+# and this only knew the flat one, so a fully cached 17.5 GB GGUF sitting in
+# $LLAMA_CACHE/models--unsloth--Qwen3.8-27B-GGUF/ read as "first run downloads
+# them" on EVERY `ws check` - on the one workspace whose whole pitch is that it
+# starts in seconds. Measured with llama.cpp b10717 on odysseus, where that
+# directory is the only layout present.
+#
+# The flat form is kept rather than replaced: it costs one glob, and a box
+# whose cache predates the switch is exactly the box you do not want telling
+# you to re-download 91 GB.
+#
+# The llama.cpp workspaces point LLAMA_CACHE inside HF_HOME so all three live
+# on the filesystem min_disk_gb actually measured - but the NAMING still
+# differs, which is what this function exists to absorb.
+ws_model_cache_layout() {  # $1 = model id -> prints "hub" | "llama.cpp"
+    local v=$1
     local hf=${HF_HOME:-$HOME/.cache/huggingface}
     local lc=${LLAMA_CACHE:-$hf/llama.cpp}
+    local slug="models--${v//\//--}"
+    [[ -d "$hf/hub/$slug" ]]                    && { printf 'hub';       return 0; }
+    [[ -d "$lc/$slug" ]]                        && { printf 'llama.cpp'; return 0; }
+    compgen -G "$lc/${v//\//_}_*" >/dev/null    && { printf 'llama.cpp'; return 0; }
+    return 1
+}
+
+# Are every model this manifest names already on disk? Used by the disk guard
+# to tell "no room to download" apart from "nothing left to download". Shares
+# ws_model_cache_layout with the weights report further down, so the guard and
+# the report can no longer disagree about what "cached" means - which they did,
+# silently, for as long as each carried its own copy of the globs.
+ws_weights_cached() {
+    local m=$1 v any=0
     while read -r v; do
         [[ -z $v ]] && continue
         any=1
-        [[ -d "$hf/hub/models--${v//\//--}" ]] && continue
-        compgen -G "$lc/${v//\//_}_*" >/dev/null && continue
-        return 1
+        ws_model_cache_layout "$v" >/dev/null || return 1
     done < <(ws_list_field "$m" models)
     (( any ))
 }
@@ -162,23 +196,13 @@ ws_preflight() {
 
     while read -r v; do
         [[ -z $v ]] && continue
-        # TWO CACHE LAYOUTS, because two downloaders write here.
-        #
-        #   transformers/vLLM/SGLang   $HF_HOME/hub/models--<org>--<name>/
-        #   llama.cpp                  $LLAMA_CACHE/<org>_<repo>_<file>.gguf
-        #
-        # The llama.cpp workspaces point LLAMA_CACHE inside HF_HOME so both
-        # live on the filesystem min_disk_gb above actually measured - but the
-        # NAMING still differs, and checking only the hub layout reports a
-        # cached 91 GB GGUF as "first run downloads them" every time.
-        #
-        # Absence is a warning either way, not a failure: the engine downloads
-        # on first run, it just takes a while.
-        local hf=${HF_HOME:-$HOME/.cache/huggingface}
-        local slug="models--${v//\//--}"
-        local lc=${LLAMA_CACHE:-$hf/llama.cpp}
-        if [[ -d "$hf/hub/$slug" ]]; then ok "weights cached: $v"
-        elif compgen -G "$lc/${v//\//_}_*" >/dev/null; then ok "weights cached: $v (llama.cpp)"
+        # The layouts, and why there is more than one, are in
+        # ws_model_cache_layout. Absence is a warning either way, not a
+        # failure: the engine downloads on first run, it just takes a while.
+        local layout
+        if layout=$(ws_model_cache_layout "$v"); then
+            if [[ $layout == hub ]]; then ok "weights cached: $v"
+            else ok "weights cached: $v ($layout)"; fi
         else warn "weights NOT cached: $v (first run downloads them)"; fi
     done < <(ws_list_field "$m" models)
 

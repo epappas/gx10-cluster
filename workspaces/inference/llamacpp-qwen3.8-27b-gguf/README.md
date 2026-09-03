@@ -48,6 +48,15 @@ sets `LLAMA_CACHE` for it, so the free-space figure `ws check` measures is the
 filesystem the download actually lands on — which matters the moment anyone
 takes this repo's own advice and moves `HF_HOME` to a bigger disk.
 
+**And `ws check` used to deny the cache existed.** llama.cpp's downloader moved
+to the HF hub layout — `$LLAMA_CACHE/models--unsloth--Qwen3.8-27B-GGUF/` — and
+`ws_model_cache_layout` only knew the older flat
+`<org>_<repo>_<file>.gguf` form, so a complete 17.5 GB download read as
+`weights NOT cached (first run downloads them)` on **every** run, on the one
+workspace whose whole pitch is that it starts in seconds. Both layouts are
+recognised now, and the disk guard shares the same check rather than carrying
+its own copy of the globs.
+
 ## Why
 
 Three reasons to reach for this over the vLLM workspace on the same model:
