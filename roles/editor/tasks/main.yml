@@ -31,6 +31,11 @@
   ansible.builtin.stat:
     path: "/opt/nvim-{{ neovim_version }}/bin/nvim"
   register: nvim_installed
+  # become, because this reads inside a root-owned tree in /opt and the mode of
+  # the directory above it is not this task's business. Without it, a box whose
+  # /opt/nvim-<version> came out 0750 - see the mode task below - fails here
+  # with a bare "Permission denied", before the task that would repair it.
+  become: true
 
 - name: Ensure the download directory exists
   ansible.builtin.file:
@@ -38,6 +43,13 @@
     state: directory
     mode: "0755"
   become: true
+  # check_mode: false, so a dry run creates it for real. Every get_url below
+  # writes into this directory and fails with "Destination /var/cache/gx10 does
+  # not exist" when the preceding mkdir was only simulated - so `make diff` on
+  # a box that has never been provisioned reported a broken role rather than
+  # the work it would do. An empty, root-owned download cache is not
+  # configuration; it is where the next task puts a tarball it then deletes.
+  check_mode: false
 
 # The checksum is in group_vars and was computed from this asset. Neovim
 # publishes no sums file with its releases, so unlike the ollama task there is
@@ -45,16 +57,16 @@
 # than left off.
 - name: Download the neovim release tarball for {{ neovim_version }}
   ansible.builtin.get_url:
-    url: "https://github.com/neovim/neovim/releases/download/v{{ neovim_version }}/nvim-linux-arm64.tar.gz"
-    checksum: "sha256:{{ neovim_sha256 }}"
-    dest: "/var/cache/gx10/nvim-linux-arm64-{{ neovim_version }}.tar.gz"
+    url: "https://github.com/neovim/neovim/releases/download/v{{ neovim_version }}/nvim-linux-{{ arch_neovim }}.tar.gz"
+    checksum: "sha256:{{ neovim_sha256[ansible_facts['architecture']] }}"
+    dest: "/var/cache/gx10/nvim-linux-{{ arch_neovim }}-{{ neovim_version }}.tar.gz"
     owner: root
     group: root
     mode: "0644"
   become: true
   when: not nvim_installed.stat.exists
 
-# The archive is rooted at nvim-linux-arm64/, and the version belongs in the
+# The archive is rooted at nvim-linux-<arch>/, and the version belongs in the
 # path rather than the architecture: two versions can then coexist and the
 # symlink below decides which is current. --transform renames that top-level
 # directory during extraction.
@@ -66,12 +78,12 @@
 # dir" - reporting a broken role where there is none.
 - name: Unpack neovim into /opt/nvim-{{ neovim_version }}
   ansible.builtin.unarchive:
-    src: "/var/cache/gx10/nvim-linux-arm64-{{ neovim_version }}.tar.gz"
+    src: "/var/cache/gx10/nvim-linux-{{ arch_neovim }}-{{ neovim_version }}.tar.gz"
     dest: /opt
     remote_src: true
     extra_opts:
       - --transform
-      - "s|^nvim-linux-arm64|nvim-{{ neovim_version }}|"
+      - "s|^nvim-linux-{{ arch_neovim }}|nvim-{{ neovim_version }}|"
     owner: root
     group: root
   become: true
@@ -83,9 +95,33 @@
     # for a dry run to say about unpacking a file that was never fetched.
     - not ansible_check_mode
 
+# The mode, explicitly, because tar did not get it from the archive: neither
+# neovim tarball contains a member for its own top-level directory - the first
+# entry is `nvim-linux-<arch>/bin/` - so tar CREATES it, and an implicitly
+# created directory takes the extracting process's umask. root's umask is 022
+# on the GX10s and 027 on devbox, which is how this shipped for months and then
+# produced /opt/nvim-0.12.5 at 0750: the binary inside was 0755 and perfectly
+# fine, and every non-root process got "nvim: Permission denied" from the
+# directory above it.
+#
+# Every other versioned install directory in this repo is created by an
+# explicit `file:` task at 0755. These two are extracted rather than created,
+# so they say it here instead of inheriting whatever the box happens to run.
+- name: Set the mode of /opt/nvim-{{ neovim_version }}
+  ansible.builtin.file:
+    path: "/opt/nvim-{{ neovim_version }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+  # The unpack above is skipped by --check, so on a dry run of a box without
+  # neovim there is no directory to set the mode of.
+  when: not ansible_check_mode
+
 - name: Remove the downloaded neovim tarball
   ansible.builtin.file:
-    path: "/var/cache/gx10/nvim-linux-arm64-{{ neovim_version }}.tar.gz"
+    path: "/var/cache/gx10/nvim-linux-{{ arch_neovim }}-{{ neovim_version }}.tar.gz"
     state: absent
   become: true
 
@@ -117,8 +153,9 @@
 
 - name: Download the tree-sitter CLI {{ tree_sitter_version }}
   ansible.builtin.get_url:
-    url: "https://github.com/tree-sitter/tree-sitter/releases/download/v{{ tree_sitter_version }}/tree-sitter-linux-arm64.gz"
-    checksum: "sha256:{{ tree_sitter_sha256 }}"
+    url: >-
+      https://github.com/tree-sitter/tree-sitter/releases/download/v{{ tree_sitter_version }}/tree-sitter-linux-{{ arch_x64 }}.gz
+    checksum: "sha256:{{ tree_sitter_sha256[ansible_facts['architecture']] }}"
     dest: "/var/cache/gx10/tree-sitter-{{ tree_sitter_version }}.gz"
     owner: root
     group: root
@@ -307,6 +344,7 @@
     creates: "{{ primary_home }}/.config/nvim.pre-versioned"
   become_user: "{{ primary_user }}"
   become: true
+  register: nvim_config_move
   when:
     - nvim_config_path.stat.exists
     - nvim_config_path.stat.isdir | default(false)
@@ -322,6 +360,13 @@
     group: "{{ primary_user }}"
   become_user: "{{ primary_user }}"
   become: true
+  # A command module is not executed under --check, so where the move above was
+  # only REPORTED, ~/.config/nvim is still a non-empty directory here and file:
+  # refuses with "not empty, refusing to convert it" - a dry run failing on a
+  # box whose only problem is that it has somebody else's nvim config, which is
+  # precisely the box this move exists for. The move has already said what
+  # would happen; there is nothing left for the link to add.
+  when: not (ansible_check_mode and nvim_config_move is changed)
 
 # ---------------------------------------------------------------------------
 # Plugins

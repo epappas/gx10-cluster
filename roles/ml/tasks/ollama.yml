@@ -44,6 +44,13 @@
     state: directory
     mode: "0755"
   become: true
+  # check_mode: false, so a dry run creates it for real. Every get_url below
+  # writes into this directory and fails with "Destination /var/cache/gx10 does
+  # not exist" when the preceding mkdir was only simulated - so `make diff` on
+  # a box that has never been provisioned reported a broken role rather than
+  # the work it would do. An empty, root-owned download cache is not
+  # configuration; it is where the next task puts a tarball it then deletes.
+  check_mode: false
   when: not ollama_stamp.stat.exists
 
 # The checksum is fetched from the release's own sha256sum.txt rather than

@@ -264,7 +264,7 @@
 - name: Add the GitHub CLI apt repository
   ansible.builtin.apt_repository:
     repo: >-
-      deb [arch={{ apt_arch }} signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg]
+      deb [arch={{ arch_deb }} signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg]
       https://cli.github.com/packages stable main
     filename: github-cli
     state: present

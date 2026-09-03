@@ -39,7 +39,7 @@
 - name: Add the NordVPN apt repository
   ansible.builtin.apt_repository:
     repo: >-
-      deb [arch={{ apt_arch }} signed-by=/usr/share/keyrings/nordvpn-archive-keyring.asc]
+      deb [arch={{ arch_deb }} signed-by=/usr/share/keyrings/nordvpn-archive-keyring.asc]
       https://repo.nordvpn.com/deb/nordvpn/debian stable main
     filename: nordvpn
     state: present

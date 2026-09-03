@@ -28,15 +28,22 @@
     state: directory
     mode: "0755"
   become: true
+  # check_mode: false, so a dry run creates it for real. Every get_url below
+  # writes into this directory and fails with "Destination /var/cache/gx10 does
+  # not exist" when the preceding mkdir was only simulated - so `make diff` on
+  # a box that has never been provisioned reported a broken role rather than
+  # the work it would do. An empty, root-owned download cache is not
+  # configuration; it is where the next task puts a tarball it then deletes.
+  check_mode: false
 
 # The checksum is go.dev's own, from https://go.dev/dl/?mode=json, not one
 # computed here - so it verifies the release rather than verifying that the
 # file has not changed since somebody downloaded it once.
 - name: Download the Go tarball for {{ go_version }}
   ansible.builtin.get_url:
-    url: "https://go.dev/dl/go{{ go_version }}.linux-arm64.tar.gz"
-    checksum: "sha256:{{ go_sha256 }}"
-    dest: "/var/cache/gx10/go{{ go_version }}.linux-arm64.tar.gz"
+    url: "https://go.dev/dl/go{{ go_version }}.linux-{{ arch_deb }}.tar.gz"
+    checksum: "sha256:{{ go_sha256[ansible_facts['architecture']] }}"
+    dest: "/var/cache/gx10/go{{ go_version }}.linux-{{ arch_deb }}.tar.gz"
     owner: root
     group: root
     mode: "0644"
@@ -53,7 +60,7 @@
 # directory, and under --check that mkdir has not really happened.
 - name: Unpack Go into /opt/go-{{ go_version }}
   ansible.builtin.unarchive:
-    src: "/var/cache/gx10/go{{ go_version }}.linux-arm64.tar.gz"
+    src: "/var/cache/gx10/go{{ go_version }}.linux-{{ arch_deb }}.tar.gz"
     dest: /opt
     remote_src: true
     extra_opts:
@@ -74,7 +81,7 @@
 
 - name: Remove the downloaded Go tarball
   ansible.builtin.file:
-    path: "/var/cache/gx10/go{{ go_version }}.linux-arm64.tar.gz"
+    path: "/var/cache/gx10/go{{ go_version }}.linux-{{ arch_deb }}.tar.gz"
     state: absent
   become: true
 

@@ -73,8 +73,33 @@ gpu_arch_list: "12.1"
 cuda_major: "13"
 cuda_home: /usr/local/cuda
 
-# dpkg calls aarch64 "arm64", and apt repo lines need the dpkg spelling.
-apt_arch: "{{ 'arm64' if ansible_facts['architecture'] == 'aarch64' else ansible_facts['architecture'] }}"
+# ---------------------------------------------------------------------------
+# How this CPU is spelled
+#
+# ansible_facts['architecture'] is uname's answer - aarch64 or x86_64 - and it
+# is the key every per-arch map in this file is keyed on. It is NOT what the
+# download URLs want: the projects this repo fetches binaries from disagree
+# about how to write the same machine, and there are three spellings in play.
+# So each SPELLING gets one variable, rather than each download growing its own
+# conditional:
+#
+#   arch_deb     arm64 / amd64    apt repo lines, go.dev, terraform-ls
+#   arch_x64     arm64 / x64      tree-sitter, lua-language-server, marksman
+#   arch_neovim  arm64 / x86_64   neovim, and only neovim - it is the one
+#                                 publisher that mixes the two spellings in a
+#                                 single release. Verified against the v0.12.5
+#                                 asset list, not assumed.
+#
+# This exists because the cluster is aarch64 and the workstation group is not
+# (see workstation.yml). Before it, every URL said arm64 and the roles simply
+# could not run anywhere else.
+#
+# arch_deb replaced apt_arch, which fell back to ansible_facts['architecture']
+# for anything not aarch64 - so on an x86_64 box it emitted `arch=x86_64`, a
+# spelling dpkg does not know, and the apt repo line silently matched nothing.
+arch_deb: "{{ 'arm64' if ansible_facts['architecture'] == 'aarch64' else 'amd64' }}"
+arch_x64: "{{ 'arm64' if ansible_facts['architecture'] == 'aarch64' else 'x64' }}"
+arch_neovim: "{{ 'arm64' if ansible_facts['architecture'] == 'aarch64' else ansible_facts['architecture'] }}"
 
 # The performance cores. Verified via /proc/cpuinfo CPU part and cpufreq:
 #   0xd85 = Cortex-X925 @ 3.90 GHz -> 5-9, 15-19
@@ -338,10 +363,16 @@ default_shell: /usr/bin/zsh
 # "the editor understands Go" and "this box has a Go toolchain" are the same
 # statement.
 #
-# The checksum is go.dev's own, published in the release JSON at
-# https://go.dev/dl/?mode=json, not one computed here.
+# The checksums are go.dev's own, published in the release JSON at
+# https://go.dev/dl/?mode=json, not ones computed here. Keyed on
+# ansible_facts['architecture'] because the workstation group is x86_64 - see
+# the arch_* block above. A key missing here is a hard failure with the
+# architecture named, which is the right way to find out this repo has met a
+# machine it was never pinned for.
 go_version: "1.27.0"
-go_sha256: "51798d2c42d0e1c6ed7fd9f48728b4193abac9e8aad6dbac2fe96a81f5909bda"
+go_sha256:
+  aarch64: "51798d2c42d0e1c6ed7fd9f48728b4193abac9e8aad6dbac2fe96a81f5909bda"
+  x86_64: "675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685"
 # Pinned like every other tool. gopls is a compiler-adjacent binary and its
 # analyses change between releases; two boxes disagreeing about whether your
 # code has a bug is exactly the failure this repo exists to prevent.
@@ -367,7 +398,9 @@ gopls_version: "v0.23.0"
 # if you forget.
 # ---------------------------------------------------------------------------
 neovim_version: "0.12.5"
-neovim_sha256: "1aa5ca085249580ae0f91eb14f27ec0919773ff2d99a163d03f3d6c21ac29725"
+neovim_sha256:
+  aarch64: "1aa5ca085249580ae0f91eb14f27ec0919773ff2d99a163d03f3d6c21ac29725"
+  x86_64: "bce0f56eda1f1b1db6eee8f4133d7a38813ea07933837dd1777411ca384c6875"
 
 # The plugin manager, pinned to a tag. The plugins it manages are pinned
 # separately and more strictly, by commit, in lazy-lock.json.
@@ -378,7 +411,9 @@ lazy_nvim_version: "v11.17.5"
 # syntax highlighting - without it every :TSInstall fails with ENOENT and the
 # editor silently falls back to regex highlighting.
 tree_sitter_version: "0.27.0"
-tree_sitter_sha256: "3a35a2dd961ad842384e982c75daf792c01d1a67e442fc3914d4de37bd8a59cb"
+tree_sitter_sha256:
+  aarch64: "3a35a2dd961ad842384e982c75daf792c01d1a67e442fc3914d4de37bd8a59cb"
+  x86_64: "20a1f39ec1c45f2211492dcb8881c802b643b554bb196869a29ac3778277fa77"
 
 # Languages that get comment folding on top of their structural folds.
 #
@@ -429,11 +464,15 @@ nvim_comment_fold_languages:
 # computed from the assets. terraform-ls is fetched with HashiCorp's own
 # SHA256SUMS URL instead - see the task - so it has no digest here to go stale.
 lua_ls_version: "3.19.1"
-lua_ls_sha256: "abd2572e8fc929dc838a81ffb8473c5bce0bf39bfe8edb4b120b3b623176ce83"
+lua_ls_sha256:
+  aarch64: "abd2572e8fc929dc838a81ffb8473c5bce0bf39bfe8edb4b120b3b623176ce83"
+  x86_64: "e9235d2d72ef55bc41cf8c99cda2ed64777682024b4bb81f5dea425060c5cbb8"
 terraform_ls_version: "0.39.0"
 # Yes, the version really is a date. marksman tags releases that way.
 marksman_version: "2026-02-08"
-marksman_sha256: "db8e124527f7f8048e3e6c91821b9c52ef173d92c01e47d221bf1337afd962fb"
+marksman_sha256:
+  aarch64: "db8e124527f7f8048e3e6c91821b9c52ef173d92c01e47d221bf1337afd962fb"
+  x86_64: "be5098e8213219269c47fc0d916a66fa31ce0602ec967475c722260aabf26087"
 
 # The npm half. Pinned specs, never bare names - see the changed_when in
 # roles/dev_node for what a bare name costs.

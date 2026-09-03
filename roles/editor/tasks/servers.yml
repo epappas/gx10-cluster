@@ -38,12 +38,17 @@
   ansible.builtin.stat:
     path: "/opt/lua-language-server-{{ lua_ls_version }}/bin/lua-language-server"
   register: lua_ls_installed
+  # become, because this reads inside a root-owned tree in /opt and the mode of
+  # the directory above it is not this task's business. Without it, a box whose
+  # /opt/lua-language-server-<version> came out 0750 - see the mode task below - fails here
+  # with a bare "Permission denied", before the task that would repair it.
+  become: true
 
 - name: Download lua-language-server {{ lua_ls_version }}
   ansible.builtin.get_url:
     url: >-
-      https://github.com/LuaLS/lua-language-server/releases/download/{{ lua_ls_version }}/lua-language-server-{{ lua_ls_version }}-linux-arm64.tar.gz
-    checksum: "sha256:{{ lua_ls_sha256 }}"
+      https://github.com/LuaLS/lua-language-server/releases/download/{{ lua_ls_version }}/lua-language-server-{{ lua_ls_version }}-linux-{{ arch_x64 }}.tar.gz
+    checksum: "sha256:{{ lua_ls_sha256[ansible_facts['architecture']] }}"
     dest: "/var/cache/gx10/lua-language-server-{{ lua_ls_version }}.tar.gz"
     owner: root
     group: root
@@ -73,6 +78,19 @@
     # broken role on a box that simply does not have it yet. There is nothing
     # for a dry run to say about unpacking a file that was never fetched.
     - not ansible_check_mode
+
+# Same as the neovim unpack in main.yml, and for the same reason: --one-top-level
+# asks tar to CREATE this directory, so its mode comes from the umask rather
+# than from the archive.
+- name: Set the mode of /opt/lua-language-server-{{ lua_ls_version }}
+  ansible.builtin.file:
+    path: "/opt/lua-language-server-{{ lua_ls_version }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+  when: not ansible_check_mode
 
 - name: Remove the lua-language-server archive
   ansible.builtin.file:
@@ -107,7 +125,7 @@
 - name: Download terraform-ls {{ terraform_ls_version }}
   ansible.builtin.get_url:
     url: >-
-      https://releases.hashicorp.com/terraform-ls/{{ terraform_ls_version }}/terraform-ls_{{ terraform_ls_version }}_linux_arm64.zip
+      https://releases.hashicorp.com/terraform-ls/{{ terraform_ls_version }}/terraform-ls_{{ terraform_ls_version }}_linux_{{ arch_deb }}.zip
     checksum: >-
       sha256:https://releases.hashicorp.com/terraform-ls/{{ terraform_ls_version }}/terraform-ls_{{ terraform_ls_version }}_SHA256SUMS
     dest: "/var/cache/gx10/terraform-ls-{{ terraform_ls_version }}.zip"
@@ -173,11 +191,20 @@
     group: root
     mode: "0755"
   become: true
+  # check_mode: false, and this is the one install directory in the repo that
+  # needs it. Everywhere else the download lands in /var/cache/gx10 and only
+  # the UNPACK writes here, and unpacking is a module a dry run skips anyway.
+  # marksman ships a bare binary, so get_url IS the install and writes straight
+  # into this directory - which, simulated, does not exist, so `make diff` on a
+  # box without marksman failed with "Destination /opt/marksman-... does not
+  # exist". An empty directory is not the binary; the dry run still says it
+  # would fetch one.
+  check_mode: false
 
 - name: Install marksman {{ marksman_version }}
   ansible.builtin.get_url:
-    url: "https://github.com/artempyanykh/marksman/releases/download/{{ marksman_version }}/marksman-linux-arm64"
-    checksum: "sha256:{{ marksman_sha256 }}"
+    url: "https://github.com/artempyanykh/marksman/releases/download/{{ marksman_version }}/marksman-linux-{{ arch_x64 }}"
+    checksum: "sha256:{{ marksman_sha256[ansible_facts['architecture']] }}"
     dest: "/opt/marksman-{{ marksman_version }}/marksman"
     owner: root
     group: root
