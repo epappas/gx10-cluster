@@ -157,6 +157,13 @@ ml_python: "3.12"
 
 uv_bin: "{{ primary_home }}/.local/bin/uv"
 
+# Whether a uv tool whose command the box ALREADY provides is a failure.
+#
+# True on a cluster node: this repo is the only thing writing to ~/.local/bin
+# there, so a collision means something unexpected is. False where the box came
+# with its own tooling - see group_vars/workstation.yml.
+uv_tool_conflict_is_fatal: true
+
 # Standalone CLI tools, pinned for the same reason as everything else.
 uv_tools:
   - "ruff==0.14.4"
@@ -355,6 +362,17 @@ npm_globals:
 # moment they are provisioned on different days.
 rust_toolchain: "1.97.1"
 
+# Whether this box's Rust is ours to manage. True on the cluster: roles/dev_rust
+# installs rustup, selects rust_toolchain as the default and adds the apt CLI
+# tools.
+#
+# False on a machine that is somebody's daily driver and already has a Rust it
+# builds other things with (see group_vars/workstation.yml). The role then
+# installs nothing and moves nothing - it only ensures rust-analyzer exists for
+# whatever toolchain is ALREADY default, because an editor with a rust-analyzer
+# from a different toolchain than the compiler is worse than one with none.
+rust_manage: true
+
 default_shell: /usr/bin/zsh
 
 # The Go toolchain, from the official tarball. Installed for one reason and it
@@ -455,6 +473,25 @@ nvim_comment_fold_languages:
   - toml
   - vim
   - yaml
+
+# Whether the AI assistant is part of the configuration on this box.
+#
+# It is not a preference: templates/ai.lua.j2 wires codecompanion to THIS
+# cluster's ollama and vLLM, both bound to loopback, and a box that has neither
+# would ship a plugin whose every adapter is unreachable. So the workstation
+# group turns it off and the plugin is not specced there at all - see
+# group_vars/workstation.yml.
+#
+# It feeds nvim_config_id in roles/editor, so turning it off produces a
+# different configuration directory rather than silently reusing one built with
+# the plugin in it.
+nvim_ai_enabled: true
+
+# The mode roles/editor puts on ~/.config. 0700 on a cluster node, which is
+# what it already is there and what it should be. `{{ omit }}` on a box whose
+# ~/.config is not ours - the directory is then ensured to exist and its
+# permissions are left exactly as their owner set them.
+xdg_config_mode: "0700"
 
 # Language servers that ship as a release binary. The npm ones are below; rust
 # comes from rustup (roles/dev_rust) and gopls from `go install` (roles/dev_go),

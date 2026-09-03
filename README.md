@@ -319,6 +319,7 @@ its flags, its exit codes, and how to read what it prints.
 
 ```
 site.yml            main playbook (serial: 1, any_errors_fatal)
+workstation.yml     the editor alone, on a box that is not a GX10
 verify.yml          assertion-based health check
 optional.yml        opt-in components, never run by site.yml
 benchmark.yml       the benchmark runner
@@ -350,6 +351,28 @@ Four roles are opt-in and never run from `site.yml`:
 ```bash
 make optional TAGS=ray|slurm|exporters|dashboards|bench
 ```
+
+## The editor, on a box that is not a GX10
+
+`site.yml` provisions a GX10 and asserts as much. The editor it installs is not
+GX10-specific, though, and `workstation.yml` puts *only* that on a machine in
+the `workstation` inventory group — sharing every pinned version, the same
+`lazy-lock.json`, and the same health checks:
+
+```bash
+make workstation-diff LIMIT=devbox   # dry run
+make workstation LIMIT=devbox        # apply, then prove the editor works
+```
+
+Architecture is not part of the difference: every release binary is downloaded
+through the `arch_*` spellings in `group_vars/all.yml` and checksummed per
+architecture, so an x86_64 workstation and an aarch64 node run the same play.
+
+What *is* the difference is that a workstation is somebody's daily driver, so
+the play does not re-pin what the box already has — its node, its rustc, its
+`ruff`, or the permissions on its `~/.config`. Every one of those decisions,
+and its cost, is written down in `group_vars/workstation.yml`; read that file
+before pointing this at a machine.
 
 A bare `optional.yml` run is a no-op. There is no `enable_*` variable per role —
 tags do that — though a few within-role toggles remain (`build_llama_cpp`,

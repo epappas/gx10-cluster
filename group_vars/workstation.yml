@@ -1,0 +1,58 @@
+---
+# What is different about a machine that is not a GX10 node.
+#
+# This file is deliberately short, and every entry is the same kind of
+# statement: "this box is somebody's daily driver, so that part of it is not
+# ours to move". Everything NOT here - the neovim version, the plugin commits,
+# the language server pins, the fold queries - is shared with the cluster on
+# purpose. The editor is meant to be the same editor.
+#
+# See workstation.yml for the playbook and docs/runbooks/edit-code.md for what
+# it installs.
+
+# The AI assistant is wired to THIS cluster's ollama and vLLM, both bound to
+# loopback by design (see ollama_host and vllm_bind in all.yml). A workstation
+# has neither, so every adapter it offered would be unreachable.
+#
+# Off means NOT SPECCED, not installed-and-disabled: roles/editor skips the
+# ai.lua template, lazy.nvim never clones codecompanion, and
+# gx10.provision.plugins() checks the plugins this box specs rather than every
+# line of the lockfile - so one lazy-lock.json still governs both shapes.
+#
+# It also feeds nvim_config_id, so this box gets a configuration directory of
+# its own rather than quietly sharing a name with the cluster's.
+nvim_ai_enabled: false
+
+# Rust is already installed here and other projects build against it.
+# roles/dev_rust therefore installs nothing and moves nothing: no rustup
+# bootstrap, no `rustup default`, and none of the apt CLI tools a cluster node
+# gets. The one thing it still does is add rust-analyzer to whatever toolchain
+# is ALREADY default, because the rust-analyzer on PATH is a rustup shim and
+# resolves against that toolchain - a component added to any other one is
+# invisible to the editor.
+#
+# The cost is honest and worth stating: rustc here is whatever this box
+# defaults to, not the rust_toolchain the cluster pins, so a diagnostic seen on
+# a workstation is not guaranteed to match one seen on a node.
+rust_manage: false
+
+# ~/.config here is somebody's, with twenty other tools' directories in it, and
+# was 0775 before this repo ever saw the box. roles/editor therefore only
+# ensures it exists. Narrowing it to the cluster's 0700 would be a change to
+# the box's security posture made as a side effect of installing an editor -
+# harmless-looking, unasked for, and exactly the kind of thing that is a
+# mystery six months later.
+xdg_config_mode: "{{ omit }}"
+
+# devbox already had ruff 0.15.21 in ~/.local/bin, from ruff's own installer
+# and NEWER than the ruff==0.14.4 this repo pins. `uv tool install` refuses to
+# overwrite an executable it did not place, and here that refusal is the right
+# answer rather than an error: the editor needs a ruff on PATH, not this repo's
+# ruff, and silently downgrading a tool somebody installed themselves is not
+# something installing an editor gets to do.
+#
+# The consequence, stated plainly: `ruff` on a workstation is whatever the box
+# has, so a lint result there is not guaranteed to match a cluster node's. The
+# same is already true of rustc - see rust_manage above. Remove the existing
+# executable and re-run if you want the pin to win.
+uv_tool_conflict_is_fatal: false

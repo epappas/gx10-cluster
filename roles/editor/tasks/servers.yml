@@ -284,8 +284,31 @@
   become_user: "{{ primary_user }}"
   become: true
   loop: "{{ editor_uv_tools }}"
-  register: editor_uv_install
+  register: uv_tool_install
   # The no-op message is "`ansible-lint==25.6.1` is already installed",
   # lowercase; the capital I distinguishes a real install. See roles/dev_python
-  # for what --quiet cost here once.
-  changed_when: "'Installed' in (editor_uv_install.stderr | default(''))"
+  # for what --quiet cost here once, and for why rc is tested first.
+  changed_when:
+    - uv_tool_install.rc == 0
+    - "'Installed' in (uv_tool_install.stderr | default(''))"
+  # `uv tool install` exits 2 rather than placing an executable that already
+  # exists: "Executable already exists: ruff (use `--force` to overwrite)", or
+  # "Executables already exist: ansible, ansible-config, ..." when the package
+  # ships several. The test matches the shared substring, because matching the
+  # singular alone silently missed every multi-command package - ansible-core
+  # among them.
+  #
+  # On a cluster node that is a real failure - nothing else puts commands in
+  # ~/.local/bin there, so a collision means something else is writing to it.
+  # On a box this repo only lends an editor to it is the ordinary case and not
+  # an error: devbox had its own ruff, NEWER than this pin, from ruff's own
+  # installer. Taking that over is a downgrade of somebody's tooling as a side
+  # effect of installing an editor. The tool IS installed either way - only its
+  # shim in ~/.local/bin is left alone.
+  #
+  # --force is not the answer on either path: it reinstalls unconditionally, so
+  # every apply would report changed and `make idempotence` would fail.
+  failed_when: >-
+    uv_tool_install.rc != 0
+    and (uv_tool_conflict_is_fatal
+         or 'already exist' not in (uv_tool_install.stderr | default('')))

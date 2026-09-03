@@ -1,0 +1,133 @@
+---
+# The editor, on a machine that is not part of this cluster.
+#
+# site.yml provisions a GX10: it asserts aarch64, reads nvidia-smi, lays down
+# the ConnectX-7 interconnect and 130 GB of weights. None of that applies to a
+# personal workstation, and none of it is what makes `nvim` here worth having -
+# that is roles/editor and the four toolchains its language servers run on.
+#
+# So this is a second playbook rather than another group in site.yml. It shares
+# every role, every pinned version and the same lazy-lock.json; what it does
+# not share is the assumption that the box is ours to configure end to end.
+# group_vars/workstation.yml is the whole of that difference and is worth
+# reading before running this.
+#
+#     make workstation                 dry run  (add APPLY=1 to apply)
+#     make workstation LIMIT=devbox
+#
+# What lands on the box:
+#
+#   /opt/nvim-<version>          neovim, symlinked from /usr/local/bin/nvim
+#   /opt/tree-sitter-<version>   the parser compiler
+#   /opt/go-<version>            a Go toolchain, because gopls has no binary
+#   /opt/{lua-language-server,terraform-ls,marksman}-<version>
+#   ~/.local/share/gx10/nvim-<hash>   the config, with ~/.config/nvim a symlink
+#   ~/.local/lib/gx10-npm-<hash>      the npm language servers
+#
+# Everything is versioned and symlink-switched, so removing it again is
+# `rm -rf` on those directories and putting ~/.config/nvim back - see
+# docs/runbooks/edit-code.md.
+
+- name: Provision the editor on a workstation
+  hosts: workstation
+  serial: 1
+  any_errors_fatal: true
+
+  # The editor half of the cluster's own health check, written once there.
+  vars_files:
+    - vars/verify_checks.yml
+
+  pre_tasks:
+    # Same reason as site.yml: primary_home is this connection's HOME, so under
+    # `sudo ansible-playbook` every toolchain, config and symlink would be
+    # installed into root's home and `become: true` would be a no-op hiding it.
+    - name: Refuse to run as root
+      ansible.builtin.assert:
+        that: ansible_facts['user_id'] != 'root'
+        fail_msg: >-
+          Connected as root. Run as your normal user and let become escalate;
+          everything here is installed into the connecting user's home.
+
+    # Not an architecture assert, deliberately - the point of this playbook is
+    # that it is arch-agnostic (see the arch_* block in group_vars/all.yml).
+    # This asserts the narrower thing that is actually required: that the
+    # release binaries these roles download are PINNED for this machine. A
+    # missing key would otherwise surface as a Jinja error inside a get_url,
+    # which reads like a broken role rather than an unpinned platform.
+    - name: Assert the release binaries are pinned for this architecture
+      ansible.builtin.assert:
+        that: ansible_facts['architecture'] in item.value
+        fail_msg: >-
+          {{ item.key }} has no checksum for {{ ansible_facts['architecture'] }}.
+          Add one to group_vars/all.yml, computed from the release asset - see
+          the arch_* block there for how the URL is spelled.
+      loop:
+        - { key: neovim_sha256, value: "{{ neovim_sha256 }}" }
+        - { key: tree_sitter_sha256, value: "{{ tree_sitter_sha256 }}" }
+        - { key: lua_ls_sha256, value: "{{ lua_ls_sha256 }}" }
+        - { key: marksman_sha256, value: "{{ marksman_sha256 }}" }
+        - { key: go_sha256, value: "{{ go_sha256 }}" }
+      loop_control:
+        label: "{{ item.key }}"
+
+  # The same roles site.yml runs, in the same order and for the same reasons -
+  # dev_go before editor because gopls is built by `go install`, dev_python
+  # because the ansible language server shells out to ansible-lint and the
+  # python formatter is ruff.
+  #
+  # dev_node is NOT here, and that is the one omission. It would install nvm,
+  # alias a pinned node as default and add this repo's JS tooling globally -
+  # re-pointing the node every other project on the box builds with. The editor
+  # does not need that: roles/editor sources nvm and installs its servers under
+  # a prefix of their own, against whatever node the box already defaults to.
+  # A workstation with no nvm at all is the one case this cannot cover: install
+  # node there however that box prefers, then re-run. The editor's npm task
+  # needs `. ~/.nvm/nvm.sh` to work and will say so if it does not.
+  roles:
+    - { role: dev_python, tags: [python, dev] }
+    - { role: dev_rust,   tags: [rust, dev] }
+    - { role: dev_go,     tags: [go, dev] }
+    - { role: editor,     tags: [editor, dev] }
+
+  # A run that finishes has PROVEN the editor works, rather than having
+  # reported that every task it happened to run reported ok. These are the
+  # `subset: editor` checks from vars/verify_checks.yml - the same commands
+  # `make verify` runs on a node - so the two boxes are held to one standard
+  # and neither list can drift from the other.
+  #
+  # They exercise the editor as a whole: the binary's version, every language
+  # server and external tool the config NAMES (doctor reads lsp.lua's own
+  # list), the deploy shape, the plugin commits, and every parser with its
+  # highlight queries. Each is a real failure mode that leaves an editor which
+  # starts and looks fine.
+  post_tasks:
+    - name: Prove the editor came up complete
+      ansible.builtin.shell:
+        cmd: "{{ item.cmd }}"
+        executable: /bin/bash
+      loop: "{{ verify_checks | selectattr('subset', 'defined') | selectattr('subset', 'eq', 'editor') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: editor_checks
+      changed_when: false
+      failed_when: false
+      # Nothing has been installed in a dry run, so these would all fail and
+      # report a broken box where there is only an unprovisioned one.
+      when: not ansible_check_mode
+      environment:
+        PATH: "/usr/local/bin:{{ ansible_facts['env']['PATH'] }}"
+
+    - name: Assert every editor check passed
+      ansible.builtin.assert:
+        that: item.rc == 0
+        fail_msg: >-
+          {{ item.item.name }} FAILED (rc={{ item.rc }}):
+          {{ (item.stdout | default('') or item.stderr | default('')) | trim }}
+          -- {{ item.item.hint | default('(no hint recorded)') }}
+        success_msg: "{{ item.item.name }}"
+      loop: "{{ editor_checks.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      # The loop above did not run, so every result is a skip with no rc on it
+      # and this would fail on the dict rather than on the box.
+      when: not ansible_check_mode

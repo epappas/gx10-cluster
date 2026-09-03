@@ -4,6 +4,14 @@
 #
 # required: false  -> reported but does not fail the run (things that depend
 #                     on a cable being connected, or on an optional role).
+#
+# subset: editor   -> true of ANY box this repo puts the editor on, cluster
+#                     node or not. workstation.yml runs exactly these as its
+#                     own proof that the editor came up complete, so they are
+#                     written once here rather than twice. A check that needs
+#                     anything a workstation does not get - the GPU, the ML
+#                     venv, roles/shell's tmux.conf - does not carry it, even
+#                     when the editor is what it is about.
 
 verify_checks:
   - name: "GPU"
@@ -142,6 +150,7 @@ verify_checks:
     # `command -v nvim` and then fails half the config, which is the failure
     # this check exists to catch - roles/base used to install that package.
   - name: "neovim {{ neovim_version }}"
+    subset: editor
     cmd: "nvim --version | head -1 | grep -qF 'v{{ neovim_version }}'"
     hint: "nvim is missing or is not {{ neovim_version }}. Re-run: make apply TAGS=editor"
 
@@ -150,6 +159,7 @@ verify_checks:
     # repeated here, so adding a server to lsp.lua cannot leave this check
     # quietly testing the old set.
   - name: "editor language servers"
+    subset: editor
     cmd: "nvim --headless -c 'lua require(\"gx10.provision\").doctor()' +qa"
     hint: "A language server is missing - the command lists which. Re-run: make apply TAGS=editor"
 
@@ -159,6 +169,7 @@ verify_checks:
     # and in both cases the next apply cannot swap it - ansible refuses to
     # turn a directory into a symlink.
   - name: "editor config is a deployment"
+    subset: editor
     cmd: "test -L $HOME/.config/nvim
       && readlink $HOME/.config/nvim | grep -q '/.local/share/gx10/nvim-'"
     hint: "~/.config/nvim is not the deployed symlink. Re-run: make apply TAGS=editor"
@@ -167,6 +178,7 @@ verify_checks:
     # matters for the same reason: a plugin tree that drifted from the
     # committed commits still starts, still highlights, and still looks fine.
   - name: "editor plugins pinned"
+    subset: editor
     cmd: "nvim --headless -c 'lua require(\"gx10.provision\").plugins()' +qa"
     hint: "Plugins are not at the commits in lazy-lock.json. Re-run: make apply TAGS=editor"
 
@@ -179,6 +191,7 @@ verify_checks:
     # produces no captures - it looks exactly like treesitter being off, and a
     # file test cannot see it.
   - name: "editor treesitter parsers"
+    subset: editor
     cmd: "nvim --headless -c 'lua require(\"gx10.provision\").parsers({check = true})' +qa"
     hint: "A parser or its highlight queries are missing. Re-run: make apply TAGS=editor"
 

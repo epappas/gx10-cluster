@@ -6,6 +6,12 @@
 # exact opposite of what this repo is for: two boxes provisioned six weeks
 # apart would compile with different rustc, and neither would match what the
 # other had yesterday.
+#
+# ALL OF THAT IS TRUE OF A CLUSTER NODE, and none of it is ours to impose on a
+# machine somebody works on every day. `rust_manage: false` (group_vars/
+# workstation.yml) says exactly that: the box already has a Rust it builds
+# other things with, so this role installs nothing and moves nothing there. The
+# one task that still runs is the editor component below - see its comment.
 
 - name: Install rustup
   ansible.builtin.shell:
@@ -18,6 +24,7 @@
     creates: "{{ primary_home }}/.cargo/bin/rustup"
   become_user: "{{ primary_user }}"
   become: true
+  when: rust_manage
 
 # rustup names a toolchain directory <version>-<target>, so this path is the
 # cheapest honest "is the pinned version installed" test there is - no output
@@ -25,6 +32,7 @@
 - name: Locate the pinned toolchain
   ansible.builtin.set_fact:
     rust_toolchain_dir: "{{ primary_home }}/.rustup/toolchains/{{ rust_toolchain }}-{{ ansible_facts['architecture'] }}-unknown-linux-gnu"
+  when: rust_manage
 
 # `rustup default X` installs X if it is missing and then selects it, so this
 # one command covers both a fresh box and a bump of rust_toolchain, and the
@@ -35,18 +43,43 @@
     creates: "{{ rust_toolchain_dir }}"
   become_user: "{{ primary_user }}"
   become: true
+  when: rust_manage
 
 # rustup's default profile carries rustfmt and clippy but NOT these two, so a
 # version bump would otherwise land a toolchain with no rust-analyzer and leave
 # every editor silently degraded.
-- name: Add the editor components to rust {{ rust_toolchain }}
-  ansible.builtin.command: >-
-    {{ primary_home }}/.cargo/bin/rustup component add
-    --toolchain {{ rust_toolchain }} rust-src rust-analyzer
-  args:
-    creates: "{{ rust_toolchain_dir }}/bin/rust-analyzer"
+#
+# THE ACTIVE toolchain, with no --toolchain flag, and that is the whole reason
+# this runs even where rust_manage is false. `rust-analyzer` on PATH is a
+# rustup shim: it dispatches to whichever toolchain is default at the moment it
+# is executed, so a component added to some other toolchain is invisible to it.
+# devbox had exactly that shape - the shim on PATH, the component on no
+# toolchain, and `rust-analyzer --version` answering "Unknown binary
+# 'rust-analyzer' in official toolchain 'stable'". The editor reports it as a
+# server that starts and immediately exits.
+#
+# `rustup which` is the probe rather than a creates: path, because the path is
+# a guess at rustup's directory layout and this is the question actually being
+# asked. It also stays correct when the default moves.
+- name: Check whether rust-analyzer is installed for the active toolchain
+  ansible.builtin.command: "{{ primary_home }}/.cargo/bin/rustup which rust-analyzer"
   become_user: "{{ primary_user }}"
   become: true
+  register: rust_analyzer_which
+  changed_when: false
+  failed_when: false
+  # A command module is skipped by --check, which would leave rc undefined and
+  # make the task below fail the dry run on a box that is perfectly fine. It
+  # only reads.
+  check_mode: false
+
+- name: Add the editor components to the active rust toolchain
+  ansible.builtin.command: >-
+    {{ primary_home }}/.cargo/bin/rustup component add rust-src rust-analyzer
+  become_user: "{{ primary_user }}"
+  become: true
+  when: rust_analyzer_which.rc | default(1) != 0
+  changed_when: true
 
 # apt only. There used to be a `cargo install --locked eza tokei hyperfine`
 # here, which compiled three Rust CLIs from source on aarch64 - minutes of
@@ -59,3 +92,7 @@
     name: [bat, fd-find, zoxide]
     state: present
   become: true
+  # Nothing in the editor needs these - they are what a node in THIS cluster
+  # gets, and roles/shell aliases them. A box we are only lending an editor to
+  # does not get three packages it never asked for.
+  when: rust_manage

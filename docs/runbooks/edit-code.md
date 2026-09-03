@@ -35,6 +35,38 @@ make apply TAGS=editor     # the editor alone
 make apply TAGS=dev        # editor + python, rust, node, go toolchains
 ```
 
+### On a box that is not a GX10
+
+Nothing above is GX10-specific, and `workstation.yml` is how you get it
+elsewhere — a personal machine, a VPS, anything in the `workstation` inventory
+group. Same pins, same `lazy-lock.json`, same checks:
+
+```bash
+make workstation-diff LIMIT=devbox   # dry run
+make workstation LIMIT=devbox        # apply, then prove the editor works
+```
+
+Architecture is not the difference: every download is spelled with the `arch_*`
+variables in `group_vars/all.yml` and checksummed per architecture, so aarch64
+and x86_64 run the same play. The difference is that a workstation belongs to
+whoever uses it, so the play leaves alone what the box already chose:
+
+| On a node | On a workstation | Why |
+|---|---|---|
+| AI assistant wired to this cluster's ollama and vLLM | not specced at all | both endpoints are loopback-bound here; there is nothing to reach |
+| `rustup default` pinned to `rust_toolchain` | left as-is; only `rust-analyzer` is added to it | other projects on the box build against that toolchain |
+| node pinned by `roles/dev_node` | whatever nvm already defaults to | ditto, and the servers are installed under a prefix of their own |
+| `ruff` is this repo's pin | whatever the box already had | `uv tool install` will not overwrite an executable it did not place, and that is the right answer |
+| `~/.config` set to `0700` | left exactly as its owner set it | narrowing somebody's permissions is still changing them |
+
+Each of those costs something real — a diagnostic on a workstation is not
+guaranteed to match one on a node — and each is written down, with its cost, in
+`group_vars/workstation.yml`. Read that file before pointing this at a machine.
+
+Two things the play does that are worth knowing before you run it: it replaces
+`/usr/local/bin/nvim` with the pinned version, and it renames any existing
+`~/.config/nvim` to `~/.config/nvim.pre-versioned` rather than deleting it.
+
 There is **no mason.nvim** ([why](../decisions.md#editor-on-the-box)). Every server is installed by ansible from a pinned,
 checksummed release, so the editor never downloads a binary on first open — and
 never downloads an x86-only one, which is what mason's registry hands an

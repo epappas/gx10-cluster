@@ -26,6 +26,7 @@ EXTRA ?=
 #
 #     make diff ASKPASS=
 ASKPASS ?= -K
+WS_ASKPASS ?=
 ANSIBLE_ARGS := $(if $(LIMIT),--limit $(LIMIT),) $(if $(TAGS),--tags $(TAGS),) \
                 $(if $(SKIP),--skip-tags $(SKIP),) $(EXTRA)
 
@@ -64,6 +65,7 @@ lint:  ## ansible-lint at the production profile
 .PHONY: syntax
 syntax: inventory  ## Parse the playbooks
 	ansible-playbook site.yml --syntax-check
+	ansible-playbook workstation.yml --syntax-check
 	ansible-playbook verify.yml --syntax-check
 	ansible-playbook optional.yml --syntax-check
 	ansible-playbook benchmark.yml --syntax-check
@@ -171,6 +173,22 @@ diff: inventory  ## Dry run showing what would change (ASKPASS= once sudo is pas
 .PHONY: apply
 apply: inventory  ## Provision. Run under tmux. (ASKPASS= once sudo is passwordless)
 	ansible-playbook site.yml $(ASKPASS) $(ANSIBLE_ARGS)
+
+# The editor on a box that is not a GX10 - see workstation.yml and
+# group_vars/workstation.yml. Separate targets rather than a flag on `apply`,
+# because these two playbooks provision different kinds of machine and running
+# the wrong one at the wrong box is not a mistake worth making easy.
+#
+# ASKPASS is empty by default here, unlike apply: a workstation is a box you
+# already have sudo on, and -K cannot prompt from a non-tty. Pass ASKPASS=-K if
+# yours needs a password.
+.PHONY: workstation-diff
+workstation-diff: inventory  ## Dry run of the editor install on a workstation
+	ansible-playbook workstation.yml $(WS_ASKPASS) --check --diff $(ANSIBLE_ARGS)
+
+.PHONY: workstation
+workstation: inventory  ## Install the editor on a workstation (LIMIT=devbox); proves it works
+	ansible-playbook workstation.yml $(WS_ASKPASS) $(ANSIBLE_ARGS)
 
 .PHONY: verify
 verify: inventory  ## Assert the node is in the expected state; fails loudly if not

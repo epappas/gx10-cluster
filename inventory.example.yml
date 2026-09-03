@@ -77,3 +77,24 @@ all:
         # and ansible prompts once per RUN, not once per host, so every node
         # must accept the same sudo password.
         ansible_user: "{{ gx10_user }}"
+
+    # NOT gx10 hardware either, and unlike `cpu` this group is not inert: it is
+    # the target of workstation.yml, which installs the editor and nothing else.
+    # See group_vars/workstation.yml for what a workstation does NOT get.
+    #
+    # devbox is a personal VPS, x86_64 Ubuntu, and it is the reason every
+    # download URL in roles/editor, roles/dev_go and the apt repo lines is now
+    # spelled with an arch_* variable instead of a literal arm64 - see the
+    # arch_* block in group_vars/all.yml.
+    #
+    # ansible_port, because sshd there listens on 2222 and port 22 is refused
+    # outright. ansible_host is the tailnet name rather than the public
+    # address: it resolves on this machine, and the public one is not where a
+    # provisioning run should be sending an SSH session it holds open.
+    workstation:
+      hosts:
+        devbox:
+          ansible_host: devbox.nord
+          ansible_port: 2222
+      vars:
+        ansible_user: "{{ gx10_user }}"
