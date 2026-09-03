@@ -92,6 +92,19 @@ end
 --- headless neovim does not have and then exits 0 regardless - so without this
 --- a half-restored plugin tree provisions "successfully" and the editor is
 --- quietly missing whatever failed to clone.
+---
+--- It walks the plugins this box SPECS, not the lines of the lockfile, and the
+--- difference is load-bearing. Not every box gets every spec: the workstation
+--- group has no lua/plugins/ai.lua (see nvim_ai_enabled in group_vars), so
+--- codecompanion and its dependencies are never specced there, `Lazy! restore`
+--- correctly does not clone them, and a check that read the lockfile would
+--- fail a box that is exactly right. One lockfile, resolved on a node that
+--- specs everything, still governs both shapes.
+---
+--- Reading it this way also catches the direction the old check could not see
+--- at all: a plugin that is specced and has NO lockfile entry, which is what a
+--- new plugin added without re-running `make nvim-lock` looks like. That one
+--- installs at whatever HEAD is that day, on each box separately.
 function M.plugins()
   local lockfile = vim.fs.joinpath(vim.fn.stdpath("config"), "lazy-lock.json")
   local ok, lock = pcall(function()
@@ -102,29 +115,30 @@ function M.plugins()
     os.exit(1)
   end
 
-  local root = vim.fs.joinpath(vim.fn.stdpath("data"), "lazy")
   local wrong = {}
   local count = 0
-  for name, info in pairs(lock) do
+  for _, plugin in ipairs(require("lazy").plugins()) do
     -- lazy.nvim is the one plugin the lockfile does NOT own: ansible clones it
     -- at the tag in lazy_nvim_version and re-checks that tag out on every
     -- apply, so its version has a source of truth already. lazy writes itself
     -- into the lockfile anyway whenever :Lazy sync runs, and the two then
     -- disagree - which is what this skip (and the missing entry in the
     -- committed lockfile) exists to prevent.
-    if name == "lazy.nvim" then goto continue end
-    count = count + 1
-    local dir = vim.fs.joinpath(root, name)
-    if vim.fn.isdirectory(dir) == 0 then
-      wrong[#wrong + 1] = name .. ": not installed"
-    else
-      local head = vim.system({ "git", "-C", dir, "rev-parse", "HEAD" }, { text = true }):wait()
-      local at = (head.stdout or ""):gsub("%s+$", "")
-      if at ~= info.commit then
-        wrong[#wrong + 1] = ("%s: at %s, locked to %s"):format(name, at:sub(1, 8), info.commit:sub(1, 8))
+    if plugin.name ~= "lazy.nvim" then
+      count = count + 1
+      local locked = lock[plugin.name]
+      if not locked then
+        wrong[#wrong + 1] = plugin.name .. ": specced but absent from lazy-lock.json"
+      elseif vim.fn.isdirectory(plugin.dir) == 0 then
+        wrong[#wrong + 1] = plugin.name .. ": not installed"
+      else
+        local head = vim.system({ "git", "-C", plugin.dir, "rev-parse", "HEAD" }, { text = true }):wait()
+        local at = (head.stdout or ""):gsub("%s+$", "")
+        if at ~= locked.commit then
+          wrong[#wrong + 1] = ("%s: at %s, locked to %s"):format(plugin.name, at:sub(1, 8), locked.commit:sub(1, 8))
+        end
       end
     end
-    ::continue::
   end
 
   if #wrong > 0 then

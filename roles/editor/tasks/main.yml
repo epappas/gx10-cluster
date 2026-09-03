@@ -383,12 +383,33 @@
   become_user: "{{ primary_user }}"
   become: true
 
-# The hash of the lockfile IS the stamp. `Lazy! restore` is not free - it runs
-# a git fetch per plugin - so it must not run on every apply, and the only
-# thing that should trigger it is the lockfile changing.
-- name: Stamp the plugin set with the lockfile's hash
-  ansible.builtin.set_fact:
-    nvim_lock_hash: "{{ lookup('file', 'nvim/lazy-lock.json') | hash('sha1') }}"
+# `Lazy! restore` is not free - a git fetch per plugin - so it must not run on
+# every apply, and the guard is the ANSWER rather than a record of the question.
+#
+# It used to be a stamp file named after the lockfile's hash, which says "a
+# restore was attempted for this lockfile" - not "the plugins are at those
+# commits", and the difference is not theoretical. It cost a whole provision on
+# devbox: the restore ran, pinned every plugin, wrote the stamp, and seven
+# freshly cloned plugins were then moved BACK to their branch HEAD (see the
+# double restore below) - so the box was left off the lockfile with a stamp
+# saying it was done, and every later apply skipped the one task that would
+# have repaired it.
+#
+# This is the same correction the parsers task below already carries, for the
+# same reason and now for the second time. The check costs ~0.3s when the tree
+# is right, which is most of the time.
+- name: Check whether every plugin is already at its locked commit
+  ansible.builtin.command: nvim --headless -c 'lua require("gx10.provision").plugins()' +qa
+  become_user: "{{ primary_user }}"
+  become: true
+  register: nvim_plugins_locked
+  changed_when: false
+  failed_when: false
+  # It only reads, and a skipped probe under --check would leave rc undefined
+  # and make the restore below look mandatory on a perfectly good box.
+  check_mode: false
+  environment:
+    PATH: "/usr/local/bin:{{ ansible_facts['env']['PATH'] }}"
 
 # restore, NOT sync or update. sync resolves every plugin to its branch HEAD
 # and rewrites the lockfile, which would make each box's plugin set a function
@@ -401,16 +422,28 @@
   ansible.builtin.shell:
     cmd: |
       set -e
+      # TWICE, and it is not superstition. The first pass is also the initial
+      # CLONE, and lazy finishes an install by checking the plugin out to what
+      # its spec asks for - which for a spec with no version is the branch
+      # HEAD, and which happens after restore has already pinned it. Seven
+      # plugins on devbox went clone -> locked commit -> back to HEAD inside
+      # this one command; the git reflog in each of them shows all three moves.
+      # The second pass has nothing left to clone, so its restore is the last
+      # word.
+      nvim --headless "+Lazy! restore" +qa
       nvim --headless "+Lazy! restore" +qa
       # restore reports its failures to a UI headless neovim does not have and
       # exits 0 either way, so the tree is CHECKED against the lockfile rather
-      # than assumed. The stamp is written last: an interrupted or partial
-      # restore is retried on the next run rather than remembered as done.
+      # than assumed. set -e makes that check the task's exit code: a partial
+      # restore fails the play here instead of being remembered as done.
       nvim --headless -c 'lua require("gx10.provision").plugins()' +qa
-      touch "$HOME/.local/state/nvim/.gx10-plugins-{{ nvim_lock_hash }}"
-    creates: "{{ primary_home }}/.local/state/nvim/.gx10-plugins-{{ nvim_lock_hash }}"
   become_user: "{{ primary_user }}"
   become: true
+  when: nvim_plugins_locked.rc | default(1) != 0
+  # It ran only because the check above found the tree off its locked commits,
+  # and set -e means reaching the end is proof it moved them back. There is no
+  # no-op path through this task to report ok for.
+  changed_when: true
   environment:
     PATH: "/usr/local/bin:{{ ansible_facts['env']['PATH'] }}"
 
