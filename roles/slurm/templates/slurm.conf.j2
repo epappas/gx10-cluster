@@ -27,6 +27,22 @@ SlurmdLogFile=/var/log/slurm/slurmd.log
 # Jobs here are long training runs, not batch scripts that finish in seconds.
 SlurmctldTimeout=120
 SlurmdTimeout=300
+
+# A node that power-cycles must come back on its own. Slurm's default is
+# ReturnToService=0, which leaves a node DOWN until a human runs `scontrol
+# update ... State=RESUME` - so a node that lost power at 03:00 and rebooted
+# fine at 03:05 is still out of the partition at 09:00. Worse here than on a
+# normal cluster: NodeAddr is the interconnect, so ONE node losing power drops
+# the controller's own address with it and BOTH nodes land in DOWN, including
+# the one that never went anywhere.
+#
+# 2 and not 1: `1` only readmits a node whose reason was "Not responding", and
+# the node that actually rebooted gets "Node unexpectedly rebooted" instead, so
+# `1` would readmit the innocent node and leave the crashed one out.
+#
+# This does NOT paper over a bad node - it readmits only on registration with a
+# valid configuration, and a node that fails that check stays DOWN.
+ReturnToService=2
 InactiveLimit=0
 MinJobAge=300
 KillWait=30
