@@ -37,6 +37,7 @@ Do the arithmetic before you start:
 | [`vllm-2node-tp2`](../../workspaces/inference/vllm-2node-tp2/README.md) | The **generic** recipe. Topology and RDMA only — bring your own model |
 | [`vllm-2node-deepseek-v4-flash`](../../workspaces/inference/vllm-2node-deepseek-v4-flash/README.md) | The **DeepSeek-V4** recipe. Adds the v4 tokenizer mode, parsers, FP4 indexer cache and DSpark drafts |
 | [`vllm-2node-glm53-flash-exl3`](../../workspaces/inference/vllm-2node-glm53-flash-exl3/README.md) | The **GLM-5.3-Flash** recipe. EXL3 4bpw, 1M context, vision, DFlash2 drafts — and the only one that does **not** run an upstream image |
+| [`vllm-2node-qwen38-flash-next`](../../workspaces/inference/vllm-2node-qwen38-flash-next/README.md) | The **Qwen3.8-Flash-Next** recipe. NVFP4 + expert parallel + MTP3, **1M context measured**, and three vLLM patches this repo had to write itself |
 
 They share one launcher, `workspaces/lib/twonode.sh`, and nothing else. The test
 of that split: **anything whose value depends on the model stays in the

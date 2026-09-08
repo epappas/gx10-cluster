@@ -2335,3 +2335,134 @@ and nothing else can — so the default is also the choice where the buffer neve
 leaves the machine.
 
 → [edit-code](runbooks/edit-code.md)
+
+## <a name="qwen38-flash-next"></a>Qwen3.8-Flash-Next: the port where the licence decided the scope
+
+[MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks)
+is the only published two-node GB10 configuration for this model, and it is the
+third recipe from that lab this repo has mined ([#two-node-vllm](#two-node-vllm),
+[#glm53-flash](#glm53-flash)). The pattern held: most of it is model plumbing
+around a small amount of transferable knowledge.
+
+What did **not** hold is the usual answer to "so copy the good parts".
+
+### The licence is the constraint, and it is not a formality
+
+Their repository is **AGPL-3.0-or-later**; this one is MIT. Only
+`files/ple_offload/*` and `ple_layer_patched.py` carry an explicit
+`SPDX-License-Identifier: Apache-2.0` — they are vLLM's own files. Everything
+else, including all five patch scripts and all five benchmark scripts, carries
+no header and is therefore AGPL by the repository licence.
+
+Their README says as much about its own vendoring: `patch_qsa_fp8_kv.py` and
+`build_draft_vocab.py` came from a third repo, are AGPL, and *"the repository
+that carries them has to be too"*. That is the mechanism working as intended,
+and it applies to us identically.
+
+So the options were: relicense this repository, isolate the imported files under
+a second licence, or **re-implement from the documented mechanism**. Their
+README specifies each fix precisely enough to do the third — which is what
+`workspaces/inference/vllm-2node-qwen38-flash-next` does, and why its helper
+scripts carry a note saying so.
+
+The two files they explicitly vendored are the two this repo left alone.
+
+### Taken
+
+| From them | Why it matters |
+|---|---|
+| **The serve line** — TP2 + `--enable-expert-parallel`, `--all2all-backend allgather_reducescatter`, `--mm-encoder-tp-mode data`, MTP3, `FULL_DECODE_ONLY` graphs, lazy safetensors | Transcribed from a `docker inspect` of a server that was running and measured. Not derived, not guessed |
+| **`REQUIRE_IDLE_GPU`** | Promoted into `lib/twonode.sh` for **every** two-node workspace, not just this one. See below |
+| **The `--hf-overrides` nesting bug** | They shipped `rope_parameters` at the top level for months, where vLLM `setattr`s it onto the parent config and it never reaches `text_config`. Every earlier "1M context" run served 1M positions on *unscaled* rope. A silent no-op of exactly the shape this repo keeps finding |
+| **The MTP MoE preflight** | `ModelOptMixedPrecisionConfig.get_quant_method` returns `None` for an algo it cannot build, yielding a silently *unquantized* MoE that dies ~7 minutes into the load. Checking the checkpoint's own metadata costs milliseconds |
+| **Decode varies by content type** | ~70 tok/s on copy-from-context against ~40 on prose, one server, one config. That is acceptance, not hardware — and it makes every single-number decode claim in this repo a statement about a corpus. Now `workspaces/bench/decode-content-mix` |
+| **The quality argument for fp8 KV** | Quantised *keys* change which blocks the sparse indexer **selects**, so the failure mode is a wrong answer rather than a slower one. Now `workspaces/bench/quant-quality-ab`, generalised past this one model |
+
+### Not taken
+
+- **All five of their patch scripts, as code.** Licence, above. The two
+  mandatory ones are specified in the workspace's `patches/README.md` and
+  written against sources extracted from the image; `up.sh` refuses to launch
+  until they exist rather than failing seven minutes in.
+- **`patch_qsa_fp8_kv.py`**, and therefore fp8 KV on this model. It is worth
+  1.70× the tokens per GiB and it is the file they themselves flagged as
+  vendored AGPL. The workspace ships `--kv-cache-dtype auto` and says why.
+- **Reduced-vocabulary MTP drafting.** Their own table retires it: acceptance
+  56.5% → 47.8%, and the `copy` task ends up *below* the full-vocabulary
+  baseline. They are honest that bandwidth and acceptance pull in opposite
+  directions. A wash is not worth a patch.
+- **The FP8-dense hybrid checkpoint builder** and **the QSA GB10 launch
+  profiles.** Both explicitly **not measured on GPU** — "run the §6 benchmark
+  before trusting it" and "a starting point, not a result". This repo does not
+  carry unmeasured optimisations, and
+  [#benchmarks-are-upstream-tools](#benchmark-tooling) is the same rule.
+- **`PLE_OFFLOAD`.** Needs ~51 GB of free CPU RAM against the 44.92 GiB their
+  own launch log reported available. They keep it off; exposing it would be
+  exposing a way to thrash swap.
+- **Their fabric addressing and `NCCL_IB_HCA` pinning.** The same disagreement
+  already recorded at [#two-node-vllm](#two-node-vllm), for the same measured
+  reason. Nothing new here.
+- **`mtp_accept.py`.** `spec-decode-accept` already reads acceptance per draft
+  *position*, which is strictly more and is the resolution that catches a
+  drafter healthy at position 0 and collapsed after it.
+- **Their `html/` directory.** 100 unrelated design pages. Mentioned only
+  because half the repository is that, and a reader going looking should not
+  conclude they have the wrong URL.
+
+### The image, and why this is a weaker exception than GLM-5.3 was
+
+This model needs `vllm/vllm-openai:qwen38-flash-next`, not
+`nightly-aarch64`. [#glm53-flash](#glm53-flash) set out when that is
+acceptable: upstream genuinely cannot serve the model, so declining the image
+costs the model rather than a few percent.
+
+Here the test is *softer*, and the honest thing is to say so rather than to
+claim the precedent covers it cleanly:
+
+|  | GLM-5.3-Flash | Qwen3.8-Flash-Next |
+|---|---|---|
+| Published by | a third party | **vLLM itself** |
+| Upstream can serve it | no, and no flag fixes it | day-0 build; the gaps are patches, not a missing quant method |
+| Declining costs | the model | the model **today** |
+
+It is a vendor day-0 tag rather than someone's fork, so the release-cadence
+argument that declined `ghcr.io/anemll/dspark-vllm-gx10` bites much less. But
+one gap — no `FP8_BLOCK_SCALES` branch for routed experts — is **in upstream
+vLLM too**, at the commit their model card recommends and on current `main`. So
+"wait for upstream" is not a plan with a date on it, and the blast radius is
+one workspace either way.
+
+### <a name="idle-gpu-preflight"></a>Improved on: the idle-GPU check belongs in the library
+
+Their `REQUIRE_IDLE_GPU` aborts a launch when `nvidia-smi` shows a compute
+process on either node. This repo had nothing like it, and `ws check` says
+outright that it can only measure the node it runs on.
+
+That gap has a specific, badly-signposted failure attached to it. On unified
+memory a peer with a desktop session resident does not make the launch *slow* —
+it makes rank 1 refuse at vLLM's free-memory check about a minute in, and rank 0
+then reports the peer's death as a gloo `Connection closed by peer`, which
+points at the **network**. That is the same misdiagnosis
+[#glm53-flash](#glm53-flash) already records paying for once.
+
+So it went into `lib/twonode.sh` rather than into the workspace that ported it —
+every two-node recipe here has the same exposure. It is **opt-in**, because
+"another process holds a GPU" is fatal at 0.835 utilisation and perfectly fine
+at 0.40, and the library cannot tell which one it is looking at. It queries
+compute *processes* rather than a free-memory threshold: on unified memory the
+free number moves with the page cache, so a threshold either fires on a healthy
+node or never fires at all.
+
+### Recorded, not acted on
+
+- **NFS weight sharing.** The head exports its HF cache and the worker mounts it
+  read-only, trading ~126 GiB of worker disk for a cold start that streams every
+  shard over the cable and a head that must stay up for the whole serving run.
+  Marginal here — 413 GB free and `twonode_stage_model` already moves a
+  checkpoint at 534 MB/s — but it is the answer for a V4-Pro-class checkpoint
+  where the second copy genuinely does not fit.
+- **Their `.env` overrides the environment**, so `FOO=x ./start.sh` is silently
+  ignored for anything `.env` defines. Ours has the identical trap for the
+  identical reason (`set -a; . ./.env`). Documented in the new workspace's
+  `.env.example` rather than fixed, because fixing it would make our `.env`
+  behave unlike every other one in this directory.

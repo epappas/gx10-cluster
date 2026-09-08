@@ -1,0 +1,421 @@
+#!/usr/bin/env python3
+"""Did a quantisation change the ANSWERS? Graded tasks, A/B against a baseline.
+
+`vllm-quality-gate` looks for serving-layer faults and says outright that it
+does not judge model quality. That leaves the question this repo's own quant
+knobs actually raise:
+
+  fp8 KV on sparse attention   quantised KEYS change which blocks the indexer
+                               SELECTS, not merely the attention output - so
+                               the failure mode is a WRONG ANSWER, not a slow one
+  FP8 dense projections        ~2.6% relative RMSE per tensor at the E4M3 floor
+  reduced draft vocabulary     output-safe, but its acceptance cost belongs
+                               next to the rest of the picture
+
+None of those moves a tok/s number, and none trips a serving detector.
+
+METHOD, and each choice is load-bearing:
+
+  GREEDY        temperature 0, fixed seed where the server honours one. A
+                comparison between two SAMPLED runs measures the sampler.
+  MACHINE-GRADED every task has an answer checkable by substring, so the score
+                is not another model's opinion.
+  REASONING-STRIPPED the answer is graded after the reasoning block is removed.
+                A model that reasons its way to the right answer and a model
+                that states it are the same result here.
+  A/B, NOT A THRESHOLD  there is no defensible absolute score for "correct".
+                The honest question is whether this server answers the same as
+                it did before the knob moved.
+  NEEDLES AT DEPTH  the specific probe for KV quantisation: retrieval from a
+                long context is what block selection decides.
+
+    ws up quant-quality-ab --save bf16.json                 # baseline
+    # ... change KV_CACHE_DTYPE, restart the server ...
+    ws up quant-quality-ab --save fp8.json --compare bf16.json
+
+A run with no baseline prints a score and exits 0 - it IS the baseline, not a
+verdict. With --compare the exit status is about the delta.
+
+Task design and the KV-quantisation failure mode follow
+MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks (AGPL-3.0-or-later); this is an
+independent implementation. See docs/decisions.md#qwen38-flash-next.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.request
+import uuid
+
+BASE_URL = os.environ.get("BASE_URL", "http://127.0.0.1:8888/v1")
+API_KEY = os.environ.get("API_KEY") or os.environ.get("VLLM_API_KEY") or ""
+
+c_red = "\033[31m"; c_grn = "\033[32m"; c_yel = "\033[33m"
+c_dim = "\033[2m"; c_bold = "\033[1m"; c_off = "\033[0m"
+
+# (name, prompt, [accepted answers, lowercased])
+#
+# Every one of these has a single checkable answer and NONE of them is a
+# knowledge question - the point is to measure whether the ARITHMETIC and the
+# RETRIEVAL survived a quant change, not what the model knows.
+REASONING_TASKS = [
+    ("arith_chain",
+     "Compute step by step: ((17 * 23) + 149) / 4 - 37. "
+     "Give the final numeric answer last.",
+     ["98"]),
+    ("trains",
+     "Train A leaves at 15:00 travelling 80 km/h. Train B leaves the same "
+     "station at 16:00 travelling 100 km/h on the same track. At what clock "
+     "time does B catch A? Give the time as HH:MM.",
+     ["20:00", "8:00 pm", "8 pm"]),
+    ("logic_grid",
+     "Alice, Bob and Carol have a cat, a dog and a bird, in some order. Alice "
+     "does not have the bird. Bob does not have the dog and does not have the "
+     "bird. Who has the bird? Answer with just the name.",
+     ["carol"]),
+    ("units",
+     "A tank holds 3.5 cubic metres. How many litres is that? "
+     "Answer with just the number.",
+     ["3500", "3,500"]),
+    ("date_arith",
+     "If today is Tuesday, what day of the week is it 100 days from now? "
+     "Answer with just the day name.",
+     ["thursday"]),
+    ("counting",
+     "How many times does the letter 'r' appear in the word "
+     "'strawberry-preserver'? Answer with just the number.",
+     # SIX, not five. This shipped as ["5"] and the first real run convicted a
+     # server that had answered correctly - strawberry has three r's and
+     # preserver has three. A grader that is itself wrong is worse than no
+     # grader: it reports a regression that is not there, and the tool gets
+     # muted. tests/check_quant_ab.py now verifies every accepted answer
+     # against a computable ground truth for exactly this reason.
+     ["6"]),
+    ("order_of_ops",
+     "Evaluate: 2 + 3 * 4 ** 2 - 6 / 3. Answer with just the number.",
+     ["48"]),
+    ("indirection",
+     "x = 7. y = x * 3. z = y - x. What is z * 2? Answer with just the number.",
+     ["28"]),
+]
+
+# Needles, planted at depth in filler. THE probe for KV quantisation: block
+# selection is what decides whether a token deep in the context is retrievable.
+FILLER = ("Entry {i:06d}: the quarterly logistics audit recorded a routine "
+          "variance in the northbound depot inventory.\n")
+NEEDLES = [
+    (0.05, "alpha", "7391-CORAL"),
+    (0.50, "bravo", "2648-INDIGO"),
+    (0.95, "charlie", "5127-SAFFRON"),
+]
+
+# REASONING AT DEPTH, which is a different question from retrieval and the one
+# retrieval is often mistaken for.
+#
+# A needle proves the model can find a literal string. It does NOT prove the
+# model can USE what it found: combining two facts planted 80% of the context
+# apart, comparing them, or - hardest and most neglected - correctly reporting
+# that something is NOT there. Extended rope (YaRN) and KV quantisation can
+# both leave retrieval intact while degrading the second thing, because a
+# single sharp lookup survives perturbation that a multi-step combination does
+# not.
+#
+# Facts are planted FAR APART on purpose. A pair at 8% and 92% cannot be
+# answered from one attention neighbourhood, so a correct answer is evidence
+# the model held both across the whole window.
+FACTS = [
+    (0.08, "The alpha depot holds exactly 47 sealed crates."),
+    (0.30, "The bravo depot holds exactly 23 sealed crates."),
+    (0.62, "The gamma depot holds exactly 15 sealed crates."),
+    (0.92, "The alpha depot was audited in March; bravo was audited in July."),
+]
+
+# (name, question, [accepted answers, lowercased])
+#
+# Every one needs at least two facts from different depths, except `absence`,
+# which needs the model to NOT invent one. That last task is the guard on the
+# whole suite: a model that confabulates an answer to it would also "pass"
+# needles by confabulating, and the suite would report a healthy server.
+DEEP_TASKS = [
+    ("deep_sum",
+     "Using only the depot information above, how many sealed crates do the "
+     "alpha and bravo depots hold in total? Answer with just the number.",
+     ["70"]),
+    ("deep_three_sum",
+     "Using only the depot information above, how many sealed crates do alpha, "
+     "bravo and gamma hold in total? Answer with just the number.",
+     ["85"]),
+    ("deep_compare",
+     "Using only the depot information above, which single depot holds the "
+     "most sealed crates? Answer with just the depot name.",
+     ["alpha"]),
+    ("deep_difference",
+     "Using only the depot information above, how many more sealed crates does "
+     "alpha hold than gamma? Answer with just the number.",
+     ["32"]),
+    ("deep_order",
+     "Using only the information above, which depot was audited first, alpha "
+     "or bravo? Answer with just the depot name.",
+     ["alpha"]),
+]
+
+# The absence task is graded differently - by REFUSAL rather than by a value -
+# so it carries its own accepted-phrase list.
+ABSENCE_TASK = (
+    "absence_guard",
+    "Using only the depot information above, how many sealed crates does the "
+    "delta depot hold? If the delta depot is not mentioned, say exactly: "
+    "NOT MENTIONED.",
+    ["not mentioned", "not menti", "no delta", "not present", "not found",
+     "isn't mentioned", "is not mentioned", "does not appear", "no mention"],
+)
+
+REASONING_RE = re.compile(
+    r"<think>.*?</think>|<reasoning>.*?</reasoning>", re.S | re.I)
+
+
+def post(path: str, payload: dict, timeout: int = 900) -> dict:
+    headers = {"Content-Type": "application/json"}
+    if API_KEY:
+        headers["Authorization"] = f"Bearer {API_KEY}"
+    req = urllib.request.Request(
+        BASE_URL.rstrip("/") + path,
+        data=json.dumps(payload).encode(),
+        headers=headers,
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode())
+
+
+def discover_model() -> str:
+    """Whatever this server is serving. Asking beats hardcoding a name."""
+    if os.environ.get("MODEL"):
+        return os.environ["MODEL"]
+    headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY else {}
+    req = urllib.request.Request(BASE_URL.rstrip("/") + "/models", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read().decode())["data"][0]["id"]
+    except (urllib.error.URLError, OSError, KeyError, IndexError, json.JSONDecodeError):
+        return "unknown"
+
+
+def strip_reasoning(text: str) -> str:
+    return REASONING_RE.sub(" ", text or "")
+
+
+def ask(model: str, prompt: str, max_tokens: int) -> tuple[str, float]:
+    """One greedy completion. Returns (visible answer, wall seconds)."""
+    t0 = time.time()
+    doc = post("/chat/completions", {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        # Greedy. A comparison between two sampled runs measures the sampler.
+        "temperature": 0,
+        "top_p": 1,
+        "seed": 20260908,
+        "max_tokens": max_tokens,
+    })
+    wall = time.time() - t0
+    choice = (doc.get("choices") or [{}])[0]
+    msg = choice.get("message") or {}
+    # Some builds put the trace in a sibling field rather than inline; either
+    # way the graded text is the visible content with any inline block removed.
+    return strip_reasoning(msg.get("content") or ""), wall
+
+
+def graded(answer: str, accepted: list[str]) -> bool:
+    low = answer.lower()
+    return any(a in low for a in accepted)
+
+
+def build_haystack(target_tokens: int, tokenizer_url: str | None) -> tuple[str, str]:
+    """Filler with needles planted at depth, plus a unique salt.
+
+    The salt goes FIRST so the whole prefix-cache block chain behind it is
+    invalidated - a cached run measures nothing about block selection.
+    """
+    salt = f"session-{uuid.uuid4().hex[:12]}"
+    # ~25 tokens per filler line, per the reference implementation's own
+    # calibration. Approximate is fine: the DEPTHS are fractions of the built
+    # text, so they land where intended regardless of the exact count.
+    lines = max(40, target_tokens // 25)
+    body = [FILLER.format(i=i) for i in range(lines)]
+    # Needles and reasoning facts share one haystack so a single prefill serves
+    # both suites - which is what makes a 985k run affordable at all.
+    planted: set[int] = set()
+
+    def place(depth: float, text: str) -> None:
+        at = min(len(body) - 1, int(len(body) * depth))
+        # Never overwrite an earlier plant: at small --ctx-tokens two depths can
+        # round to the same line, and silently losing a fact would show up as a
+        # reasoning failure that is really a harness bug.
+        while at in planted and at + 1 < len(body):
+            at += 1
+        planted.add(at)
+        body[at] = f"Entry {at:06d}: {text}\n"
+
+    for depth, label, secret in NEEDLES:
+        place(depth, f"the {label} access code is {secret}.")
+    for depth, fact in FACTS:
+        place(depth, fact)
+    return salt, f"Session {salt}.\n" + "".join(body)
+
+
+def run(model: str, ctx_tokens: int, max_tokens: int) -> dict:
+    rows: list[dict] = []
+
+    print(f"{c_bold}reasoning{c_off}  {len(REASONING_TASKS)} graded tasks, greedy")
+    for name, prompt, accepted in REASONING_TASKS:
+        try:
+            answer, wall = ask(model, prompt, max_tokens)
+            ok = graded(answer, accepted)
+            note = ""
+            if not ok and not answer.strip():
+                # Empty content with the budget spent is the reasoning-model
+                # trap: thinking consumed max_tokens. Distinguish it, because
+                # "raise max_tokens" and "the quant broke it" are different bugs.
+                note = "empty (raise --max-tokens?)"
+        except (urllib.error.URLError, OSError, KeyError, json.JSONDecodeError) as exc:
+            answer, wall, ok, note = "", 0.0, False, f"request failed: {exc}"
+        rows.append({"task": name, "kind": "reasoning", "passed": ok,
+                     "seconds": round(wall, 2), "note": note,
+                     "sample": answer.strip()[:200]})
+        mark = f"{c_grn}pass{c_off}" if ok else f"{c_red}FAIL{c_off}"
+        print(f"  {name:<16} {mark}  {c_dim}{note or answer.strip()[:60]}{c_off}")
+
+    print(f"\n{c_bold}needles{c_off}    {len(NEEDLES)} depths in ~{ctx_tokens} tokens of filler")
+    salt, haystack = build_haystack(ctx_tokens, None)
+    for depth, label, secret in NEEDLES:
+        prompt = (f"{haystack}\n\nWhat is the {label} access code mentioned "
+                  f"above? Answer with just the code.")
+        try:
+            answer, wall = ask(model, prompt, max_tokens)
+            ok = graded(answer, [secret.lower()])
+            note = ""
+        except (urllib.error.URLError, OSError, KeyError, json.JSONDecodeError) as exc:
+            answer, wall, ok, note = "", 0.0, False, f"request failed: {exc}"
+        rows.append({"task": f"needle_{label}_{int(depth * 100)}pct",
+                     "kind": "needle", "passed": ok,
+                     "seconds": round(wall, 2), "note": note,
+                     "sample": answer.strip()[:200]})
+        mark = f"{c_grn}pass{c_off}" if ok else f"{c_red}FAIL{c_off}"
+        print(f"  {label:<10} @{int(depth * 100):>3}%   {mark}  "
+              f"{c_dim}{note or answer.strip()[:40]}{c_off}")
+
+    # --- reasoning at depth, on the SAME haystack --------------------------
+    # Retrieval is necessary and not sufficient: these need two facts planted
+    # far apart, combined. `absence_guard` is the one that must NOT produce a
+    # number - it is the check that the rest are not being passed by
+    # confabulation.
+    print(f"\n{c_bold}reasoning at depth{c_off}  {len(DEEP_TASKS) + 1} tasks over "
+          f"facts at {', '.join(f'{int(d*100)}%' for d, _ in FACTS)}")
+    for name, question, accepted in DEEP_TASKS + [ABSENCE_TASK]:
+        prompt = f"{haystack}\n\n{question}"
+        try:
+            answer, wall = ask(model, prompt, max_tokens)
+            ok = graded(answer, accepted)
+            note = ""
+            if not ok and not answer.strip():
+                note = "empty (raise --max-tokens?)"
+        except (urllib.error.URLError, OSError, KeyError, json.JSONDecodeError) as exc:
+            answer, wall, ok, note = "", 0.0, False, f"request failed: {exc}"
+        rows.append({"task": name, "kind": "deep", "passed": ok,
+                     "seconds": round(wall, 2), "note": note,
+                     "sample": answer.strip()[:200]})
+        mark = f"{c_grn}pass{c_off}" if ok else f"{c_red}FAIL{c_off}"
+        print(f"  {name:<18} {mark}  {c_dim}{note or answer.strip()[:50]}{c_off}")
+
+    return {
+        "model": model, "base_url": BASE_URL, "salt": salt,
+        "ctx_tokens": ctx_tokens, "max_tokens": max_tokens,
+        "when": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "rows": rows,
+    }
+
+
+def compare(now: dict, before: dict) -> int:
+    """Regressions only. A task that started passing is reported, not punished."""
+    was = {r["task"]: r["passed"] for r in before["rows"]}
+    regressed, fixed, missing = [], [], []
+    for r in now["rows"]:
+        if r["task"] not in was:
+            missing.append(r["task"])
+        elif was[r["task"]] and not r["passed"]:
+            regressed.append(r)
+        elif not was[r["task"]] and r["passed"]:
+            fixed.append(r["task"])
+
+    n_now = sum(1 for r in now["rows"] if r["passed"])
+    n_was = sum(1 for r in before["rows"] if r["passed"])
+    print(f"\n{c_bold}against {before.get('when', 'baseline')}{c_off}"
+          f"   {n_was}/{len(before['rows'])} -> {n_now}/{len(now['rows'])}")
+
+    if before.get("model") != now.get("model"):
+        # Comparing two different models is a category error, and it is an easy
+        # one to make by forgetting to point BASE_URL at the right port.
+        print(f"  {c_yel}! different model: {before.get('model')} vs "
+              f"{now.get('model')}{c_off}")
+    if missing:
+        print(f"  {c_yel}! not in baseline: {', '.join(missing)}{c_off}")
+    for t in fixed:
+        print(f"  {c_grn}+{c_off} {t} now passes")
+    for r in regressed:
+        print(f"  {c_red}-{c_off} {r['task']} REGRESSED  {c_dim}{r['sample'] or '(empty)'}{c_off}")
+
+    if regressed:
+        print(f"\n{c_red}{c_bold}{len(regressed)} regression(s).{c_off} "
+              f"The quant changed the answers, not just the speed.")
+        return 1
+    print(f"\n{c_grn}{c_bold}no regressions.{c_off}")
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--save", metavar="FILE", help="write this run to FILE")
+    ap.add_argument("--compare", metavar="FILE", help="compare against a saved run")
+    ap.add_argument("--ctx-tokens", type=int, default=8000,
+                    help="approximate filler size for the needle tasks (default 8000)")
+    ap.add_argument("--max-tokens", type=int, default=2048,
+                    help="per-reply budget. Reasoning models spend this THINKING "
+                         "first - an empty answer usually means raise it (default 2048)")
+    ap.add_argument("--model", help="override; otherwise asked of /models")
+    args = ap.parse_args()
+
+    model = args.model or discover_model()
+    print(f"{c_bold}quant-quality-ab{c_off}  {BASE_URL}  model={model}")
+    print(f"{c_dim}greedy, machine-graded, reasoning stripped before grading{c_off}\n")
+
+    now = run(model, args.ctx_tokens, args.max_tokens)
+    passed = sum(1 for r in now["rows"] if r["passed"])
+    print(f"\n{c_bold}{passed}/{len(now['rows'])}{c_off} tasks passed")
+
+    if args.save:
+        with open(args.save, "w") as fh:
+            json.dump(now, fh, indent=2)
+        print(f"{c_dim}saved to {args.save}{c_off}")
+
+    if args.compare:
+        try:
+            with open(args.compare) as fh:
+                before = json.load(fh)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"cannot read baseline {args.compare}: {exc}", file=sys.stderr)
+            return 2
+        return compare(now, before)
+
+    print(f"\n{c_dim}no baseline given - this run IS one. Re-run with "
+          f"--compare after changing the quant.{c_off}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,344 @@
+#!/usr/bin/env python3
+"""Decode tok/s by CONTENT TYPE - the axis a concurrency sweep cannot show.
+
+`vllm-bench-serve` sweeps CONCURRENCY against a corpus of random tokens.
+Random tokens have no structure for a speculative drafter to predict, so every
+number taken through them understates acceptance - identically, which is why
+the sweep still ranks configurations correctly and still misses this entirely.
+
+On the reference kit, batch-1 decode varied by more than 70% across content
+types on ONE server with ONE configuration:
+
+    copy from context   ~70 tok/s     the drafter predicts quoted text nearly
+                                      perfectly
+    code                ~43 tok/s
+    entropy             ~40 tok/s     at temperature 0.8
+    prose               ~40 tok/s     genuine narrative
+
+That spread is acceptance, not hardware. It means a single "decode tok/s"
+number for this cluster is only as meaningful as the corpus behind it, and
+quoting a copy-heavy figure as typical is the mistake this exists to prevent.
+
+    ws up decode-content-mix                          the four tasks
+    ws up decode-content-mix --decode 600             longer runs
+    ws up decode-content-mix --tasks prose,code       a subset
+    ws up decode-content-mix --context 32000          same tasks, deeper context
+
+Every run uses `ignore_eos` so each decodes exactly N tokens - otherwise a task
+that finishes early reports a rate over a shorter, unrepresentative window.
+
+Method and the task set follow MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks
+(AGPL-3.0-or-later); this is an independent implementation. See
+docs/decisions.md#qwen38-flash-next.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.request
+import uuid
+
+BASE_URL = os.environ.get("BASE_URL", "http://127.0.0.1:8888/v1")
+API_KEY = os.environ.get("API_KEY") or os.environ.get("VLLM_API_KEY") or ""
+
+c_red = "\033[31m"; c_grn = "\033[32m"; c_yel = "\033[33m"
+c_dim = "\033[2m"; c_bold = "\033[1m"; c_off = "\033[0m"
+
+FILLER = ("Entry {i:06d}: the quarterly logistics audit recorded a routine "
+          "variance in the northbound depot inventory.\n")
+
+# (name, prompt, temperature, quotes_from_context)
+#
+# The third field is documentation now rather than control flow: EVERY task
+# gets the filler prefix so context is held fixed across the comparison. It
+# still marks which task actually reads the filler back.
+#
+# TEMPERATURE IS PART OF THE TASK, not a global. The entropy task at
+# temperature 0 degenerates into repetition, which a drafter then predicts
+# easily - so it reads as the FASTEST task for exactly the wrong reason. It is
+# the one task here that must not be run greedy, and that is why temperature
+# travels with the task rather than as one flag over all of them.
+TASKS = {
+    "prose": (
+        "Write a flowing, continuous essay about the history of maritime "
+        "navigation. Use ordinary narrative prose, no lists, no headings.",
+        0.0, False),
+    "code": (
+        "Write a complete, heavily-commented Python implementation of a "
+        "red-black tree with insert, delete and search.",
+        0.0, False),
+    "entropy": (
+        "Output a long list of random 12-character uppercase alphanumeric "
+        "license keys, one per line, all different, no commentary.",
+        0.8, False),
+    "copy": (
+        "Reproduce verbatim, in order, entries 000005 through 000034 from the "
+        "log above. Output the lines exactly as they appear.",
+        0.0, True),
+}
+
+SPEC_METRICS = (
+    "vllm:spec_decode_num_drafts_total",
+    "vllm:spec_decode_num_draft_tokens_total",
+    "vllm:spec_decode_num_accepted_tokens_total",
+)
+METRIC_LINE = re.compile(r"^([a-z_:]+)(?:\{[^}]*\})?\s+([0-9.eE+-]+)$", re.M)
+
+
+def _headers() -> dict:
+    h = {"Content-Type": "application/json"}
+    if API_KEY:
+        h["Authorization"] = f"Bearer {API_KEY}"
+    return h
+
+
+def root_url() -> str:
+    """/metrics lives at the ROOT, not under /v1."""
+    return BASE_URL.rstrip("/").removesuffix("/v1")
+
+
+def scrape_metrics() -> dict[str, float] | None:
+    try:
+        req = urllib.request.Request(root_url() + "/metrics", headers=_headers())
+        with urllib.request.urlopen(req, timeout=20) as r:
+            body = r.read().decode()
+    except (urllib.error.URLError, OSError):
+        return None
+    out: dict[str, float] = {}
+    for name, value in METRIC_LINE.findall(body):
+        if name in SPEC_METRICS:
+            out[name] = out.get(name, 0.0) + float(value)
+    return out or None
+
+
+def discover_model() -> str:
+    if os.environ.get("MODEL"):
+        return os.environ["MODEL"]
+    try:
+        req = urllib.request.Request(BASE_URL.rstrip("/") + "/models", headers=_headers())
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read().decode())["data"][0]["id"]
+    except (urllib.error.URLError, OSError, KeyError, IndexError, json.JSONDecodeError):
+        return "unknown"
+
+
+def build_context(target_tokens: int) -> str:
+    """Filler the `copy` task quotes from, salted so no run is a cache hit."""
+    lines = max(40, target_tokens // 25)
+    return (f"Session {uuid.uuid4().hex[:12]}.\n"
+            + "".join(FILLER.format(i=i) for i in range(lines)))
+
+
+def decode_once(model: str, prompt: str, temperature: float,
+                decode: int) -> tuple[int, float, float]:
+    """Returns (completion tokens, DECODE seconds, TTFT seconds).
+
+    STREAMS, AND THE REASON IS NOT CONVENIENCE. A non-streaming request only
+    exposes total wall time, which is prefill + decode. At 1k of context that
+    is a rounding error; at 32k it is about 9 s of a 22 s request, so a
+    "decode tok/s" computed from it is roughly 40% a measure of PREFILL.
+
+    MEASURED consequence of getting this wrong: at 32k the four tasks stopped
+    ranking by acceptance at all - prose showed higher acceptance than entropy
+    and lower throughput - because the number being compared was mostly
+    prefill variance. The tool exists to attribute a spread to acceptance, so
+    it has to measure the half of the request acceptance acts on.
+
+    Decode time is therefore first-token to last-token. TTFT is returned
+    alongside rather than folded in, because it is a real cost and hiding it
+    would be the opposite mistake.
+
+    ignore_eos so the run is exactly `decode` tokens long - a task that stops
+    early otherwise reports its rate over a shorter, easier window.
+    """
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": temperature,
+        "max_tokens": decode,
+        "ignore_eos": True,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    if temperature == 0:
+        payload["seed"] = 20260908
+    req = urllib.request.Request(
+        BASE_URL.rstrip("/") + "/chat/completions",
+        data=json.dumps(payload).encode(), headers=_headers())
+
+    t0 = time.time()
+    first = None
+    last = t0
+    got = 0
+    with urllib.request.urlopen(req, timeout=1800) as r:
+        for raw in r:
+            line = raw.decode().strip()
+            if not line.startswith("data:"):
+                continue
+            body = line[5:].strip()
+            if body == "[DONE]":
+                break
+            try:
+                chunk = json.loads(body)
+            except json.JSONDecodeError:
+                continue
+            # The usage chunk arrives last and carries the authoritative count.
+            usage = chunk.get("usage")
+            if usage and usage.get("completion_tokens"):
+                got = int(usage["completion_tokens"])
+            choices = chunk.get("choices") or []
+            if not choices:
+                continue
+            delta = choices[0].get("delta") or {}
+            # ANY delta ends prefill - including the empty role chunk, and
+            # including reasoning, which this model streams separately from
+            # content and which is still decoded output.
+            if delta:
+                now = time.time()
+                if first is None:
+                    first = now
+                last = now
+    ttft = (first - t0) if first else 0.0
+    decode_s = (last - first) if first and last > first else 0.0
+    return got, decode_s, ttft
+
+
+def acceptance(before: dict | None, after: dict | None) -> tuple[float | None, float | None]:
+    """Acceptance ratio and accepted-per-draft, as a DELTA around one task.
+
+    Cumulative counters mix in every request the server has ever served,
+    including other clients, so only a delta says anything about this task.
+    """
+    if not before or not after:
+        return None, None
+    d = {k: after.get(k, 0.0) - before.get(k, 0.0) for k in SPEC_METRICS}
+    drafts = d.get("vllm:spec_decode_num_drafts_total", 0.0)
+    draft_tokens = d.get("vllm:spec_decode_num_draft_tokens_total", 0.0)
+    accepted = d.get("vllm:spec_decode_num_accepted_tokens_total", 0.0)
+    ratio = accepted / draft_tokens if draft_tokens > 0 else None
+    per_step = accepted / drafts if drafts > 0 else None
+    return ratio, per_step
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--decode", type=int, default=400, help="tokens per run (default 400)")
+    ap.add_argument("--context", type=int, default=1000,
+                    help="approximate filler tokens for the copy task (default 1000)")
+    ap.add_argument("--tasks", default=",".join(TASKS),
+                    help=f"comma-separated subset of {','.join(TASKS)}")
+    ap.add_argument("--repeat", type=int, default=1, help="runs per task, averaged")
+    ap.add_argument("--model", help="override; otherwise asked of /models")
+    ap.add_argument("--json", action="store_true", help="also dump raw results")
+    args = ap.parse_args()
+
+    wanted = [t.strip() for t in args.tasks.split(",") if t.strip()]
+    unknown = [t for t in wanted if t not in TASKS]
+    if unknown:
+        print(f"unknown task(s): {', '.join(unknown)}. known: {', '.join(TASKS)}",
+              file=sys.stderr)
+        return 2
+
+    model = args.model or discover_model()
+    context = build_context(args.context)
+    spec_seen = scrape_metrics() is not None
+
+    print(f"{c_bold}decode-content-mix{c_off}  {BASE_URL}  model={model}")
+    print(f"{c_dim}{args.decode} tokens per run, ignore_eos, batch 1"
+          f"{'' if spec_seen else ' - no spec_decode metrics on this server'}{c_off}\n")
+    print(f"  {'task':<9} {'temp':>4}  {'tok/s':>7}  {'TTFT':>7}  {'accept':>7}  {'per step':>8}")
+
+    rows = []
+    for name in wanted:
+        prompt, temp, _ = TASKS[name]
+        # EVERY task gets the SAME filler prefix, not just `copy`.
+        #
+        # It used to go only to the task that quotes from it, and that made the
+        # cross-task comparison invalid the moment --context was raised: at
+        # 32000, `copy` decoded against 32k of KV while the other three
+        # attended over ~50 tokens. MEASURED consequence - copy came out
+        # SLOWEST (23.2 tok/s) while holding the HIGHEST acceptance (82.2%),
+        # which reads as "acceptance does not predict throughput" and is really
+        # "these four numbers were not taken under the same conditions".
+        #
+        # Context is the variable this tool holds FIXED so content can vary.
+        full = f"{context}\n\n{prompt}"
+        rates, ratios, steps, ttfts = [], [], [], []
+        failed = None
+        for _ in range(max(1, args.repeat)):
+            before = scrape_metrics()
+            try:
+                got, decode_s, ttft = decode_once(model, full, temp, args.decode)
+            except (urllib.error.URLError, OSError, KeyError, json.JSONDecodeError) as exc:
+                failed = str(exc)
+                break
+            after = scrape_metrics()
+            if got and decode_s > 0:
+                rates.append(got / decode_s)
+                ttfts.append(ttft)
+            ratio, per_step = acceptance(before, after)
+            if ratio is not None:
+                ratios.append(ratio)
+            if per_step is not None:
+                steps.append(per_step)
+
+        if failed or not rates:
+            print(f"  {name:<9} {temp:>4}  {c_red}{'failed':>7}{c_off}          "
+                  f"{c_dim}{failed or 'no tokens returned'}{c_off}")
+            rows.append({"task": name, "error": failed or "no tokens"})
+            continue
+
+        rate = sum(rates) / len(rates)
+        ratio = sum(ratios) / len(ratios) if ratios else None
+        per_step = sum(steps) / len(steps) if steps else None
+        ttft = sum(ttfts) / len(ttfts) if ttfts else 0.0
+        print(f"  {name:<9} {temp:>4}  {rate:>7.1f}  {ttft:>6.2f}s  "
+              f"{(f'{ratio:>6.1%}' if ratio is not None else f'{c_dim}     -{c_off}')}  "
+              f"{(f'{per_step:>8.2f}' if per_step is not None else f'{c_dim}       -{c_off}')}")
+        rows.append({"task": name, "temperature": temp, "tok_s": round(rate, 1),
+                     "ttft_s": round(ttft, 3),
+                     "acceptance": ratio, "accepted_per_step": per_step,
+                     "runs": len(rates)})
+
+    ok = [r for r in rows if "tok_s" in r]
+    if len(ok) > 1:
+        fast = max(ok, key=lambda r: r["tok_s"])
+        slow = min(ok, key=lambda r: r["tok_s"])
+        spread = fast["tok_s"] / slow["tok_s"] if slow["tok_s"] else 0
+        print(f"\n  {c_bold}{spread:.2f}x spread{c_off} between "
+              f"{fast['task']} ({fast['tok_s']:.1f}) and "
+              f"{slow['task']} ({slow['tok_s']:.1f})")
+        if spread > 1.3:
+            print(f"  {c_yel}Do not quote one of these as 'decode tok/s' for this "
+                  f"cluster.{c_off}")
+            print(f"  {c_dim}The spread is speculative-decode acceptance, not the "
+                  f"hardware. `copy` is the best case and is not typical.{c_off}")
+    if len(ok) > 1:
+        # THE TTFT COLUMN IS ORDER-DEPENDENT AND MUST SAY SO. Every task shares
+        # the same filler context - that is what makes the decode comparison
+        # controlled - so the FIRST task pays the cold prefill and the rest hit
+        # the prefix cache. Measured at 32k: 9.92s, then 2.34 / 1.11 / 0.79.
+        # Reading that as "prose has bad TTFT" is exactly wrong; it is the only
+        # cold number in the column. Use vllm-prefill-ladder for real TTFT.
+        print(f"  {c_dim}TTFT: the FIRST task pays the cold prefill and the rest "
+              f"hit the prefix cache on the shared context.")
+        print(f"  Do not compare TTFT across rows here - use vllm-prefill-ladder."
+              f"{c_off}")
+    if "entropy" in wanted:
+        print(f"  {c_dim}entropy runs at 0.8 on purpose: at temperature 0 it "
+              f"degenerates into repetition, which the drafter predicts easily.{c_off}")
+
+    if args.json:
+        print(json.dumps({"model": model, "decode": args.decode, "rows": rows}, indent=2))
+    return 0 if any("tok_s" in r for r in rows) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,145 @@
+name: vllm-2node-qwen38-flash-next
+kind: inference
+engine: vllm
+provenance: verified
+summary: Qwen3.8-Flash-Next NVFP4 across both nodes - TP2+EP+MTP3, 38.8 tok/s, 0.64 acceptance
+
+# VERIFIED on odysseus + poseidon, cold, from nothing on either node.
+#
+#   cold start          10m56s to /health (MTP off) - reference kit 10m55s
+#   weights             62.53 GiB/node MTP off, 64.07 GiB with MTP=3
+#   KV pool             32.03 GiB / 2,426,193 tok / 9.26x  (MTP off)
+#                       28.99 GiB / 1,731,567 tok / 6.61x  (MTP=3)
+#   decode batch-1      33.1 tok/s prose, 61.2 copy (MTP=3, prefill excluded)
+#   decode at 32k       37.7 prose, 61.6 copy - FLAT vs 1k, which is the
+#                       QSA/GDN design showing up: 12 of 48 layers do full
+#                       attention, the other 36 carry per-REQUEST state
+#   concurrency         40.5 / 62.4 / 89.6 / 179.1 at 1 / 2 / 4 / 8, then it
+#                       FALLS: 147.8 at 16, 159.2 at 32, while TTFT goes
+#                       0.41s -> 7.74s -> 21.62s. The knee is exactly
+#                       --max-num-seqs=8, so the SCHEDULER is the ceiling and
+#                       not the KV pool (which still holds 6.61x at 262K).
+#                       That is the knob to raise, not the cache.
+#   MTP acceptance      0.638 overall, decaying 0.82 / 0.63 / 0.46 by position
+#   prefill             3440-3477 tok/s MTP off, 3253-3286 with MTP=3
+#                       (~5% for the drafter), flat across 8k/12k/16k
+#   transport           RoCE on BOTH rails at 200 Gb/s, NCCL picked them itself
+#   quality gate        12/18 at max_tokens=1024 -> 17/18 at 4096, and the
+#                       survivor is classified "HEALTHY tail" by the gate
+#                       itself. TESTED, not assumed: this model needs a 4k+
+#                       budget because thinking is billed first
+#   quant A/B           11/11 MTP off, 11/11 MTP=3 (no regressions - spec
+#                       decode must not change answers, and did not), and
+#                       11/11 again with the needles at 32k: all three
+#                       depths retrieved including 95%
+#   weight staging      132.7 GB to the peer in 4m59s, 422 MB/s over the cable
+#
+# THE DECAYING ACCEPTANCE CURVE IS THE PROOF THAT MATTERS. The MTP experts are
+# block-scaled FP8 and this repo had to write the branch that builds them; a
+# wrong block shape applies misaligned scales SILENTLY and would show up as
+# near-random acceptance rather than as a crash. 0.82 -> 0.63 -> 0.46 is a
+# healthy drafter, and it is the only evidence that the block size was right.
+#
+#   1M context          MEASURED and it retrieves: 985,078-token prompt, all
+#                       three needles at 5/50/95% depth, on YaRN factor 4.0
+#                       (3.76x native). TTFT 904s, prefill 1090 tok/s. The
+#                       ladder 128k/256k/400k/985k is 3/3 at every rung.
+#                       Prefill falls 2578 -> 1090 tok/s; decode does not.
+#   reasoning at depth  ALSO holds, which retrieval does not imply: 17/17 at
+#                       8k / 128k / 400k / 985k, combining facts planted up to
+#                       830,000 tokens apart, AND correctly refusing to invent
+#                       a depot that was never planted (the absence guard).
+#
+# WHAT IS STILL NOT MEASURED: fp8 KV (the patch is deliberately not ported -
+# AGPL), vision, MAX_NUM_SEQS above 8, and whether REASONING (rather than
+# retrieval) holds up at 1M.
+
+# WHY THIS MODEL NEEDS FIVE PATCHES AND GLM-5.3 NEEDED ONE.
+#
+# THREE ARE MANDATORY AND ALL THREE ARE NOW WRITTEN, against sources
+# extracted from the image (./extract-sources.sh). up.sh refuses to launch
+# without them. The two checkpoint-side helpers are Python next to up.sh.
+#
+# GLM-5.3-Flash runs on an image built FOR it, so its patches were already
+# applied at build time and this repo carries only the one correctness fix that
+# postdates the tag. Qwen3.8-Flash-Next is the other shape: the image is a
+# vLLM day-0 dev build, the checkpoints are three different serialisations of
+# the same weights by three different publishers, and the gaps are between
+# them. Two are fatal-at-load, three are checkpoint bookkeeping:
+#
+#   ple_fp8_resolver     FATAL. vLLM enables its FP8 PLE embedding method only
+#                        when the WHOLE checkpoint is FP8-serialised. Here the
+#                        51 GB N-gram table is FP8 inside an NVFP4 checkpoint
+#                        that also declares *.ple.* excluded, so vLLM builds a
+#                        BF16 embedding of ~102 GB and dies. Image source.
+#   mxfp8_kernel_fallback FATAL. Two weight shapes miss FlashInfer's mm_mxfp8
+#                        limits (N>=128, N%32==0, K>=128, K%32==0):
+#                        linear_attn.in_proj_a/b at [48, 2560] (N<128) and
+#                        visual.blocks.*.mlp.linear_fc1 at [4304, 1152]
+#                        (4304%32==16). The first fires during the memory
+#                        profile ~7 min in, AFTER the weights are resident.
+#                        Image source.
+#   ple_dtype_detect     checkpoint-side. nvidia/... declares the FP8 PLE only
+#                        inside quantization_config.config_groups, not as
+#                        text_config.ple_embedding_dtype which the resolver
+#                        dispatches on. Recovered and re-injected via
+#                        --hf-overrides. Written here; see detect-ple-dtype.
+#   mtp_layer_alias      checkpoint-side. vLLM builds the draft layer at the
+#                        ABSOLUTE index mtp.layers.48 and matches quantization
+#                        metadata by exact string; this checkpoint records only
+#                        mtp.layers.0. Written here; see patch-checkpoint-config.
+#   fp8_block_moe        checkpoint-side PREFLIGHT here, image-side FIX there.
+#                        The MTP routed experts are 128x128 block-scaled FP8,
+#                        and ModelOptMixedPrecisionConfig.get_quant_method
+#                        builds RoutedExperts only for FP8/NVFP4/W4A16_NVFP4/
+#                        MXFP8 - anything else returns None, giving a silently
+#                        UNQUANTIZED MoE that dies ~7 min into the load. This
+#                        gap is in upstream vLLM too, so it does not age out.
+#                        We preflight it in seconds instead.
+
+# THE ARITHMETIC, which is the whole design and is NOT the usual one.
+#
+#   NVFP4 checkpoint          ~133 GiB on disk (11 shards)
+#   per-GPU weights at TP2+EP  ~64.5 GiB   experts ~34 + PLE shard ~25 + dense ~10
+#   budgeted at GMU 0.835      ~101.6 GiB  of the 121.69 GiB CUDA sees
+#   left for KV                 ~32 GiB
+#
+# WEIGHTS, NOT KV, ARE THE BINDING CONSTRAINT - which inverts the advice every
+# other two-node workspace here gives. Of 48 layers only every 4th is full
+# attention (full_attention_interval: 4): 12 KV-bearing layers + 1 MTP draft
+# layer. The other 36 are Gated-DeltaNet linear attention, whose state is
+# constant per REQUEST rather than per token. That is why 32 GiB of pool holds
+# 3.65M tokens and a 262K context fits 13.93x over, while MAX_NUM_SEQS is 8.
+# The scheduler, not the cache, is the limit at these defaults.
+requires:
+  gpu_arch: "12.1"
+  # ~64.5 GiB of weights per node plus ~32 GiB of KV plus init headroom.
+  min_unified_gb: 100
+  # 133 GiB has to land on EACH node before it can be loaded, and the HF cache
+  # shares the 1 TB NVMe with every other checkpoint here.
+  min_disk_gb: 150
+  docker: true
+  rdma: true
+  peers: 1
+
+images:
+  # NOT vllm/vllm-openai:nightly-aarch64, and this is the second time this repo
+  # takes an image it did not choose. Unlike the GLM-5.3 overlay this one is
+  # published by vLLM itself rather than by a third party, which makes it a
+  # weaker exception - see docs/decisions.md#qwen38-flash-next.
+  - vllm/vllm-openai:qwen38-flash-next
+
+models:
+  - nvidia/Qwen3.8-Flash-Next-NVFP4
+
+# Rank 0, here. Rank 1 is the same name on the peer.
+container: ws-vllm-qwen38-fn
+
+endpoints:
+  - "http://127.0.0.1:8896/v1  (OpenAI-compatible, on the rank-0 node)"
+
+sources:
+  - https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks
+  - https://github.com/getrefined/Qwen3.8-Flash-Next-NVFP4-vLLM-DGX-Spark
+  - https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4
+  - https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4

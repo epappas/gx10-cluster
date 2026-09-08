@@ -30,6 +30,7 @@ the territory.
 | [`vllm-2node-glm53-flash-exl3`](inference/vllm-2node-glm53-flash-exl3/README.md) | **2** | **~106 GB/node** | 8893 | **The GLM default.** EXL3 4bpw, **1M context**, vision, DFlash2 drafts |
 | [`sglang-nemotron35-lightning-nvfp4`](inference/sglang-nemotron35-lightning-nvfp4/README.md) | 1 | ~96 GB | 8894 | **1M context on ONE node.** NVFP4 + DSpark, as published |
 | [`vllm-nemotron35-lightning-nvfp4`](inference/vllm-nemotron35-lightning-nvfp4/README.md) | 1 | ~98 GB | 8895 | The same model where the **acceptance ladder** works |
+| [`vllm-2node-qwen38-flash-next`](inference/vllm-2node-qwen38-flash-next/README.md) | **2** | ~96 GB/node | 8896 | Flash-Next NVFP4, TP2+EP+MTP3 — 38.8 tok/s, 0.64 acceptance. Three [image patches](inference/vllm-2node-qwen38-flash-next/README.md#the-three-patches) this repo had to write |
 
 ### `bench` and `agent` — clients, which **do** co-exist with a server
 
@@ -39,6 +40,8 @@ the territory.
 | [`vllm-quality-gate`](bench/vllm-quality-gate/README.md) | Is it answering **correctly**? Exits non-zero if not |
 | [`spec-decode-accept`](bench/spec-decode-accept/README.md) | Is the **speculative decoder** working? Acceptance per draft **position** — the one failure that costs speed and nothing else |
 | [`vllm-prefill-ladder`](bench/vllm-prefill-ladder/README.md) | How long until the **first** character? Cold prefill tok/s, **proven** cold — the prefix cache makes a rerun look like an optimisation |
+| [`quant-quality-ab`](bench/quant-quality-ab/README.md) | Did a **quant** change the answers? Graded A/B against a saved baseline — the question the quality gate deliberately does not ask |
+| [`decode-content-mix`](bench/decode-content-mix/README.md) | Decode tok/s by **content type**. ~70 on copy against ~40 on prose, one server — so a single decode number is a claim about a corpus |
 | [`deepseek-harness`](agent/deepseek-harness/README.md) | An agent harness pointed at your own server. **Then use the thing you built** |
 | [`pi-harness`](agent/pi-harness/README.md) | The same idea **in your terminal**, and in a pipe: `-p`, JSON and RPC modes |
 | [`exo-harness`](agent/exo-harness/README.md) | An agent that **rewrites itself** — its own source, mounted in its own sandbox |

@@ -13,6 +13,13 @@
 | Writes | `~/.local/state/gx10-bench` — JSON + an HTML timeline per point |
 | Provenance | `unverified` |
 
+> **This sweeps concurrency against random tokens.** Random tokens have no
+> structure for a speculative drafter to predict, so acceptance — and therefore
+> decode tok/s — is understated here, identically at every rung. That makes the
+> ladder valid for *ranking* configurations and blind to the content axis:
+> ~70 tok/s on copy-from-context against ~40 on prose, on one server with one
+> config. [`decode-content-mix`](../decode-content-mix/README.md) is that axis.
+
 ## What
 
 Drives `vllm bench serve` across a concurrency ladder (`1,2,4,8,16,32` by

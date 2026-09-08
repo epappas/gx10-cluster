@@ -72,6 +72,7 @@ Worked examples from this repo:
 | Nemotron-3-Super-120B | BF16 | 231 GB | **no** — needs both nodes |
 | DeepSeek-V4-Flash | FP8 | ~149 GiB | **no** — 75 GiB/node at TP=2 |
 | DeepSeek-V4-Flash | GGUF UD-IQ2_M | 90.9 GB | yes, with ~21 GB left |
+| Qwen3.8-Flash-Next | NVFP4 | ~124 GB | **no** — 62.5 GiB/node at TP=2+EP |
 | DeepSeek-V4-Pro | GGUF IQ1_S | 337 GB | **no** — and no node count under 3 helps |
 
 ### 2. Is there enough left for KV cache?

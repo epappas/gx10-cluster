@@ -1,0 +1,46 @@
+name: decode-content-mix
+kind: bench
+engine: any
+provenance: unverified
+summary: Decode tok/s by CONTENT TYPE - the axis a concurrency sweep cannot show
+
+# UNVERIFIED - written from the source below, never run on this hardware.
+
+# WHY THIS IS NOT A FLAG ON vllm-bench-serve, which is where it was going to
+# live. That workspace wraps `vllm bench serve --dataset-name random`, and
+# RANDOM TOKENS ARE THE PROBLEM rather than an implementation detail: they have
+# no structure for a speculative drafter to predict, so every measurement taken
+# through them understates acceptance systematically and identically. The axis
+# this workspace adds cannot be expressed by varying the arguments to a tool
+# whose corpus is noise.
+#
+# So it is a direct client, like vllm-quality-gate and spec-decode-accept and
+# vllm-prefill-ladder. Only vllm-bench-serve wraps the upstream tool, and that
+# is the exception here rather than the rule.
+
+# THE FINDING THIS EXISTS TO REPRODUCE. On the reference kit, batch-1 decode
+# varied by more than 70% across content types on ONE server with ONE config:
+#
+#   copy from context   ~70 tok/s   the drafter predicts quoted text almost
+#                                   perfectly
+#   code                ~43 tok/s
+#   entropy (temp 0.8)  ~40 tok/s
+#   prose               ~40 tok/s   genuine narrative
+#
+# That spread is speculative-decode acceptance, not the hardware, and it means
+# a single "decode tok/s" number for this cluster is only as meaningful as the
+# corpus behind it. QUOTING A COPY-HEAVY NUMBER AS TYPICAL DECODE SPEED IS THE
+# MISTAKE this workspace exists to make hard.
+#
+# The entropy task is the subtle one: at temperature 0 it degenerates into
+# repetition, which the drafter then predicts easily, so it reads as FAST for
+# exactly the wrong reason. It is run at 0.8 by default and the README says why.
+requires: {}
+
+endpoints:
+  - "reads http://127.0.0.1:8888/v1 by default - set BASE_URL for anything else"
+  - "reads /metrics for per-task speculative acceptance, when the server exposes it"
+
+sources:
+  - https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks
+  - https://docs.vllm.ai/en/latest/design/metrics/

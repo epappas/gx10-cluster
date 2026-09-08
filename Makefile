@@ -52,7 +52,7 @@ help:  ## Show this help
 # --- Checks that run anywhere (and in CI) ----------------------------------
 
 .PHONY: check
-check: lint syntax smoke render handlers optional-tags workspaces detectors spec-accept prefill-ladder storage docs lockfile shellcheck  ## Every offline check (what CI runs)
+check: lint syntax smoke render handlers optional-tags workspaces detectors quant-ab checkpoint-config spec-accept prefill-ladder storage docs lockfile shellcheck  ## Every offline check (what CI runs)
 
 .PHONY: deps
 deps:  ## Install the pinned collections
@@ -125,6 +125,24 @@ docs:  ## Directory indexes must list every role, runbook and vars file
 .PHONY: detectors
 detectors:  ## The serving quality gate's detectors catch what they claim to
 	@python3 tests/check_detectors.py
+
+# The quant A/B's whole job is to catch a quality regression, so the failure
+# that costs the most is the one where it silently cannot: a grader that stops
+# stripping reasoning starts crediting the model for the answer appearing in
+# its own scratchpad, and a comparison that stops detecting regressions reports
+# "no regressions" forever. Neither looks any different in the output.
+.PHONY: quant-ab
+quant-ab:  ## The quant A/B still grades honestly and still detects a regression
+	@python3 tests/check_quant_ab.py
+
+# The Flash-Next checkpoint helpers decide two things that fail LATE and
+# quietly when wrong. One of these cases is here because it was already wrong
+# once: quantized_layers has three spellings and the reader knew two, so the
+# MTP alias silently skipped the legacy file vLLM actually reads on the draft
+# path. Nothing about the output looked different.
+.PHONY: checkpoint-config
+checkpoint-config:  ## Flash-Next PLE recovery, MTP alias and MoE preflight still hold
+	@python3 tests/check_checkpoint_config.py
 
 .PHONY: spec-accept
 spec-accept:  ## The acceptance probe's parser and ladder verdicts still hold

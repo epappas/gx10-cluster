@@ -215,6 +215,30 @@ acceptance and nothing else — the target model still verifies every token — 
 the server stays perfectly correct at half the speed, which reads as bad
 hardware rather than a bad draft.
 
+## Qwen3.8-Flash-Next: the one whose patches are ours
+
+[`vllm-2node-qwen38-flash-next`](../../workspaces/inference/vllm-2node-qwen38-flash-next/README.md)
+runs NVFP4 + expert parallel + MTP3 across both nodes. Three things make it
+unlike the others.
+
+**It needs three patches to vLLM source, and this repo wrote them.** Two are
+fatal without: the FP8 PLE resolver (unpatched, vLLM builds a ~102 GB BF16
+embedding for a table that is FP8 on disk) and the block-scaled FP8 MoE branch
+that MTP needs. `up.sh` refuses to launch if any is missing — `./extract-sources.sh`
+pulls the image sources to write them against
+([the specs](../../workspaces/inference/vllm-2node-qwen38-flash-next/patches/README.md)).
+
+**Weights, not KV, are the binding constraint** — the reverse of every other
+two-node workspace here. Only every 4th of 48 layers is full attention; the rest
+are Gated-DeltaNet with per-*request* state. So raising concurrency is cheap and
+raising context is what costs, and the measured knee is `--max-num-seqs`, not
+the cache.
+
+**1M context is measured and it reasons, not just retrieves.** 17/17 at 8k,
+128k, 400k and 985k — combining facts up to 830,000 tokens apart and correctly
+refusing to invent one that was never planted. Prefill is the entire cost:
+TTFT is ~15 minutes for a 985k prompt.
+
 ## Which GLM, and why it is the odd one out
 
 There is one: [`vllm-2node-glm53-flash-exl3`](../../workspaces/inference/vllm-2node-glm53-flash-exl3/README.md).
@@ -287,6 +311,42 @@ healthy *prose* ladder decays to 0.06 — the same shape a broken mask makes. So
 the collapse convicts only on structured output, and the tool refuses to return
 a mask verdict for any other class.
 [Full detail](../../workspaces/bench/spec-decode-accept/README.md).
+
+## Did a quant change the ANSWERS
+
+`vllm-quality-gate` hunts serving faults and says outright that it does not
+judge model quality. That leaves the question the quant knobs here actually
+raise — fp8 KV changes which blocks a sparse indexer *selects*, so its failure
+mode is a wrong answer rather than a slow one.
+
+```bash
+BASE_URL=http://127.0.0.1:8896/v1 ws up quant-quality-ab --save before.json
+# change the knob, restart the server
+BASE_URL=http://127.0.0.1:8896/v1 ws up quant-quality-ab --save after.json --compare before.json
+```
+
+Greedy, machine-graded, reasoning stripped before grading, and **exits non-zero
+only on a regression** — a run with no baseline *is* a baseline, not a verdict.
+It also carries the long-context reasoning suite: facts planted at 8/30/62/92%,
+questions needing at least two of them combined, and an absence guard that must
+refuse to invent a fact
+([full detail](../../workspaces/bench/quant-quality-ab/README.md)).
+
+## Decode speed is a claim about a corpus
+
+`vllm-bench-serve` sweeps concurrency against **random tokens**, which have no
+structure for a drafter to predict — so it understates acceptance identically at
+every rung and is blind to content type. Measured on Flash-Next with MTP3:
+`copy`-from-context decodes at 61.2 tok/s against prose at 33.1, on one server
+with one config. Turn the drafter off and all four tasks land within 1.11×.
+
+```bash
+BASE_URL=http://127.0.0.1:8896/v1 ws up decode-content-mix
+```
+
+The spread is speculative-decode **acceptance**, not the hardware
+([full detail](../../workspaces/bench/decode-content-mix/README.md)). Do not
+quote a copy-heavy number as typical decode speed.
 
 ## The other half of a request: cold prefill
 

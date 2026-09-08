@@ -1,0 +1,54 @@
+name: quant-quality-ab
+kind: bench
+engine: any
+provenance: unverified
+summary: Did a quantisation change the ANSWERS - graded A/B against a saved baseline
+
+# UNVERIFIED - written from the sources below, never run on this hardware. The
+# tasks are deterministic and machine-graded, so its own correctness is
+# checkable offline (`make check` runs tests/check_quant_ab.py), but no score
+# on this cluster has been recorded yet.
+
+# THE FOURTH QUESTION, and the one nothing else here asks.
+#
+#   make bench            is the HARDWARE fit to run work?
+#   vllm-bench-serve      how FAST is this server?
+#   vllm-quality-gate     is the SERVING LAYER faulty? (garbled, empty, drift)
+#   quant-quality-ab      did this QUANT change what the model says?
+#
+# The gate deliberately looks for serving faults and says outright that it does
+# not judge model quality. That leaves a real gap, because the quant knobs this
+# repo hands people are not capacity knobs alone:
+#
+#   fp8 KV on sparse attention   quantised KEYS change which blocks the indexer
+#                                SELECTS, so the failure is a wrong answer, not
+#                                a slower one
+#   FP8 dense projections        ~2.6% relative RMSE per tensor at the E4M3
+#                                rounding floor
+#   reduced draft vocabulary     output-safe by construction, but the acceptance
+#                                it costs is worth measuring next to the rest
+#
+# None of those moves a tok/s number and none of them trips a serving detector.
+# A server that got 3% worse at arithmetic looks perfect on every other view in
+# this repo.
+
+# WHY A/B AND NOT A THRESHOLD. There is no defensible absolute score for "this
+# model is correct" - the honest question is whether THIS server, on THIS
+# checkpoint, answers the same as it did before the knob moved. So the tool
+# saves a run and compares against it, and its exit status is about the DELTA.
+# A single run with no baseline prints a score and exits 0: it is a baseline,
+# not a verdict.
+#
+# Greedy (temperature 0) throughout, because a comparison between two sampled
+# runs measures the sampler.
+requires: {}
+
+endpoints:
+  - "reads http://127.0.0.1:8888/v1 by default - set BASE_URL for anything else"
+  - "writes a JSON run file, --compare reads one back"
+  - "exit status 1 if any task regressed against the baseline"
+
+sources:
+  - https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks
+  - https://docs.vllm.ai/en/latest/features/quantization/
+  - https://github.com/gkamradt/LLMTest_NeedleInAHaystack
