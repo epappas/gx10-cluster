@@ -251,6 +251,80 @@ twonode_pull() {
     ssh -n -o BatchMode=yes "$PEER" "docker pull -q $(printf '%q' "$IMAGE")" >/dev/null
 }
 
+# IS ANYTHING ELSE HOLDING A GPU, ON EITHER NODE?
+#
+# `ws check` says outright that it can only measure THIS node, and on unified
+# memory that gap has a specific, badly-signposted failure attached to it: a
+# peer with a desktop session or a previous container still resident does not
+# make the launch slow, it makes rank 1 refuse at vLLM's free-memory check
+# about a minute in -
+#
+#   ValueError: Free memory on device cuda:0 (103.52/121.63 GiB) on startup is
+#   less than desired GPU memory utilization (0.86, 104.6 GiB)
+#
+# - and rank 0 then reports the peer's death as a gloo "Connection closed by
+# peer", which points at the NETWORK rather than at the memory. That is the
+# most misleading failure in two-node serving here, and it costs a minute of
+# loading plus however long it takes to stop believing the error message.
+#
+# Ported from the REQUIRE_IDLE_GPU preflight in
+# MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks. OPT-IN by design: a workspace
+# asks for it, because "another process holds a GPU" is fatal at 0.835
+# utilisation and perfectly fine at 0.40, and this library cannot tell which
+# one it is looking at.
+#
+# nvidia-smi's compute-apps query is the right question rather than a memory
+# threshold: on unified memory the free-memory number moves with the page
+# cache, so a threshold either fires on a healthy node or never fires at all.
+twonode_gpu_tenants() {  # $1 = "local" | <host>; prints one line per process
+    local where=${1:-local}
+    local q="nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader"
+    if [[ $where == local ]]; then
+        $q 2>/dev/null
+    else
+        ssh -n -o BatchMode=yes -o ConnectTimeout=5 "$where" "$q" 2>/dev/null
+    fi
+}
+
+twonode_require_idle_gpu() {
+    twonode_resolve || return 1
+    local busy=0 out
+
+    out=$(twonode_gpu_tenants local)
+    if [[ -n ${out//[[:space:]]/} ]]; then
+        echo "GPU on $(hostname) is not idle:" >&2
+        echo "    ${out//$'\n'/$'\n'    }" >&2
+        busy=1
+    fi
+
+    if [[ -n ${PEER:-} ]]; then
+        # An UNREACHABLE peer is not an idle peer, and it is not this check's
+        # job to decide that - twonode_up fails on its own when the peer cannot
+        # be reached. Silence here rather than a false all-clear.
+        out=$(twonode_gpu_tenants "$PEER")
+        if [[ -n ${out//[[:space:]]/} ]]; then
+            echo "GPU on $PEER is not idle:" >&2
+            echo "    ${out//$'\n'/$'\n'    }" >&2
+            busy=1
+        fi
+    fi
+
+    if (( busy )); then
+        cat >&2 <<'MSG'
+
+  Another process holds a GPU. On unified memory this does not make the launch
+  slow - it makes the rank on that node refuse at vLLM's free-memory check
+  about a minute in, which the other rank then reports as a gloo connection
+  error rather than as a memory problem.
+
+  Stop it, or set REQUIRE_IDLE_GPU=false in .env to launch anyway.
+MSG
+        return 1
+    fi
+    echo "gpus    idle on both nodes"
+    return 0
+}
+
 twonode_up() {
     twonode_resolve || return 1
     twonode_common_env
