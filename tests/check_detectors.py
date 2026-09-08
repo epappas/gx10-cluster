@@ -29,6 +29,15 @@ from __future__ import annotations
 # with `module 'importlib' has no attribute 'machinery'` while `make check` was
 # green on the box. That is precisely the drift the Makefile claims cannot
 # happen, so name it rather than relying on the side effect again.
+# NO BYTECODE CACHE. SourceFileLoader writes __pycache__ NEXT TO THE TOOL, and
+# a stale entry there makes this suite test the PREVIOUS version of the file -
+# silently, and in the one direction that matters: a fix looks like it did not
+# take, or worse, a broken file looks fine. Found the hard way when a corrected
+# grader kept failing CI against its own old bytecode.
+import sys
+
+sys.dont_write_bytecode = True
+
 import importlib.machinery
 import importlib.util
 import pathlib

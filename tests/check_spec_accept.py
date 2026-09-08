@@ -29,6 +29,15 @@ runs in CI, the serving half runs on the box.
 
 from __future__ import annotations
 
+# NO BYTECODE CACHE. SourceFileLoader writes __pycache__ NEXT TO THE TOOL, and
+# a stale entry there makes this suite test the PREVIOUS version of the file -
+# silently, and in the one direction that matters: a fix looks like it did not
+# take, or worse, a broken file looks fine. Found the hard way when a corrected
+# grader kept failing CI against its own old bytecode.
+import sys
+
+sys.dont_write_bytecode = True
+
 import importlib.machinery
 import importlib.util
 import pathlib
