@@ -40,6 +40,15 @@ gx10_user: "{{ lookup('env', 'USER') }}"
 primary_user: "{{ ansible_facts['user_id'] }}"
 primary_home: "{{ ansible_facts['env']['HOME'] }}"
 
+# Where THIS repo is checked out on the node. roles/shell links workspaces/ws
+# onto PATH from here, so `ws list` works from any directory instead of only
+# from the repo root - which is what every runbook already assumed.
+#
+# The link is skipped, not failed, when the path does not exist: a node can be
+# provisioned without ever holding a checkout, and `ws` is a convenience rather
+# than part of the converged state.
+gx10_repo_dir: "{{ primary_home }}/gx10-cluster"
+
 # The machine's hostname, and the single source for it. Defaults to the
 # inventory name, so `odysseus` in inventory.yml is what `hostname` reports,
 # what /etc/hosts maps, what ~/.ssh/config keys off, and what Slurm and

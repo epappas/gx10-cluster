@@ -1,0 +1,33 @@
+# dsh settings for `vllm-nemotron35-lightning-nvfp4` - port 8895, served as `nemotron-3.5-lightning`.
+#
+# One node, NVFP4 + DSpark. The Nemotron where the acceptance ladder works.
+#
+# Copy into place with:  ./use.sh vllm-nemotron35-lightning-nvfp4
+# Never edit dsh-home/settings.yaml by hand and expect it to survive - use.sh
+# overwrites it. Edit THIS file, then re-run use.sh.
+
+llm-pi-ai:
+  providers:
+    gx10:
+      # dsh reads the key from the NAMED ENVIRONMENT VARIABLE, not from this
+      # file. compose.yml sets LOCAL_API_KEY; a local server ignores the value
+      # but the client library refuses to send a request without one.
+      apiKeyEnv: LOCAL_API_KEY
+      api: openai-completions
+      # Host networking: this address means the same thing inside the container
+      # as in your shell. If `curl` works, this works.
+      baseURL: http://127.0.0.1:8895/v1
+      models:
+        # The SERVED name - what --served-model-name set, NOT the HF repo id.
+        # `curl -s localhost:8895/v1/models` prints exactly this.
+        - id: nemotron-3.5-lightning
+
+# WITHOUT THIS BLOCK NOTHING ABOVE IS USED. dsh boots with
+# @deepseek-ai/dsh-agent-default-model configured for provider
+# `deepseek-official` / model `deepseek-flash` - DeepSeek's HOSTED API. Defining
+# a provider does not select one, so the harness asks for DEEPSEEK_API_KEY and
+# never touches the cluster. Verified: `--profile headless` fails outright with
+# MISSING_CREDENTIAL until these two lines exist.
+agent-default-model:
+  provider: gx10
+  model: nemotron-3.5-lightning

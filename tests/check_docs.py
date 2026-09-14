@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import pathlib
 import re
+import subprocess
 import sys
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
@@ -63,6 +64,32 @@ def check_links(md: pathlib.Path) -> list[str]:
     return problems
 
 
+def markdown_files() -> list[pathlib.Path]:
+    """Every markdown file that BELONGS to this repo - tracked, or new and not
+    ignored.
+
+    An rglob does not express that, and the difference is not theoretical: the
+    agent workspaces cache an npm tree under their gitignored dsh-home/, and
+    the first time anyone ran the harness `make check` started failing on dead
+    links inside third-party READMEs - a check about this repo's docs, broken
+    by a file this repo does not own and cannot fix.
+
+    `--others --exclude-standard` keeps UNTRACKED files in scope, deliberately:
+    dropping to `git ls-files` alone would stop checking a new runbook's links
+    until it was committed, which is exactly when you want them checked.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", "*.md"],
+            cwd=REPO, capture_output=True, check=True, text=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        # Not a checkout (a release tarball, a vendored copy). Fall back to the
+        # old behaviour rather than silently checking nothing.
+        return sorted(p for p in REPO.rglob("*.md") if ".git" not in p.parts)
+    return sorted(REPO / name for name in out.split("\0") if name)
+
+
 def main() -> int:
     problems: list[str] = []
 
@@ -87,9 +114,7 @@ def main() -> int:
 
     # Every markdown file's relative links and anchors resolve
     links = 0
-    for md in sorted(REPO.rglob("*.md")):
-        if ".git" in md.parts:
-            continue
+    for md in markdown_files():
         links += sum(
             1 for m in LINK_RE.finditer(md.read_text())
             if not m.group(1).startswith(("http", "mailto"))

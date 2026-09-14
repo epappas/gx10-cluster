@@ -10,7 +10,7 @@ opt-in and run only from `optional.yml`. Each row's tag is what you pass to
 |---|---|---|
 | `base` | `base` | apt safety (driver holds), build toolchain, CLI tools, `gh`, git config, sysctl, memlock |
 | `docker` | `docker` | group membership, NVIDIA runtime, merged `daemon.json`. Verifies; never installs Docker |
-| `shell` | `shell` | the env fragment both shells source, tmux config, zsh as the login shell |
+| `shell` | `shell` | the env fragment both shells source, tmux config, zsh as the login shell, and `workspaces/ws` symlinked onto PATH from `gx10_repo_dir` |
 | `dev_python` | `python`, `dev` | uv and standalone tools (ruff, ipython, pre-commit) |
 | `dev_rust` | `rust`, `dev` | rustup pinned to `rust_toolchain`, plus `bat` / `fd-find` / `zoxide` from apt |
 | `dev_node` | `node`, `dev` | nvm + Node 22. **No longer opt-in** — five of the editor's language servers are npm packages |

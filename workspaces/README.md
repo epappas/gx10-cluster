@@ -3,12 +3,16 @@
 Runnable recipes for inference, cluster and RL environments. **Not Ansible.**
 
 ```bash
-./workspaces/ws list                        # what exists, and what has been run
-./workspaces/ws check vllm-qwen3.8-27b-nvfp4  # does THIS machine qualify?
-./workspaces/ws up    vllm-qwen3.8-27b-nvfp4
-./workspaces/ws logs  vllm-qwen3.8-27b-nvfp4 -f
-./workspaces/ws down  vllm-qwen3.8-27b-nvfp4
+ws list                        # what exists, and what has been run
+ws check vllm-qwen3.8-27b-nvfp4  # does THIS machine qualify?
+ws up    vllm-qwen3.8-27b-nvfp4
+ws logs  vllm-qwen3.8-27b-nvfp4 -f
+ws down  vllm-qwen3.8-27b-nvfp4
 ```
+
+`ws` is bare because `roles/shell` symlinks it into `~/.local/bin` from
+`gx10_repo_dir`, so it works from any directory. On a node that has not had
+`make apply TAGS=shell` yet, spell it `./workspaces/ws` — it is the same file.
 
 ## The catalogue
 

@@ -17,6 +17,44 @@
     mode: "0755"
   become: true
 
+# `ws` is the workspaces entry point, and every runbook in this repo spells it
+# bare. It was only ever reachable as ./workspaces/ws, so those instructions
+# were aspirational unless you happened to be standing in the repo root.
+#
+# A SYMLINK, not a copy. `ws` resolves its own WS_ROOT with
+# `readlink -f "$0"`, so the link lands it back in the checkout and it finds
+# lib/common.sh and the workspace tree. A copy would find neither, and would
+# also go stale the moment the repo moved on.
+#
+# ~/.local/bin, NOT /usr/local/bin like gx10-top and gx10-storage. Those live
+# there because something launches them from a non-login shell - a tmux popup,
+# an ssh fan-out - that never sources ~/.gx10env.sh. `ws` is only ever typed by
+# a person at a prompt, and it is deliberately unprivileged: see the header of
+# workspaces/ws for why the workspaces half of this repo is not Ansible.
+# The stat is on workspaces/ws itself, NOT on gx10_repo_dir, and that is
+# load-bearing: the two-node workspaces mkdir their own path under the same
+# name on the peer, so poseidon has a ~/gx10-cluster/workspaces/inference/...
+# tree and no checkout at all. A directory test would have linked ws to a file
+# that is not there, on the node where nobody types it.
+- name: Check whether this node holds a checkout of the repo
+  ansible.builtin.stat:
+    path: "{{ gx10_repo_dir }}/workspaces/ws"
+  register: gx10_ws_entrypoint
+
+- name: Link the workspaces entry point onto PATH
+  ansible.builtin.file:
+    src: "{{ gx10_repo_dir }}/workspaces/ws"
+    dest: "{{ primary_home }}/.local/bin/ws"
+    state: link
+    # Operate on the LINK, not on what it points at. With the default the
+    # module would chown workspaces/ws itself in the checkout, which is a
+    # tracked file and not this role's to own.
+    follow: false
+    owner: "{{ primary_user }}"
+    group: "{{ primary_user }}"
+  become: true
+  when: gx10_ws_entrypoint.stat.exists
+
 # One environment fragment sourced by both shells, so PATH and CUDA settings
 # are defined once instead of drifting between bash and zsh.
 - name: Install shared shell environment

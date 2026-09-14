@@ -7,12 +7,17 @@ benchmark or an agent harness on a machine Ansible has already made ready.
 the unified pool, and two of them at once will not fit.
 
 ```bash
-./workspaces/ws list                          # what exists
-./workspaces/ws check vllm-qwen3.8-27b-nvfp4  # does this machine qualify?
-./workspaces/ws up    vllm-qwen3.8-27b-nvfp4
-./workspaces/ws logs  vllm-qwen3.8-27b-nvfp4 -f
-./workspaces/ws down  vllm-qwen3.8-27b-nvfp4
+ws list                          # what exists
+ws check vllm-qwen3.8-27b-nvfp4  # does this machine qualify?
+ws up    vllm-qwen3.8-27b-nvfp4
+ws logs  vllm-qwen3.8-27b-nvfp4 -f
+ws down  vllm-qwen3.8-27b-nvfp4
 ```
+
+`ws` is on PATH because `roles/shell` symlinks `workspaces/ws` into
+`~/.local/bin` from `gx10_repo_dir`. On a node provisioned before that existed,
+run `make apply TAGS=shell` — or spell it `./workspaces/ws`, which is the same
+file.
 
 **This runbook is the cross-cutting view — how to choose between workspaces and
 what they share.** Each workspace also has its own README with its flags, its
@@ -383,9 +388,10 @@ A/B when tuning `--max-num-batched-tokens`.
 ## Using it: the agent harness
 
 ```bash
-ws up vllm-2node-deepseek-v4-flash    # the model
+ws up vllm-2node-qwen38-flash-next    # the model
 cd workspaces/agent/deepseek-harness
-cp settings.example.yaml dsh-home/settings.yaml   # then edit baseURL + model
+./use.sh                              # what is available, and what is active
+./use.sh vllm-2node-qwen38-flash-next # point the harness at it
 cd -
 ws up deepseek-harness                # -> http://127.0.0.1:3080
 ws logs deepseek-harness -f
@@ -395,6 +401,20 @@ ws logs deepseek-harness -f
 serving workspace — unlike two inference workspaces. `settings.yaml` is the
 whole point of it: a custom provider whose `baseURL` is your own server, so no
 token leaves the house.
+
+**There is no TUI.** dsh ships `web`, `headless`, `sdk`, `sdk-minimal` and
+`acp`, and no terminal app is published — the `--profile tui` in its own README
+is hypothetical. `./ask.sh "…"` wraps `--profile headless` inside the running
+container for one question and one answer; the web UI is the only conversation.
+`ws logs deepseek-harness | grep 'dsh web:'` gives the **tokenised** URL, which
+is the only one that opens.
+
+The harness reads `dsh-home/settings.yaml` **once, at startup**, so switching
+models is `./use.sh <workspace>` followed by a `ws down` / `ws up`. `use.sh`
+ships one file per serving workspace and **curls the endpoint to prove the
+model id is one the server answers to** — the id being wrong is otherwise
+silent until the first message. Full table in the
+[workspace README](../../workspaces/agent/deepseek-harness/README.md#pointing-it-at-a-model).
 
 It is an **agent harness on host networking**: it executes tool calls against
 whatever is mounted at `/work`. The default is an empty `./work` directory.

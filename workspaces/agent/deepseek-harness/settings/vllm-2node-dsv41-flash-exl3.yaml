@@ -1,0 +1,33 @@
+# dsh settings for `vllm-2node-dsv41-flash-exl3` - port 8897, served as `DeepSeek-v4.1-Flash-EXL3`.
+#
+# provenance: unverified. That workspace has never run here - it is blocked on disk, not on doubt.
+#
+# Copy into place with:  ./use.sh vllm-2node-dsv41-flash-exl3
+# Never edit dsh-home/settings.yaml by hand and expect it to survive - use.sh
+# overwrites it. Edit THIS file, then re-run use.sh.
+
+llm-pi-ai:
+  providers:
+    gx10:
+      # dsh reads the key from the NAMED ENVIRONMENT VARIABLE, not from this
+      # file. compose.yml sets LOCAL_API_KEY; a local server ignores the value
+      # but the client library refuses to send a request without one.
+      apiKeyEnv: LOCAL_API_KEY
+      api: openai-completions
+      # Host networking: this address means the same thing inside the container
+      # as in your shell. If `curl` works, this works.
+      baseURL: http://127.0.0.1:8897/v1
+      models:
+        # The SERVED name - what --served-model-name set, NOT the HF repo id.
+        # `curl -s localhost:8897/v1/models` prints exactly this.
+        - id: DeepSeek-v4.1-Flash-EXL3
+
+# WITHOUT THIS BLOCK NOTHING ABOVE IS USED. dsh boots with
+# @deepseek-ai/dsh-agent-default-model configured for provider
+# `deepseek-official` / model `deepseek-flash` - DeepSeek's HOSTED API. Defining
+# a provider does not select one, so the harness asks for DEEPSEEK_API_KEY and
+# never touches the cluster. Verified: `--profile headless` fails outright with
+# MISSING_CREDENTIAL until these two lines exist.
+agent-default-model:
+  provider: gx10
+  model: DeepSeek-v4.1-Flash-EXL3

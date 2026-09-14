@@ -56,9 +56,11 @@ first connection*.
 | `workspaces/agent/*/dsh-home/*` | `dsh` config **and `.credentials.yaml`, a real key store** |
 | `workspaces/agent/*/work/*` | Whatever the agent was pointed at — someone else's source tree |
 
-The tracked counterparts are the `*.example` files: `inventory.example.yml`,
-`group_vars/gx10/local.yml.example`, every `.env.example`,
-`settings.example.yaml`.
+The tracked counterparts are the `*.example` files — `inventory.example.yml`,
+`group_vars/gx10/local.yml.example`, every `.env.example` — plus
+[`deepseek-harness/settings/`](../../workspaces/agent/deepseek-harness/README.md#pointing-it-at-a-model),
+which is tracked because it holds no secret: the API key lives in an
+environment variable named by the file, never in it.
 
 ## Steps
 

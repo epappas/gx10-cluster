@@ -36,11 +36,17 @@ inventory.yml
 workspaces/**/.env
 workspaces/**/.pid
 
-# The agent workspaces keep their config, CREDENTIALS and sessions here -
-# dsh's .credentials.yaml and pi's auth.json are both real key stores - and
-# `work/` is whatever the agent has been pointed at: someone else's source
-# tree, not ours to publish. The tracked templates are settings.example.yaml
-# and, for pi, the seeding heredoc in its up.sh.
+# The agent workspaces keep their config, CREDENTIALS, SESSION TRANSCRIPTS and
+# npm cache here - dsh's .credentials.yaml and pi's auth.json are both real key
+# stores, and dsh-home/sessions holds every prompt and answer - and `work/` is
+# whatever the agent has been pointed at: someone else's source tree, not ours
+# to publish. The tracked templates are deepseek-harness/settings/ (which holds
+# no key: it names an ENV VAR) and, for pi, the seeding heredoc in its up.sh.
+#
+# The `*` matters. `workspaces/agent/*/dsh-home` alone would ignore the
+# directory but let an explicitly-added path inside it through; ignoring the
+# CONTENTS means git never descends, so the 470 MB npm cache and every
+# transcript stay out whatever anyone types at `git add`.
 workspaces/agent/*/dsh-home/*
 !workspaces/agent/*/dsh-home/.gitkeep
 workspaces/agent/*/pi-agent/*
