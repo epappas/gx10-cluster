@@ -136,7 +136,7 @@ models:
 container: ws-vllm-qwen38-fn
 
 endpoints:
-  - "http://127.0.0.1:8896/v1  (OpenAI-compatible, on the rank-0 node)"
+  - "http://0.0.0.0:8896/v1  (OpenAI-compatible, on the rank-0 node)"
 
 sources:
   - https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks

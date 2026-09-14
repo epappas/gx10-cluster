@@ -1,0 +1,34 @@
+---
+# One directory, exported from rank 0 and mounted read-only on every peer, at
+# the SAME path on both. See tasks/main.yml for why that sameness is the whole
+# requirement rather than a nicety.
+
+# Nothing is exported until you name a path. An empty default makes
+# `--tags nfs` on an unconfigured cluster a no-op that says so, rather than a
+# role that invents a share.
+nfs_export_path: ""
+
+# Read-only, and this is the only mode this role offers. The case it exists for
+# is a checkpoint too large to replicate: one node owns the bytes, the others
+# read them. A writable export across an interconnect turns two nodes into one
+# failure domain for anything either of them writes, and nothing here needs it.
+nfs_export_options: "ro,sync,no_subtree_check,root_squash"
+
+# Client mount options, and three of these are load-bearing:
+#
+#   nofail, _netdev  a node whose peer is off must still BOOT. Without both,
+#                    systemd waits on a mount that cannot complete and the box
+#                    comes up in emergency mode - on the machine you were going
+#                    to use to fix the other one. This is the single most
+#                    important line in the role.
+#   vers=4.2         pin it. Version negotiation picking v3 silently changes
+#                    the locking and id-mapping semantics under you.
+#   nconnect=8       one TCP connection cannot fill a 100 Gb/s rail. Weight
+#                    loading is exactly the sequential-read workload this helps.
+nfs_mount_options: "ro,nofail,_netdev,vers=4.2,nconnect=8,hard,timeo=600,retrans=2"
+
+# NFS rides the INTERCONNECT, not the management NIC. 196 GiB of weights over
+# a 1 GbE management link is ~30 minutes of every boot; over the cable it is
+# ~6. cluster_subnets[0] is the first ConnectX-7 rail.
+nfs_subnet: "{{ cluster_subnets[0] }}"
+nfs_port: 2049

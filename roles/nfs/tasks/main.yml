@@ -1,0 +1,142 @@
+---
+# Export one directory from rank 0 over the interconnect; mount it read-only on
+# the peers at the identical path.
+#
+# WHY THIS IS A ROLE AND NOT PART OF A WORKSPACE. It exists for exactly one
+# recipe - workspaces/inference/vllm-2node-dsv41-flash-exl3, whose 196 GiB
+# checkpoint does not fit twice on this cluster - and the temptation was to let
+# that workspace mount what it needs. An export, a kernel server and an fstab
+# entry are machine state, workspaces converge nothing, and a workspace that
+# mounts a filesystem is the coupling the two halves exist to prevent
+# (workspaces/README.md). So the workspace CHECKS and refuses; this role is
+# what makes the check pass. See docs/decisions.md#dsv41-flash-exl3.
+#
+# THE IDENTICAL PATH IS THE REQUIREMENT, not a convention. lib/twonode.sh
+# builds ONE `docker run` command and executes it on both ranks, so `-v
+# /path:/path:ro` has to resolve on both. A share mounted at a different place
+# on the peer cannot be expressed by that launcher at all.
+
+- name: Skip cleanly when no export is configured
+  ansible.builtin.debug:
+    msg: >-
+      nfs_export_path is empty - nothing to export. Set it in group_vars or
+      pass -e nfs_export_path=/path/to/share.
+  when: not nfs_export_path
+
+- name: Configure NFS
+  when: nfs_export_path | length > 0
+  block:
+
+    # --- rank 0: the server ------------------------------------------------
+    - name: Export the share from the controller
+      when: inventory_hostname == cluster_controller
+      block:
+        - name: Assert the export path exists and is readable
+          # Checked here rather than discovered at mount time, because the
+          # client-side symptom of exporting a directory that is not there is
+          # `mount.nfs: access denied by server` - which reads as a permissions
+          # or firewall problem and gets debugged as one.
+          ansible.builtin.stat:
+            path: "{{ nfs_export_path }}"
+          register: nfs_export_stat
+
+        - name: Refuse to export a path that is not a directory
+          ansible.builtin.assert:
+            that: nfs_export_stat.stat.isdir | default(false)
+            fail_msg: >-
+              {{ nfs_export_path }} is not a directory on {{ inventory_hostname }}.
+              Stage the weights there first - the workspace's stage-weights.sh
+              does this - then re-run with --tags nfs.
+
+        - name: Install the NFS server
+          ansible.builtin.apt:
+            name: nfs-kernel-server
+            state: present
+          become: true
+
+        - name: Export the path to the peers, over the interconnect only
+          # ACL'd to each peer's FABRIC address, never to a subnet and never to
+          # the management LAN. `root_squash` in nfs_export_options is what
+          # makes a read-only export safe to hand a container running as root:
+          # the overlay image in the dsv41 workspace does, and squashing means
+          # it reads as `nobody` rather than as root on this node's filesystem.
+          # Weights written by `hf download` are 0644, so `nobody` can read
+          # them; a 0600 file would not be, and that is the one failure worth
+          # knowing about in advance.
+          ansible.builtin.lineinfile:
+            path: /etc/exports
+            regexp: "^{{ nfs_export_path | regex_escape }}\\s+{{ item | regex_escape }}\\("
+            line: "{{ nfs_export_path }} {{ item }}({{ nfs_export_options }})"
+            create: true
+            mode: "0644"
+            owner: root
+            group: root
+          become: true
+          loop: "{{ nfs_peer_fabric_addrs }}"
+          notify: Re-export nfs shares
+
+        - name: Allow NFS from the peers on the interconnect
+          # roles/remote's blanket peer rule is scoped to the MANAGEMENT
+          # addresses, because that is where NCCL bootstraps. NFS deliberately
+          # rides the fabric instead, so it arrives from a source that rule
+          # does not cover and a default-deny drops it - as a mount that hangs
+          # rather than one that refuses.
+          community.general.ufw:
+            rule: allow
+            src: "{{ item }}"
+            port: "{{ nfs_port }}"
+            proto: tcp
+            comment: "gx10 nfs peer"
+          become: true
+          loop: "{{ nfs_peer_fabric_addrs }}"
+          when: enable_ufw | bool
+
+        - name: Start and enable the NFS server
+          ansible.builtin.systemd_service:
+            name: nfs-kernel-server
+            state: started
+            enabled: true
+          become: true
+
+    # --- the peers: the clients --------------------------------------------
+    - name: Mount the share on the peers
+      when: inventory_hostname != cluster_controller
+      block:
+        - name: Install the NFS client
+          ansible.builtin.apt:
+            name: nfs-common
+            state: present
+          become: true
+
+        - name: Create the mountpoint at the identical path
+          ansible.builtin.file:
+            path: "{{ nfs_export_path }}"
+            state: directory
+            owner: "{{ gx10_user }}"
+            group: "{{ gx10_user }}"
+            mode: "0755"
+          become: true
+
+        - name: Mount the controller's export read-only
+          # `state: mounted` writes fstab AND mounts now. `nofail,_netdev` in
+          # nfs_mount_options is what keeps that fstab entry from stranding
+          # this node at boot when the controller is down - read the defaults
+          # file before changing them.
+          ansible.posix.mount:
+            path: "{{ nfs_export_path }}"
+            src: "{{ nfs_controller_fabric_addr }}:{{ nfs_export_path }}"
+            fstype: nfs4
+            opts: "{{ nfs_mount_options }}"
+            state: mounted
+          become: true
+
+        - name: Confirm the share is readable, not merely mounted
+          # A dropped NFS mount leaves the mountpoint present and EMPTY, which
+          # every `-d` test calls success and the model loader calls a missing
+          # weight file. The workspace's up.sh makes the same distinction with
+          # `-r` on a known file; this is the provisioning-side half of it.
+          ansible.builtin.command: "ls -A {{ nfs_export_path }}"
+          register: nfs_mount_contents
+          changed_when: false
+          check_mode: false
+          failed_when: nfs_mount_contents.stdout | length == 0

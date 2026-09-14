@@ -31,6 +31,7 @@ the territory.
 | [`sglang-nemotron35-lightning-nvfp4`](inference/sglang-nemotron35-lightning-nvfp4/README.md) | 1 | ~96 GB | 8894 | **1M context on ONE node.** NVFP4 + DSpark, as published |
 | [`vllm-nemotron35-lightning-nvfp4`](inference/vllm-nemotron35-lightning-nvfp4/README.md) | 1 | ~98 GB | 8895 | The same model where the **acceptance ladder** works |
 | [`vllm-2node-qwen38-flash-next`](inference/vllm-2node-qwen38-flash-next/README.md) | **2** | ~96 GB/node | 8896 | Flash-Next NVFP4, TP2+EP+MTP3 — 38.8 tok/s, 0.64 acceptance. Three [image patches](inference/vllm-2node-qwen38-flash-next/README.md#the-three-patches) this repo had to write |
+| [`vllm-2node-dsv41-flash-exl3`](inference/vllm-2node-dsv41-flash-exl3/README.md) | **2** | **~112 GB/node** | 8897 | **`unverified`.** V4.1-Flash EXL3 2.9bpw — 196 GiB, ~99.5 GB of weights per node. [Blocked on disk](inference/vllm-2node-dsv41-flash-exl3/README.md#what-blocks-it), not on doubt |
 
 ### `bench` and `agent` — clients, which **do** co-exist with a server
 

@@ -1,0 +1,167 @@
+name: vllm-2node-dsv41-flash-exl3
+kind: inference
+engine: vllm
+provenance: unverified
+summary: DeepSeek-V4.1-Flash EXL3 2.9bpw across both nodes - ported, NOT yet run here (disk)
+
+# UNVERIFIED, and the reason is disk rather than doubt. Every flag below is
+# transcribed from a configuration its authors measured on this exact hardware
+# (2x GB10, sm_121a, CX7). What has NOT happened is a boot on odysseus +
+# poseidon, because the checkpoint plus its Engram tables do not currently fit
+# on either node. See "THE DISK ARITHMETIC" below - that is the whole story of
+# this port, and it is a storage problem, not a serving one.
+#
+# Flip provenance to `verified` only after a run whose numbers came out of a
+# LOG. ../vllm-2node-glm53-flash-exl3 records what happens when they do not.
+
+# THE MEMORY ARITHMETIC, which is the tightest in this repo by a wide margin:
+#
+#   EXL3 mul1 2.9bpw checkpoint   196.2 GiB  (39 shards, measured off the Hub)
+#   split TP=2                    ~99.5 GiB of weights per node
+#   pinned KV pool                 ~1-2.5 GiB per node
+#   CUDA context, NCCL, graphs      ~5-7 GiB
+#   vLLM processes, OS, docker        ~9 GiB
+#   ------------------------------------------
+#   headroom on a 121.7 GiB node   4.07-4.21 GiB, as upstream measures it
+#
+# Four gigabytes on a machine where the GPU pool IS system RAM. Upstream's own
+# HANDOFF.md records a 2026-09-11 boot that exceeded it and WEDGED BOTH NODES -
+# which is exactly the failure mode this repo has written down since the first
+# CUDA OOM took the host with it. That is why the shipped defaults here are
+# upstream's "first clean boot" profile (128k context, 1 GiB pool) and not
+# upstream's validated 600k one. Raise ONE knob at a time; .env.example says
+# which order and what to watch.
+
+# THE DISK ARITHMETIC, which is why this has not run - and it is the whole
+# finding of this port:
+#
+#   EXL3 checkpoint        196.2 GiB   Mia-AiLab/DeepSeek-V4.1-Flash-EXL3-2.9bpw
+#                                      (39 shards, measured off the Hub API)
+#   Engram source          189.1 GiB   shards 47+48 of deepseek-ai/DeepSeek-V4.1-Flash
+#                                      (of a 475.3 GiB tree - the other 46 are
+#                                       never fetched; prepare_engram_src.py
+#                                       HARDLINKS these two, so the slim dir it
+#                                       builds costs zero extra bytes)
+#   packed Engram            ~96 GiB   PER RANK. Layers 1 and 14 both carry
+#                                      n-gram tables, ~48 GiB packed per layer
+#                                      per rank at TP=2, and a rank needs both
+#   overlay image            ~30 GiB   per node
+#
+# Steady state per node, after packing and deleting the source:
+#
+#   rank 0   196.2 (model) + 96 (packed) + 30 (image)  =  ~322 GiB
+#   rank 1            0    + 96 (packed) + 30 (image)  =  ~126 GiB
+#
+# Measured free space, 2026-09-13, with vllm-2node-qwen38-flash-next serving:
+#
+#   odysseus   349 GiB free   (274 before removing the 80.4 GB Nemotron-3-Super
+#                              checkpoint; it backs two single-node workspaces
+#                              and is re-downloadable)
+#   poseidon   127 GiB free   + 43.0 GiB reclaimable, + 71 GiB in an RL archive
+#
+# `docker system prune` IS NOT THE 42.6 GiB `docker system df` advertises here,
+# and that mattered. Of the 102 GB of unused images on odysseus, 86 GB were
+# BUILT ON THIS BOX and pushed nowhere - ar-deberta, ar-capacity,
+# split-inference. `docker pull` cannot bring those back; only a Dockerfile
+# can, if it still exists. gx10-storage classifies them correctly and the auto
+# tier leaves them alone, which is the whole of
+# docs/decisions.md#local-images. The safe tier here frees 1.3 GB.
+#
+# THE WORKER CANNOT HOLD A REPLICA OF THE MODEL TREE, and that is not a matter
+# of tidying up. poseidon's ceiling is 127 + 43 + 71 = 241 GiB against the
+# 322 GiB a rank-1 replica needs. Reaching it would mean deleting the 75 GiB
+# Nemotron and the 28 GiB Qwen2.5-14B as well - gutting the cache to land at
+# ~22 GiB of margin on a node whose failure mode is a wedge.
+#
+# So `WEIGHT_SYNC=nfs` is not upstream's preference here, it is the only layout
+# that fits: rank 1 reads the checkpoint over the cable and stores none of it.
+# That is the one thing this port needs which this repo does not yet have -
+# see "not ported", item 4.
+#
+# Rank 0 fits, but only after freeing, and only in the right ORDER. The naive
+# order peaks at 189 + 196 = 385 GiB and fails; stage-weights.sh packs first,
+# ships rank 1's shard, deletes the 189 GiB source, and only then downloads the
+# checkpoint - a peak of ~285 GiB instead. Run `./stage-weights.sh --plan`; it
+# prints this table against the node's actual `df` rather than against these
+# numbers, which will age.
+
+# WHAT WAS DELIBERATELY NOT PORTED, and the first one is not a preference:
+#
+# 1. THEIR CX7 INTERFACE PINS WOULD HANG NCCL HERE. Upstream pins
+#    HEAD_CX7_IF=enp1s0f1np1 / WORKER_CX7_IF=enp1s0f0np0. On BOTH our nodes
+#    enp1s0f1np1 is DOWN, NO-CARRIER - the cabled ports are enp1s0f0np0 and
+#    enP2p1s0f0np0, two rails, and lib/twonode.sh lets NCCL discover both
+#    rather than naming one. Same disagreement, same measured reason, as
+#    docs/decisions.md#two-node-vllm already records for their other recipes.
+#
+# 2. THEIR RENDEZVOUS ON THE FABRIC SUBNET (10.0.0.1 / 10.0.22.1). This repo
+#    bootstraps on the management NIC and lets NCCL pick RoCE through ibverbs
+#    independently - docs/decisions.md#nccl-socket-ifname. Their .env even
+#    notes "NCCL cannot use the 10.0.0.x loopback aliases", which is the same
+#    lesson arrived at from the other side.
+#
+# 3. GPU_MEM_UTIL=0.88. With KV_CACHE_MEMORY_BYTES set, this flag is only
+#    vLLM's startup sanity check - MemAvailable at init must clear
+#    util x 121.69 GiB - and NOT a budget. 0.88 demands 107.1 GiB free.
+#    ../vllm-2node-glm53-flash-exl3 measured 0.87 (105.8 GiB) FAILING on these
+#    nodes with 104.87 GiB free. Shipping 0.88 here would refuse to start for a
+#    reason that has nothing to do with this model, so it ships at 0.86.
+#
+# 4. THEIR NFS/ZFS WEIGHT SYNC - AND THIS IS THE ONE THAT DID NOT SURVIVE
+#    CONTACT. The plan was to replace it with a full replica over the cable,
+#    the idiom ../vllm-2node-glm53-flash-exl3/stage-weights.sh established at a
+#    measured 487-534 MB/s, because an NFS export is machine state and this
+#    repo's whole split says Ansible owns machine state while workspaces own
+#    what runs (workspaces/README.md). The arithmetic above refused: poseidon
+#    cannot hold 322 GiB, so there is no replica to ship.
+#
+#    NFS is therefore a PREREQUISITE of this workspace rather than an
+#    alternative to it, and the honest consequence is that adopting this recipe
+#    cost a `roles/nfs` on the Ansible side. It now exists, opt-in and behind
+#    the `never` tag like every other optional role:
+#
+#      make optional TAGS=nfs -e nfs_export_path=/home/<you>/.cache/dsv41-exl3/model
+#
+#    Nothing in this workspace creates that mount. It CHECKS for it and refuses
+#    to launch without it, because a workspace that mounts a filesystem is
+#    exactly the coupling the two halves exist to prevent.
+#
+#    ZFS send/recv is the same answer with a pool requirement on top, and these
+#    nodes have a single ext4 NVMe. Not applicable.
+
+# 5. memguard.sh. An OOM watchdog is a daemon, this repo ships zero monitoring
+#    daemons on purpose, and upstream disables it by default anyway.
+
+requires:
+  gpu_arch: "12.1"
+  # ~99.5 GiB of weights per rank plus vLLM's own ~9 GiB of init. This is the
+  # largest single-node memory requirement in the repo and it has NOT been
+  # confirmed to clear here - `ws check` refusing is a real answer, not a bug.
+  min_unified_gb: 112
+  # Rank 0's steady state: 196.2 GiB checkpoint + ~96 GiB packed Engram + the
+  # image. This is the node you run `ws up` from, so it is the number `ws
+  # check` should enforce. On the PEER the real floor is ~126 GiB, because the
+  # checkpoint arrives over NFS rather than landing on its disk - `ws check`
+  # run there will over-demand by exactly the 196 GiB it does not need.
+  min_disk_gb: 330
+  docker: true
+  rdma: true
+  peers: 1
+
+images:
+  - ghcr.io/miaai-lab/deepseek-v4.1-flash-exl3-2x-dgx-sparks:2.9bpw
+
+models:
+  - Mia-AiLab/DeepSeek-V4.1-Flash-EXL3-2.9bpw
+  - deepseek-ai/DeepSeek-V4.1-Flash
+
+container: ws-vllm-dsv41-exl3
+
+endpoints:
+  - "http://127.0.0.1:8897/v1  (OpenAI-compatible, on the rank-0 node)"
+
+sources:
+  - https://github.com/MiaAI-Lab/DeepSeek-v4.1-Flash-EXL3-2x-DGX-Sparks
+  - https://huggingface.co/Mia-AiLab/DeepSeek-V4.1-Flash-EXL3-2.9bpw
+  - https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash
+  - https://github.com/turboderp-org/exllamav3

@@ -1,0 +1,10 @@
+---
+# Fabric addresses, derived from the same cluster_index every other role uses.
+# NOT hardcoded and NOT taken from ansible_host: ansible_host is the MANAGEMENT
+# address, and pulling 196 GiB over the management NIC is the mistake this
+# whole role exists to avoid.
+nfs_controller_fabric_addr: "{{ nfs_subnet }}.{{ hostvars[cluster_controller].cluster_index }}"
+nfs_peer_fabric_addrs: >-
+  {{ groups['gx10'] | difference([cluster_controller])
+     | map('extract', hostvars, 'cluster_index')
+     | select('defined') | map('regex_replace', '^', nfs_subnet + '.') | list }}

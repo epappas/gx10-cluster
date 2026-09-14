@@ -2466,3 +2466,191 @@ node or never fires at all.
   identical reason (`set -a; . ./.env`). Documented in the new workspace's
   `.env.example` rather than fixed, because fixing it would make our `.env`
   behave unlike every other one in this directory.
+
+## <a name="dsv41-flash-exl3"></a>DeepSeek-V4.1-Flash EXL3: the port where the disk decided the design
+
+[MiaAI-Lab/DeepSeek-v4.1-Flash-EXL3-2x-DGX-Sparks](https://github.com/MiaAI-Lab/DeepSeek-v4.1-Flash-EXL3-2x-DGX-Sparks)
+is the fourth recipe from that lab this repo has mined
+([#two-node-vllm](#two-node-vllm), [#glm53-flash](#glm53-flash),
+[#qwen38-flash-next](#qwen38-flash-next)). Three of those ports found the same
+shape: model plumbing around a small amount of transferable knowledge, and a
+disagreement about fabric addressing.
+
+This one broke the shape. The transferable knowledge is real and it is taken,
+but the thing that decided the workspace was **storage**, and it is the first
+port here that ends with a prerequisite this repo cannot satisfy.
+
+### The workspace ships `unverified`, and that is the honest state
+
+`workspaces/inference/vllm-2node-dsv41-flash-exl3` has not booted on odysseus
+and poseidon. It is not unverified because the recipe is doubted — its authors
+measured it on 2× GB10 at `sm_121a` — but because the checkpoint does not
+currently fit on either node.
+
+This repo has shipped `unverified` before and the rule has not changed: a
+workspace may exist before it has run, provided the field says so and the
+README leads with it. What it may **not** do is carry numbers it did not
+measure as though it had. Upstream's throughput table is in the README, labelled
+theirs.
+
+### The arithmetic, measured rather than read
+
+The upstream README rounds to "~197 GiB" and "~190 GiB". Taken off the Hub API
+instead:
+
+| | |
+|---|---|
+| `Mia-AiLab/DeepSeek-V4.1-Flash-EXL3-2.9bpw` | **196.2 GiB**, 39 shards |
+| `deepseek-ai/DeepSeek-V4.1-Flash` shards 47+48 | **189.1 GiB** of a 475.3 GiB tree |
+| packed Engram | **~96 GiB per rank** — layers 1 and 14, ~48 GiB each at TP=2 |
+
+That last row is the one worth stating plainly, because the upstream README's
+phrasing ("94 GiB total, ~47 GiB per layer per rank") reads as 47 and is not:
+`pack_engram.py` packs `ENGRAM_LAYERS = (1, 14)`, so a rank needs both.
+Halving a rank's Engram footprint in your head is a 96 GiB error on a node with
+274 GiB free.
+
+### Storage, not memory, is what this port could not solve
+
+The memory budget is brutal and it is *survivable* — ~99.5 GiB of weights per
+rank against 121.7 GiB, ~4 GiB of headroom after warm-up. Upstream's own
+`HANDOFF.md` records a boot that exceeded it and wedged both nodes, which is
+[#persistence-latch](#persistence-latch) from the other side and the reason the
+workspace ships their *first-boot* profile rather than their validated one.
+
+Disk is what does not resolve:
+
+```
+steady state, rank 0   196.2 + 96 + ~30 (image)  =  ~322 GiB
+steady state, rank 1           96 + ~30 (image)  =  ~126 GiB
+
+odysseus   349 GiB free  (after evicting an 80.4 GB re-downloadable checkpoint)
+poseidon   127 GiB free  + 43.0 reclaimable + 71 in an RL archive  = 241 ceiling
+```
+
+Making rank 0 fit was a **classification** problem, not a `df` one, and
+[#storage-classes](#storage-classes) had already done the work: `docker system
+df` advertises 42.6 GiB reclaimable on odysseus, but 86 GB of that is images
+**built on the box and pushed nowhere**. `gx10-storage` puts them under "your
+call" and frees 1.3 GB automatically, which is exactly
+[manage-storage#local-images](runbooks/manage-storage.md#local-images) paying for itself a second time. The 75 GiB that
+actually moved came from evicting a checkpoint that `docker pull`'s equivalent
+*can* bring back.
+
+**poseidon cannot hold a replica of the checkpoint**, and no amount of pruning
+gets it there without gutting the model cache to land at ~22 GiB of margin on a
+node whose failure mode is a wedge. The move this repo would normally make —
+rsync the weights over the cable, the idiom `vllm-2node-glm53-flash-exl3`
+established at a measured 487–534 MB/s — **has nothing to ship**.
+
+### So `WEIGHT_SYNC=nfs` stops being a preference and becomes a prerequisite
+
+Upstream's default has rank 1 read the checkpoint from rank 0 and store none of
+it. That is the only layout that fits here, and it costs an NFS export: a
+kernel server, `/etc/exports`, a mount on the peer. All three are **machine
+state**, and `workspaces/README.md` is unambiguous that Ansible converges
+machines while workspaces only run things.
+
+So the workspace does **not** create one. It checks that the peer can *read*
+the checkpoint and refuses to launch otherwise, naming what is missing; the
+export is `roles/nfs`, opt-in behind the `never` tag like every other optional
+role:
+
+```bash
+make optional TAGS=nfs -e nfs_export_path=/home/<you>/.cache/dsv41-exl3/model
+```
+
+Four things in that role are decisions rather than plumbing:
+
+- **The identical path is the requirement, not a convention.**
+  `lib/twonode.sh` builds **one** `docker run` and executes it on both ranks,
+  so `-v /path:/path:ro` has to resolve on both. A share mounted elsewhere on
+  the peer cannot be expressed by that launcher at all.
+- **It rides the interconnect, not the management NIC.** `ansible_host` is the
+  management address, and 196 GiB across 1 GbE is ~30 minutes of every boot
+  against ~6 over the cable. The ACL is each peer's `cluster_subnets[0]`
+  address, derived from the same `cluster_index` every other role uses.
+  It therefore needs its own ufw rule: `roles/remote`'s blanket peer rule is
+  scoped to the *management* addresses, because that is where NCCL bootstraps,
+  so NFS arrives from a source that rule does not cover and default-deny drops
+  it — as a mount that hangs rather than one that refuses.
+- **`nofail,_netdev` is the most important line in the role.** Without both, a
+  node whose peer is off waits on a mount that cannot complete and comes up in
+  emergency mode — on the machine you were going to use to fix the other one.
+- **The handler is `exportfs -ra`, never a service restart.** A restart drops
+  established mounts, and a client with a `hard` mount then blocks every reader
+  until the server returns, including a rank halfway through loading 196 GiB.
+
+It is also its own **play** in `optional.yml`, without `serial:`, for the same
+reason `site.yml`'s inter-node trust play is: under `serial: 1` the export
+exists before the peer mounts it only because odysseus happens to be listed
+first *and* happens to be rank 0. `cluster_controller` exists precisely because
+those two facts disagreed silently once already. With no `serial:`, the linear
+strategy runs task N on every host before task N+1, and the role's server tasks
+precede its client tasks — so the ordering holds whatever the inventory says.
+
+### Taken
+
+| From them | Why it matters |
+|---|---|
+| **The serve line** — TP2, `--quantization exl3`, `--block-size 64`, pinned `--kv-cache-memory-bytes`, `--long-prefill-token-threshold`, the `deepseek_v41` parsers | Transcribed from a configuration measured on this hardware, not derived |
+| **`--block-size 64` as an architecture fact** | The SM12x DeepGEMM paged indexer takes 32 or 64 states per block. vLLM's default of 128 dies on the first decode of the ratio-1 indexer layers. Not a tuning knob |
+| **Pinning the KV pool instead of profiling it** | On unified memory vLLM sizes an unpinned pool from `MemAvailable` after a profile run, so the same command yields a different pool as the page cache drifts. A pinned pool is the only reproducible one here — and this generalises past this model |
+| **The two deadlock fixes** — `DSV41_EXL3_SERIAL_STREAMS=1`, `VLLM_DISABLE_SHARED_EXPERTS_STREAM=1` | Hard-set rather than exposed. A knob implies a choice that is not there |
+| **That the Engram tables are file-backed, not resident** | It is why 189 GiB of n-gram tables do not appear in the memory budget at all, and why packing them per rank on local NVMe is what keeps a cache miss one local read instead of two NFS round trips |
+| **That DSpark is a workload choice** | Their own measurement retires it above two streams: k=3 at 42 tok/s aggregate against 54 for `none`. An honest table that argues against their own default is worth more than the default |
+
+### Not taken
+
+- **Their CX7 interface pins.** `HEAD_CX7_IF=enp1s0f1np1` is `DOWN`/`NO-CARRIER`
+  on **both** our nodes — the cabled ports are `enp1s0f0np0` and
+  `enP2p1s0f0np0`, two rails. Copying the pin would hang `ncclCommInitRank`.
+  Same disagreement as [#two-node-vllm](#two-node-vllm), now with a second
+  hardware reason on top of the original one.
+- **Their rendezvous on the fabric subnet** (`10.0.0.1` / `10.0.22.1`).
+  [#nccl-socket-ifname](#nccl-socket-ifname), unchanged. Their `.env` notes
+  "NCCL cannot use the 10.0.0.x loopback aliases", which is the same lesson
+  reached from the other side.
+- **`GPU_MEM_UTIL=0.88`.** With the pool pinned this is a startup assertion —
+  `MemAvailable` at init must clear `util × 121.69 GiB` — and 0.88 asks for
+  107.1 GiB. [#glm53-flash](#glm53-flash) measured **0.87 being refused on
+  these nodes at 104.87 GiB free**. Shipping theirs would fail for a reason
+  that has nothing to do with this model.
+- **Their 600k context profile.** Their own `.env` calls 128k the first clean
+  boot and 600k the place you arrive by raising one knob at a time. This repo
+  does not ship a ceiling it has not climbed to.
+- **`memguard.sh`.** An OOM watchdog is a daemon, this repo ships zero
+  monitoring daemons on purpose, and upstream disables it by default anyway.
+- **Their `nfs-share.sh`, as code.** `roles/nfs` does the same job in the half
+  of the repo that owns machine state, read-only rather than read-write, and
+  ACL'd to a host address rather than to a `/24`.
+- **ZFS send/recv.** Single ext4 NVMe on both nodes. Not applicable.
+
+### Improved on
+
+- **The staging order.** `./start.sh` downloads both trees to the head and then
+  packs, which peaks at 385 GiB. `stage-weights.sh` packs first, ships rank 1's
+  shard over the cable, deletes the 189 GiB Engram **source** — a build input,
+  not a runtime file — and only then fetches the checkpoint. Peak ~292 GiB
+  instead of ~385 GiB, on a node with 274 GiB free. The order *is* the port.
+- **One mount path, two contents.** Rank 1's packed shard is rsynced **onto**
+  the peer's `$ENGRAM_PACKED` rather than into a `rank1/` subdirectory, so both
+  ranks mount the identical string. Upstream keeps a `.env` per node and can
+  afford per-rank paths; this repo's argument for a shared launcher is that both
+  ranks must come from one place, and a per-rank mount would quietly break it.
+
+### Recorded, not acted on
+
+- **`DSV41_IO_THREADS=96`** is tuned for their kit. GB10 has 20 cores, so this
+  is one of the few upstream numbers that is about their *machine* rather than
+  this architecture. Left at their value because the reads are NVMe-bound
+  rather than CPU-bound — but it is the first knob to question if prefill comes
+  in under their 970 tok/s at 8k.
+- **`MAX_NUM_BATCHED_TOKENS=1024` contradicts its own comment** in their
+  `.env`: the comment says the vision tower needs ≥ 1025 and that 1536 is the
+  smallest round value. It is consistent only because this model is served
+  text-only on this hardware. Anyone enabling the vision tower will hit it.
+- **Their `weight_budget.py`** answers "will the resident weights fit?" and
+  `ws check` answers "does this node qualify?" — the same question at different
+  resolutions. Not merged, because the interesting number here turned out to be
+  disk rather than memory, and `min_disk_gb` already carries it.

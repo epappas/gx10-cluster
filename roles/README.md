@@ -1,6 +1,6 @@
 # Roles
 
-Fourteen roles run in `site.yml`, in the order below; the other four are
+Fourteen roles run in `site.yml`, in the order below; the other five are
 opt-in and run only from `optional.yml`. Each row's tag is what you pass to
 `make apply TAGS=…` / `SKIP=…`, or to `make optional TAGS=…`.
 
@@ -36,6 +36,7 @@ already runs 2-node jobs, and `gx10-status` already shows you the machine.
 | `observability` | `exporters` | node_exporter + GPU textfile collector, ~20 MB RSS, for an external scraper |
 | `observability` | `dashboards` | the above plus prometheus + grafana **on this box** — costs model capacity |
 | `benchmark` | `bench` | perftest, fio, OpenMPI, DCGM and a pinned `nccl-tests` build. Installs only — `make bench` runs them |
+| `nfs` | `nfs` | exports one directory from rank 0 over the interconnect, mounts it read-only on the peers **at the same path**. For a checkpoint too large to replicate — [why](../docs/decisions.md#dsv41-flash-exl3) |
 
 ```bash
 make optional TAGS=ray

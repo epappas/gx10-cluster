@@ -1,0 +1,12 @@
+---
+- name: Re-export nfs shares
+  # exportfs -ra rereads /etc/exports without dropping established client
+  # mounts. `systemctl restart nfs-kernel-server` would, and a client with a
+  # `hard` mount then blocks every reader until the server returns - including
+  # a vLLM rank halfway through loading a 196 GiB checkpoint.
+  ansible.builtin.command: exportfs -ra
+  become: true
+  # It re-exports by definition - it only runs when /etc/exports changed, which
+  # is what the notify already established. `changed_when: true` states that
+  # rather than letting ansible-lint's idempotency rule guess.
+  changed_when: true

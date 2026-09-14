@@ -98,3 +98,30 @@
         apply:
           tags: [bench]
       tags: [bench, never]
+
+# DELIBERATELY A SECOND PLAY, AND DELIBERATELY NOT `serial:` - the same shape,
+# and the same reason, as site.yml's inter-node trust play.
+#
+# The export has to exist before any peer mounts it. Under `serial: 1` that
+# holds only because odysseus happens to be listed first in inventory.yml and
+# happens to be cluster_rank 0; reorder the file and the peer runs the whole
+# play first, and its mount fails against a server that does not exist yet.
+# That is a source of truth this repo has already been bitten by
+# (cluster_controller exists because `groups['gx10'][0]` and `cluster_rank == 0`
+# disagreed silently).
+#
+# With no `serial:`, the linear strategy runs task N on EVERY host before task
+# N+1. The role's server tasks precede its client tasks in file order, so the
+# controller has exported and started nfs-kernel-server before the first peer
+# reaches `mount` - whatever order the inventory is in.
+- name: Share one directory across the cluster over NFS
+  hosts: gx10
+  any_errors_fatal: true
+  tags: [nfs, never]
+  tasks:
+    - name: Export from rank 0, mount read-only on the peers
+      ansible.builtin.include_role:
+        name: nfs
+        apply:
+          tags: [nfs]
+      tags: [nfs]
