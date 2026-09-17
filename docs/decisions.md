@@ -2654,3 +2654,156 @@ precede its client tasks — so the ordering holds whatever the inventory says.
   `ws check` answers "does this node qualify?" — the same question at different
   resolutions. Not merged, because the interesting number here turned out to be
   disk rather than memory, and `min_disk_gb` already carries it.
+
+## <a name="glm53-indexer-workspace"></a>The second pass over MiaAI-Lab, and the buffer that was never the model's
+
+Three of that lab's recipes were re-read on 2026-09-17, against ports made
+between 2026-08-31 and 2026-09-14:
+[GLM-5.3-Flash-EXL3](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks)
+(five releases since), [Qwen3.8-Flash-Next](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks)
+and [DeepSeek-v4.1-Flash-EXL3](https://github.com/MiaAI-Lab/DeepSeek-v4.1-Flash-EXL3-2x-DGX-Sparks).
+
+The first pass found the usual shape — model plumbing around a little
+transferable knowledge ([#two-node-vllm](#two-node-vllm),
+[#glm53-flash](#glm53-flash), [#qwen38-flash-next](#qwen38-flash-next),
+[#dsv41-flash-exl3](#dsv41-flash-exl3)). The second found a buffer this repo
+had been measuring around without knowing it existed, and two of its own
+conclusions overturned by upstream's re-measurement.
+
+### The licence moved under the GLM port, and only forward
+
+`LICENSE.MIT` there now says it plainly: *"Before 2026-09-07 it was distributed
+under the MIT license."* This repo's GLM port landed 2026-08-31/09-01, so what
+was taken then — `patch_kpool_tail_slotmap.py` included — came under MIT and
+stays there. A grant on a version already received is not revocable.
+
+What changes is everything after. All three repositories are now
+AGPL-3.0-or-later, so the rule [#qwen38-flash-next](#qwen38-flash-next) set for
+one now governs all three: re-implement from the documented mechanism, do not
+copy the file. Everything below was written that way.
+
+### The sparse-indexer workspace, and a correction to this repo's own arithmetic
+
+vLLM sizes the sparse indexer's prefill gather workspace at `max_model_len *
+40` **entries** at 132 bytes, allocates it during the memory profile — so it
+comes out of the KV pool — and never shrinks it: ~3.93 GiB at 800k, ~4.92 GiB
+at 1M. Their `docs/DESIGN-indexer-workspace.md` has a byte-exact receipt
+against a live container.
+
+**This is what `vllm-2node-glm53-flash-exl3/workspace.yml` was missing.** That
+file records `MAX_MODEL_LEN=800000` being refused — a shortfall of **2.19
+GiB** — and concludes the published 1M figure is a property of the reference
+kit's headroom rather than of the model. Half right. At 800k this server also
+locks **3.93 GiB** in a buffer sized for a request shape it cannot admit, which
+is larger than the shortfall. The cap was not competing with the model; it was
+competing with dead space.
+
+The bound, the derivation and the failure modes are in
+`patch_indexer_workspace.py`; `INDEXER_WORKSPACE=rightsize` turns it on. It is
+**off by default** because nothing here has booted with it, and the arithmetic
+is asserted offline (`make indexer-workspace`) — including the floor, because a
+bound that is too *small* overruns a buffer the indexer gathers into, which is
+a correctness failure wearing a performance costume. The patch only ever caps.
+
+### Two conclusions reversed, and only one of them was ours to reverse
+
+**Reduced-vocabulary MTP drafting.** [#qwen38-flash-next](#qwen38-flash-next)
+declined it on upstream's own table — acceptance 56.5% → 47.8%. They
+re-measured independently on 2026-09-16 (`docs/bench/rerun-20260916.md`: three
+arms, one session, 24/24 rows each) and now ship it: **+8.4% mean**, acceptance
+unchanged, the gain entirely step time — the drafter's 248,320-row BF16
+`lm_head` is read three times per MTP=3 step, and slicing it cuts bytes without
+moving what the target accepts.
+
+**The decline stands anyway, and not for licence reasons.** That +8.4% is
+measured `fp8 KV → tuned`. This repo serves `--kv-cache-dtype auto`, and their
+`orig → tuned` column — the arm matching our configuration — is **+2.6% mean
+with code S=8 at −11%**. Not established for the server this repo runs.
+Recorded as a live question, not a closed one.
+
+**Vision on DeepSeek-V4.1.** This one was a real defect. The workspace copied
+upstream's text-only first-boot profile and its *comment* but never its flag,
+so `up.sh` said "we serve text-only" while passing nothing and letting the
+image decide. A knob that exists only as a sentence is what this repo keeps
+finding in other people's recipes. It is now `LANGUAGE_MODEL_ONLY`, defaulting
+to vision **on** as upstream has since 2026-09-13.
+
+The kernel argument inverts the obvious reading and is worth keeping: the SM12x
+clamp pinning `max_image_tokens` to 0 keys off *device capability*, not off the
+flag, so it applies either way — it is what makes vision safe here rather than
+what blocks it. The cost is that in-image bidirectional visibility is off, with
+no parity probe against the native checkpoint.
+
+And a measurement that contradicts the tuning advice already in that file: at
+600k a 450k prompt ends at **2.9 GiB** head `MemAvailable` with a 1536 chunk
+against **2.2 GiB** with 1024 — the larger chunk finishes the prefill in fewer
+scheduler passes. "Activation peak grows with chunk × context" is still true;
+it is not the binding term at that size.
+
+### Promoted into the shared launcher
+
+Both belong beside `REQUIRE_IDLE_GPU`, which
+[#qwen38-flash-next](#qwen38-flash-next) promoted for the same reason, and both
+exist because the same failure — not enough host memory — arrives as a *network*
+error. See `lib/twonode.sh` for the mechanisms.
+
+- **A host-memory preflight**, reading `/proc/meminfo` on both nodes before
+  either container starts. Unlike the GPU check it is **not opt-in**, and the
+  difference is that the workspace has already stated its claim: the
+  utilisation is in `MODEL_ARGS`. No flag, no claim, no check.
+- **Page-cache eviction without root.** Weights just downloaded or rsynced to
+  the peer are still resident as clean pages, in the same unified pool the
+  engine is about to allocate from. It runs *before* the memory preflight, so
+  that check measures the truth rather than the page cache. Verified here: 286
+  MiB of a 300 MB file left `Cached` on the first call.
+
+### The probe that would have called the bug a perfect score
+
+`spec-decode-accept` had no verdict for vllm#53030, where a piecewise-CUDA-graph
+`BatchDescriptor` collision makes the per-position counters report **every**
+drafted token as accepted — the one reading in that tool that looks like the
+best possible result.
+
+The test is the **absence of decay**, never a high head, and that distinction
+is the finding. Upstream's gate fails on position 0 pinned at ~1.00, which
+would flag this repo's own healthy GLM ladder (`1.00 0.99 0.99 0.97 0.97 0.92
+0.88`, on a server that was fine). A `thin` verdict came with it: below ~100
+drafts a perfect ladder is the *likely* reading rather than a suspicious one,
+and saying so beats returning "ok".
+
+### Declined
+
+- **Cooperative decode MoE** (GLM +7.3–9.3%, V4.1 +25–35% decode). A
+  sha256-pinned prebuilt `.so` staged to both ranks, which upstream says not to
+  rebuild — two clean `nvcc` runs are not bit-identical and their own tool
+  rejects a rebuild that is not the pin. AGPL code plus an opaque binary
+  trusted by hash is two things this repo does not take.
+- **Fair v5 mixed-prefill, adaptive-k, APC no-store, dense FP8.** AGPL
+  host-side patches, single-workspace scope; the fair scheduler alone is ~1,000
+  lines whose test suite is its own migration history.
+- **`spark_doctor.sh`.** Re-implements `verify.yml` and
+  [diagnose-interconnect](runbooks/diagnose-interconnect.md).
+- **The InstantTensor image.** Now their default, and they tell existing kits
+  to move. It is a weight *loader*, so declining costs boot time and nothing
+  else — and this workspace has a prior question about its image: `up.sh` pins
+  `:exl3`, a **mutable tag**, and upstream shipped E3 grouped fat-expert
+  prefill (+37–45% cold prefill) and has rebuilt behind it since. So what runs
+  here may no longer be what its numbers were measured on. Not resolved, because
+  pinning a digest without a boot to attach it to records a number nobody took.
+
+### Convergent, and worth having on the record
+
+Their re-run independently confirms the argument
+`workspaces/bench/quant-quality-ab` exists to test: quantised keys perturb the
+QSA indexer's *block selection*, `tok/step` falls in **8 of 8 cells**, and fp8
+KV costs −5.3% mean throughput for 1.80× the cache. A capacity trade, not a
+free win — and their own CHANGELOG had presented only the capacity side. They
+also adopted NFS weight sharing for the GLM kit, which
+[#dsv41-flash-exl3](#dsv41-flash-exl3) reached independently, and hit this
+repo's snapshot-resolution bug from the other side (resolve via `refs/main`,
+not `ls` order).
+
+One caveat they now flag that this repo inherited: their `code` benchmark is 50
+byte-identical `clamp_NN` helpers at `p1/p2/p3 = 1.00/0.99/0.99` — the drafter
+at saturation. Valid for A/B deltas, not as an absolute. `prose` is the
+representative column, and `workspaces/bench/decode-content-mix` now says so.

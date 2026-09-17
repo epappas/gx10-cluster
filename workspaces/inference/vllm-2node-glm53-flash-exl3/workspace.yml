@@ -52,6 +52,17 @@ summary: GLM-5.3-Flash EXL3 4bpw across both nodes - 66.4 tok/s, 0.962 acceptanc
 #    published 1M figure is a property of the reference kit's headroom, not of
 #    the model - see the arithmetic above, which stays correct.
 #
+#    THAT READING WAS HALF RIGHT, and the missing half is not the model. At
+#    800k vLLM also locks 3.93 GiB in the sparse-indexer prefill workspace -
+#    max_model_len * 40 entries at 132 B, allocated during the memory profile
+#    and never shrunk, so it comes straight out of the KV pool. The shortfall
+#    above is 2.19 GiB. The cap was not competing with the weights; it was
+#    competing with a buffer sized for a request shape this server cannot
+#    admit. INDEXER_WORKSPACE=rightsize caps it at the largest gather a legal
+#    step can ask for (~0.10 GiB at 800k). Off by default because it has not
+#    booted here - it is the first thing to try before believing this row.
+#    docs/decisions.md#glm53-indexer-workspace
+#
 # ONE OPEN NUMBER: prefix-cache reuse measured 0.50 efficiency (3584 of 7168
 # allowed) rather than the ~1.0 the README's hybrid-page argument predicts.
 # Not chased. It is a throughput question, not a correctness one, and the

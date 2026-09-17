@@ -318,6 +318,24 @@ Everything below goes in the workspace's `.env`, **on rank 0 only**.
 | `EXTRA_ENV` | *unset* | A bash array of `-e VAR=value`, handed to **both** ranks |
 | `EXTRA_MOUNTS` | *unset* | A bash array of `-v host:container`, handed to **both** ranks |
 | `PRE_EXEC` | *unset* | A snippet run **inside** the container before `vllm serve`. One workspace uses it; see below |
+| `REQUIRE_IDLE_GPU` | workspace's choice | `false` to launch with something else already on a GPU |
+| `HOST_MEM_HEADROOM_GIB` | `4` | The margin the host-memory preflight wants above the utilisation itself |
+| `EVICT_PAGE_CACHE` | `true` | `false` to leave the page cache alone before launching |
+| `EVICT_PAGE_CACHE_PATH` | `$HF_HOME/hub` | Weights somewhere other than the HF cache |
+
+### Two preflights run before either container starts
+
+Both exist because the same failure — not enough host memory — reaches you as a
+*network* error: vLLM checks free memory a minute into the load, per rank, and
+rank 0 reports rank 1's death as a gloo `Connection closed by peer`.
+
+**Page-cache eviction** drops the clean pages of weights just downloaded or
+copied to the peer — on unified memory those sit in the pool the engine is
+about to allocate from. Then the **host-memory check** reads `/proc/meminfo` on
+both nodes, so it measures the truth rather than the page cache, and refuses
+when `MemAvailable` cannot cover `--gpu-memory-utilization × MemTotal` plus
+`HOST_MEM_HEADROOM_GIB`. A workspace that passes no utilisation flag is making
+no claim and is skipped.
 
 `PRE_EXEC` is the narrow escape hatch, and the narrowness is the point: it does
 **not** hand the workspace the container's argv. The library still assembles the

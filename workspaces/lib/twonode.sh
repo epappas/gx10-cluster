@@ -325,10 +325,117 @@ MSG
     return 0
 }
 
+# IS THERE ENOUGH HOST MEMORY, ON EITHER NODE, FOR THE UTILISATION ASKED FOR?
+#
+# The GPU pool on GB10 IS system RAM, so `--gpu-memory-utilization 0.86` is a
+# claim on 0.86 x MemTotal of the same LPDDR5x the page cache and your shell
+# are using. vLLM checks this itself - about a minute into the load, per rank,
+# after which rank 1's refusal reaches you as rank 0 reporting a gloo
+# "Connection closed by peer". The same misdirection twonode_require_idle_gpu
+# exists for, one layer down: the error names the network, the cause is memory.
+#
+# NOT OPT-IN, unlike the idle-GPU check. That one must be asked for because
+# "another process holds a GPU" is fatal at 0.835 and fine at 0.40 and this
+# library cannot tell which. Here the workspace has already told us - the
+# utilisation is in MODEL_ARGS. No such flag means no claim, and no check.
+#
+# Ported from the preflight_memory() gate in
+# MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks.
+twonode_util_from_args() {  # prints the --gpu-memory-utilization value, if any
+    local a prev=
+    # ${arr[@]+"${arr[@]}"} is the set -u safe expansion of a possibly-unset
+    # array: bare ${#arr[@]} is an unbound-variable error, not 0.
+    for a in ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"}; do
+        [[ $a == --gpu-memory-utilization=* ]] && { printf '%s' "${a#*=}"; return 0; }
+        [[ $prev == --gpu-memory-utilization ]] && { printf '%s' "$a"; return 0; }
+        prev=$a
+    done
+    return 1
+}
+
+twonode_meminfo() {  # $1 = "local" | <host>; prints "<MemTotal_kB> <MemAvailable_kB>"
+    # shellcheck disable=SC2016  # $2 is awk's field, not a shell positional
+    local prog='/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{print t, a}'
+    if [[ ${1:-local} == local ]]; then
+        awk "$prog" /proc/meminfo 2>/dev/null
+    else
+        ssh -n -o BatchMode=yes -o ConnectTimeout=5 "$1" \
+            "awk $(printf '%q' "$prog") /proc/meminfo" 2>/dev/null
+    fi
+}
+
+twonode_require_host_memory() {
+    local util short=0 where label total avail msg
+    util=$(twonode_util_from_args) || return 0
+
+    # Headroom above the claim itself: between vLLM's check and the allocation
+    # sit the loader's own buffers. 4 GiB is what a cold two-node boot needed.
+    local headroom=${HOST_MEM_HEADROOM_GIB:-4}
+
+    for where in local "${PEER:-}"; do
+        [[ -n $where ]] || continue
+        label=$where; [[ $where == local ]] && label=$(hostname)
+        read -r total avail <<<"$(twonode_meminfo "$where")"
+        # An unreadable peer is twonode_up's problem, not this check's.
+        [[ -n ${total:-} && -n ${avail:-} ]] || continue
+        # One awk: it decides AND formats, so the arithmetic exists once.
+        # Empty output means the node is fine.
+        msg=$(awk -v l="$label" -v t="$total" -v a="$avail" -v u="$util" -v h="$headroom" 'BEGIN{
+            need = t * u + h * 1048576
+            if (a >= need) exit
+            printf "host memory on %s is short: MemAvailable %.1f of %.1f GiB, and utilisation %s plus %s GiB headroom wants %.1f", l, a/1048576, t/1048576, u, h, need/1048576
+        }') || continue
+        [[ -n $msg ]] || continue
+        echo "$msg" >&2
+        short=1
+    done
+
+    (( short )) || return 0
+    cat >&2 <<'MSG'
+
+  The GPU pool here IS system RAM. vLLM makes this same check itself, but a
+  minute into the load, inside whichever rank is short - and the OTHER rank
+  reports that death as a gloo "Connection closed by peer", which points at
+  the cable rather than at the memory.
+
+  Free some (a stale container; ws down, then retry), lower the utilisation,
+  or raise the margin with HOST_MEM_HEADROOM_GIB= in .env.
+MSG
+    return 1
+}
+
+# DROP THE CHECKPOINT'S OWN CLEAN PAGES BEFORE LOADING IT AGAIN.
+#
+# Weights just downloaded or rsynced to the peer are still resident as clean
+# page cache - on unified memory, in the same pool the engine is about to
+# allocate from. evict-page-cache.py has the mechanism and why it needs no
+# root. It runs BEFORE the memory check above, so that check measures the
+# truth rather than the page cache.
+#
+# Cheap, safe and idempotent, so it runs by default. EVICT_PAGE_CACHE=false
+# turns it off; EVICT_PAGE_CACHE_PATH points it somewhere other than the cache.
+twonode_evict_page_cache() {
+    [[ ${EVICT_PAGE_CACHE:-true} == true ]] || return 0
+    local script="${BASH_SOURCE[0]%/*}/evict-page-cache.py"
+    local target=${EVICT_PAGE_CACHE_PATH:-${HF_HOME:-$HOME/.cache/huggingface}/hub}
+    [[ -r $script ]] || return 0
+
+    # The script names its own host and prints one line to stderr, so there is
+    # nothing to prefix or filter here. `python3 -` reads the program from
+    # stdin, which is why this is a file: it goes over the wire as it runs.
+    python3 "$script" "$target" || true
+    [[ -n ${PEER:-} ]] || return 0
+    ssh -o BatchMode=yes -o ConnectTimeout=5 "$PEER" \
+        "python3 - $(printf '%q' "$target")" <"$script" || true
+    return 0
+}
+
 twonode_up() {
     twonode_resolve || return 1
     twonode_common_env
     twonode_pull || { echo "image pull failed - see above" >&2; return 1; }
+    twonode_evict_page_cache
+    twonode_require_host_memory || return 1
 
     local peer_mgmt
     peer_mgmt=$(getent hosts "$PEER" | awk '{print $1; exit}')

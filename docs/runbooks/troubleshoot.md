@@ -78,6 +78,62 @@ nvidia-smi --query-compute-apps=pid,used_memory --format=csv
 Lower `OLLAMA_MAX_LOADED_MODELS`, or the model/batch size.
 → [hardware.md](../hardware.md#unified-memory)
 
+### <a name="uvm-livelock"></a>A server stops producing tokens, `/health` still says 200, and the GPU reads 96% at idle wattage
+
+A **different failure from the swap cliff above**, and the tell is the
+wattage. If the kernel pages vLLM's memory out — or back in — under pressure,
+the UVM driver can enter a spin it does not leave:
+
+- every engine step stalls; the log repeats
+  `No available shared memory broadcast block found in 60 seconds`
+- `nvidia-smi` shows **~96% utilization at 12–20 W** — busy-looking, drawing
+  idle power
+- the stuck request sits in `num_requests_running` forever, and
+  `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` never fires
+- worst case sshd cannot fork and the node drops off the network
+
+**`/health` stays 200 throughout, so it is not a liveness signal for this.**
+vLLM's V1 health check reads an errored flag; it never probes the workers.
+Watch `/metrics` instead — alert only when both hold for ~10 consecutive
+60 s ticks, which is what keeps a long chunked prefill from false-alarming:
+
+```bash
+curl -s localhost:8893/metrics | grep -E 'num_requests_(running|waiting)|_tokens_total'
+# requests in flight AND prompt_tokens_total + generation_tokens_total frozen
+```
+
+It is survivable without a machine-room trip — about 18 minutes:
+
+```bash
+docker logs --tail 300 <name>              # 1. capture first; this is the evidence
+docker kill <name>                         # 2. graceful stop WILL hang. Skip it
+sudo swapoff -a && sudo swapon -a          # 3. on every node, containers down
+```
+
+Cycling swap is not superstition: pages parked in swap days earlier are what a
+large prefill touches to trigger this, so `swappiness=1` prevents new page-outs
+and does nothing about the ones already there.
+
+At step 4, `nvidia-smi` may **still read 96% with nothing running**. After the
+kill that number is cosmetic — prove it before concluding the driver is wedged:
+
+```bash
+docker run --rm --gpus all --entrypoint python3 <serving-image> \
+  -c "import torch; a=torch.ones(2048,2048,device=0); print('CUDA_OK', float((a@a).sum()))"
+```
+
+`CUDA_OK` means restart the stack and the counter resets with the next real
+workload. A probe that *hangs* is the node that actually needs a reboot.
+
+Then wait for `MemFree` to settle before restarting — if the teardown just
+returned ~80 GiB of weights, vLLM's own startup pre-check is the real gate.
+
+Field notes from MiaAI-Lab's GLM-5.3-Flash kit (`docs/uvm-livelock-gb10.md`),
+which is where the "survivable without a power cycle" part comes from; two
+incidents on 4× GB10. Not reproduced here — this repo has seen the swap cliff
+above, not this.
+→ [reboot-recover](reboot-recover.md), [hardware.md](../hardware.md#unified-memory)
+
 ## Docker
 
 ### `permission denied` on the docker socket

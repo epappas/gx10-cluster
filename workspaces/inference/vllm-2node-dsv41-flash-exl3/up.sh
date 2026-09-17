@@ -188,8 +188,17 @@ MODEL_ARGS=(
     # the thing that grew. If you raise --max-model-len, lower this first.
     #
     # FLOOR: with the vision tower enabled vLLM needs >= max image tokens + 1
-    # (1025), so 1024 is rejected and 1536 is the smallest round value. We serve
-    # text-only, which is what makes 1024 legal in their 600k profile at all.
+    # (1025), so 1024 is rejected at boot and 1536 is the smallest round value.
+    # Vision is ON here (below), so 1536 is this workspace's floor and the
+    # launch refuses below it - their 600k profile's 1024 is a TEXT-ONLY
+    # number.
+    #
+    # AND THE LARGER CHUNK IS NOT THE MORE EXPENSIVE ONE, which is the opposite
+    # of what "activation peak grows with chunk x context" predicts. Upstream
+    # measured 2026-09-13 at 600k: a 450k prompt ends at 2.9 GiB head
+    # MemAvailable at 1536 against 2.2 GiB at 1024, because the larger chunk
+    # finishes the prefill in fewer scheduler passes. The peak-activation
+    # argument is still true; it is just not the binding term at this size.
     --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS:-2048}"
 
     # Cap one request's tokens per step, so a short chat sent during a long
@@ -225,6 +234,38 @@ MODEL_ARGS=(
 
     --enable-prefix-caching
 )
+
+# VISION, WHICH THIS WORKSPACE WAS SILENTLY ALREADY SERVING. It copied
+# upstream's text-only first-boot profile and its COMMENT, but never its flag -
+# so the note above said "we serve text-only" while the serve line passed
+# nothing and the image decided. A knob that exists only as a sentence is what
+# this repo keeps finding in other people's recipes.
+#
+# Default is now vision ON, as upstream's has been since 2026-09-13. Why that
+# is safe inverts the obvious reading: the image pins max_image_tokens to 0 on
+# SM12x (FlashInfer has no SM120 sparse-MLA kernel for the vision-widened 1152
+# window), and that clamp keys off DEVICE CAPABILITY rather than off this flag,
+# so it applies either way. It is what makes vision safe here, not what blocks
+# it. The cost: in-image bidirectional visibility is off, with no parity probe
+# against the native checkpoint - verify before trusting dense document work.
+#
+# UNVERIFIED HERE like the rest of this workspace - see workspace.yml.
+if [[ ${LANGUAGE_MODEL_ONLY:-0} == 1 ]]; then
+    MODEL_ARGS+=( --language-model-only )
+else
+    # Vision needs MAX_NUM_BATCHED_TOKENS >= max image tokens + 1 = 1025, so
+    # 1024 is REJECTED AT BOOT and 1536 is the smallest round value. The 2048
+    # default above clears it; this refuses rather than letting a lowered
+    # chunk in .env turn into a boot failure whose message names neither knob.
+    if (( ${MAX_NUM_BATCHED_TOKENS:-2048} < 1536 )); then
+        echo "MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS} is below the 1536 vision floor." >&2
+        echo "  Raise it, or set LANGUAGE_MODEL_ONLY=1 for a text-only server." >&2
+        exit 1
+    fi
+    MODEL_ARGS+=( --mm-encoder-tp-mode data )
+    [[ -n ${LIMIT_MM:-} ]] && MODEL_ARGS+=( --limit-mm-per-prompt "$LIMIT_MM" )
+    [[ ${SKIP_MM_PROFILING:-1} == 1 ]] && MODEL_ARGS+=( --skip-mm-profiling )
+fi
 
 # DSpark drafts from MTP experts already in the checkpoint - no second repo to
 # download, unlike GLM-5.3's DFlash2. Upstream measured it 2026-09-12 on prose:

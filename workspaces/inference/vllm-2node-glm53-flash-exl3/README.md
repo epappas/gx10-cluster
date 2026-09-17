@@ -280,6 +280,31 @@ MODEL=$CSNAP GPU_MEMORY_UTILIZATION=0.86 MAX_MODEL_LEN=600000 \
   ws up vllm-2node-glm53-flash-exl3
 ```
 
+#### That reading was half right
+
+At 800k, vLLM also locks **3.93 GiB** in the sparse-indexer prefill workspace —
+`max_model_len * 40` entries at 132 B, allocated during the memory profile and
+never shrunk, so it comes straight out of the KV pool. The shortfall above is
+**2.19 GiB**. The context cap was not competing with the weights; it was
+competing with a buffer sized for a request shape this server cannot admit.
+
+The largest gather a legal prefill step can ask for is
+`min(max_num_seqs, max_num_batched_tokens) * ceil(max_model_len / 4)` —
+800,000 entries, ~0.10 GiB, at the cap above.
+
+```bash
+INDEXER_WORKSPACE=rightsize MAX_MODEL_LEN=800000 \
+  ws up vllm-2node-glm53-flash-exl3          # then read the logged KV pool size
+```
+
+**Off by default, because nothing here has booted with it on.** The mechanism
+is documented upstream against a live container with a byte-exact receipt; the
+arithmetic and the rewrite are asserted offline (`make indexer-workspace`), and
+the patch only ever caps — never raises — so a wrong environment yields a
+workspace no smaller than a correct one. If it boots, this row is the one to
+re-take.
+→ [decisions.md#glm53-indexer-workspace](../../../docs/decisions.md#glm53-indexer-workspace)
+
 ### What it measured once up
 
 | | |

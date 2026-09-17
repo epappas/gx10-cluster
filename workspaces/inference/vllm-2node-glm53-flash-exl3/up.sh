@@ -181,10 +181,55 @@ if [[ -n ${PEER:-} ]]; then
              exit 1; }
 fi
 
+# THE THREE NUMBERS THAT SIZE THE SPARSE-INDEXER WORKSPACE, resolved here
+# rather than inline in MODEL_ARGS. They are passed to vLLM below AND used to
+# compute the right-sizing cap, and a default that drifted between the two
+# would hand the container a bound derived from a context it is not serving.
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-131072}
+MAX_NUM_SEQS=${MAX_NUM_SEQS:-4}
+MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-2048}
+
+# RIGHT-SIZE THE SPARSE-INDEXER PREFILL WORKSPACE - OPT-IN, AND UNVERIFIED HERE.
+#
+# vLLM sizes that workspace `max_model_len * 40` entries at 132 B during the
+# memory profile, so it comes out of the KV pool and never shrinks: ~3.93 GiB
+# at 800k. The largest gather a legal step can ask for is three orders of
+# magnitude smaller - patch_indexer_workspace.py has the derivation.
+#
+# This is what workspace.yml's "800000 STILL DID NOT FIT" note was missing:
+# that refusal was 2.19 GiB short while 3.93 GiB sat locked in a buffer for a
+# request shape this server cannot admit. So it is very likely the lever that
+# raises the context here - and "very likely" is why it is off by default.
+#
+#   INDEXER_WORKSPACE=rightsize   in .env, then read the logged KV pool size
+#
+# docs/decisions.md#glm53-indexer-workspace
+INDEXER_WORKSPACE=${INDEXER_WORKSPACE:-stock}
+INDEXER_SRC=$PWD/patch_indexer_workspace.py
+INDEXER_PATH=/tmp/glm53-patch_indexer_workspace.py
+INDEXER_ENTRIES=
+if [[ $INDEXER_WORKSPACE == rightsize ]]; then
+    [[ -f $INDEXER_SRC ]] || { echo "missing $INDEXER_SRC" >&2; exit 1; }
+    # ceil(len / 4) compressed rows, min(seqs, chunk) of them. Integers only.
+    rows=$(( MAX_NUM_SEQS < MAX_NUM_BATCHED_TOKENS ? MAX_NUM_SEQS : MAX_NUM_BATCHED_TOKENS ))
+    INDEXER_ENTRIES=$(( rows * ( (MAX_MODEL_LEN + 3) / 4 ) ))
+    install -m 0644 "$INDEXER_SRC" "$INDEXER_PATH"
+    if [[ -n ${PEER:-} ]]; then
+        scp -q -o BatchMode=yes -o ConnectTimeout=10 "$INDEXER_SRC" "$PEER:$INDEXER_PATH" \
+            || { echo "cannot stage the indexer patch to $PEER - refusing to start" >&2
+                 echo "  one rank right-sized and one not is two different KV pools" >&2
+                 exit 1; }
+    fi
+    echo "indexer workspace  rightsize: $INDEXER_ENTRIES entries against $(( MAX_MODEL_LEN * 40 )) stock"
+fi
+
 EXTRA_MOUNTS=(
     -v "$JIT_CACHE/triton:/root/.triton/cache"
     -v "$JIT_CACHE/tilelang:/root/.tilelang/cache"
     -v "$KPOOL_PATH:/opt/glm53/patch_kpool_tail_slotmap.py:ro"
+)
+[[ -n $INDEXER_ENTRIES ]] && EXTRA_MOUNTS+=(
+    -v "$INDEXER_PATH:/opt/glm53/patch_indexer_workspace.py:ro"
 )
 
 EXTRA_ENV=(
@@ -226,6 +271,11 @@ EXTRA_ENV=(
     # with the least headroom to absorb an under-estimate - it is here as a
     # named knob to try when the pool is the binding constraint, not as advice.
     -e "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=${CG_ESTIMATE:-1}"
+
+    # Empty unless INDEXER_WORKSPACE=rightsize, and the patch treats empty as
+    # "leave the stock workspace alone" - so the flag and the mount above turn
+    # on together or not at all.
+    -e "GX10_INDEXER_MAX_ENTRIES=${INDEXER_ENTRIES:-}"
 )
 
 # TWO KINDS OF PATCH, and they get opposite failure handling.
@@ -253,6 +303,12 @@ PRE_EXEC='python3 /opt/glm53/patch_kpool_tail_slotmap.py || {
     echo "kpool tail slot-map patch did not apply - refusing to serve" >&2
     exit 1
 }
+if [ -f /opt/glm53/patch_indexer_workspace.py ]; then
+    python3 /opt/glm53/patch_indexer_workspace.py || {
+        echo "indexer workspace patch did not apply - refusing to serve" >&2
+        exit 1
+    }
+fi
 for p in patch_glm_video_placeholders patch_suppress_stops_in_reasoning \
          patch_scheduler_decode_floor patch_glm5_drafter_group \
          patch_hybrid_prefix_hit patch_xgrammar_termination; do
@@ -301,7 +357,7 @@ MODEL_ARGS=(
     # then 196608 hit the same wall at 11.98 GiB. 131072 leaves margin for that
     # drift and yields GPU KV cache size: 136,212 tokens. Raise it if your
     # nodes are headless.
-    --max-model-len "${MAX_MODEL_LEN:-131072}"
+    --max-model-len "$MAX_MODEL_LEN"
 
     # REQUIRED, and the one value here with no alternative. The SM12x
     # sparse-MLA kernel accepts only packed `fp8_ds_mla`. bf16 KV has no sparse
@@ -312,7 +368,7 @@ MODEL_ARGS=(
 
     # Four IN-FLIGHT generations, not four parked chat sessions: the OpenAI API
     # is stateless and idle conversations reserve nothing.
-    --max-num-seqs "${MAX_NUM_SEQS:-4}"
+    --max-num-seqs "$MAX_NUM_SEQS"
 
     # 2048, not the 8192 that is normal elsewhere, and not the 1024 this
     # workspace shipped first. Two separate facts, and only one of them is a
@@ -345,7 +401,7 @@ MODEL_ARGS=(
     # so doubling the chunk doubles the worst-case stall a streaming client
     # sees while somebody else's prompt is going in. `ws up vllm-prefill-ladder`
     # is how you re-take this table if you want to trade the other way.
-    --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS:-2048}"
+    --max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS"
 
     # Prefix caching earns its keep here because the client resends the whole
     # history every turn. Hits are BLOCK-ALIGNED only (3584-token hybrid

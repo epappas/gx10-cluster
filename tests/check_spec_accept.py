@@ -169,6 +169,38 @@ def main() -> int:
     # A short ladder (k=2 MTP) has to reach a verdict too, not index-error.
     check("k=2 ladder", sa.verdict(ladder("structured", 0.95, 0.88))[0], "ok")
 
+    # --- vllm#53030: acceptance pinned at 1.00 is a BUG, not a win ----------
+    # A piecewise-CUDA-graph BatchDescriptor collision makes the per-position
+    # counters report every drafted token as accepted, at every position. It is
+    # the only reading here that looks like the best possible result.
+    check("no decay at all is the bug",
+          sa.verdict(ladder("structured", 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0))[0],
+          "pinned")
+    # Cumulative ratios, so a genuinely pinned server lands a hair under 1.00.
+    check("pinned just under 1.00",
+          sa.verdict(ladder("structured", 0.999, 0.999, 1.0, 0.998))[0], "pinned")
+    # The bug is not a property of the prompt class: the counters are fiction
+    # whatever was drafted, so unlike `mask` this one convicts on prose too.
+    check("pinned convicts on prose as well",
+          sa.verdict(ladder("prose", 1.0, 1.0, 1.0, 1.0))[0], "pinned")
+
+    # THE FALSE POSITIVE THIS ONE COULD CAUSE, and it is this repo's own
+    # measurement: the GLM kit's healthy structured ladder STARTS at 1.00 and
+    # that server was fine (workspaces/inference/vllm-2node-glm53-flash-exl3).
+    # Convicting on position 0 would flag it. The test is the absence of decay
+    # across the whole ladder, never a high head.
+    check("our own 1.00-headed healthy ladder is not the bug",
+          sa.verdict(ladder("structured", 1.00, 0.99, 0.99, 0.97, 0.97, 0.92, 0.88))[0],
+          "ok")
+    # Two positions cannot show a decay, so they cannot convict either.
+    check("k=2 at 1.00 is too short to convict",
+          sa.verdict(ladder("structured", 1.0, 1.0))[0], "ok")
+
+    # --- too little traffic is not a verdict about the server ---------------
+    thin = {"drafts": 12, "class": "structured",
+            "per_pos": list(enumerate((1.0, 1.0, 1.0)))}
+    check("a ladder fitted to 12 drafts says so", sa.verdict(thin)[0], "thin")
+
     # --- the SGLang half ----------------------------------------------------
     # SGLang publishes NO per-position counter, so this tool degrades to accept
     # length there. The risk in a degraded path is that it degrades SILENTLY -
@@ -228,7 +260,7 @@ def main() -> int:
               file=sys.stderr)
         return 1
 
-    print("spec-accept: both metric parsers, 7 ladder verdicts and the "
+    print("spec-accept: both metric parsers, 15 ladder verdicts and the "
           "length-only fallback hold")
     return 0
 

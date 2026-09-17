@@ -139,6 +139,23 @@ regression, not an evaluation suite. If you need real numbers, run a real eval
 harness; this exists to tell you that a knob you turned changed something a
 tok/s number would never show.
 
+## Upstream has since measured the cost side, independently
+
+The argument this workspace exists to test — that quantising *keys* changes
+which blocks a sparse indexer **selects**, so the failure mode is a wrong
+answer rather than a slower one — now has a throughput measurement beside it.
+MiaAI-Lab's three-arm re-run (2026-09-16) reports fp8 KV costing **−5.3% mean
+decode** (−1.4% prose, −9.2% code, growing with concurrency) for **1.80×** the
+cache, with `tok/step` falling in **8 of 8 cells** — consistent with exactly
+the indexer perturbation described here, showing up as acceptance rather than
+as an error.
+
+So fp8 KV is a capacity trade, not a free win. That does not change what this
+tool grades — quality is still the question, and their re-run does not measure
+it — but it does mean the tokens-per-GiB argument for turning it on should be
+quoted with its throughput cost attached.
+→ [decisions.md#glm53-indexer-workspace](../../../docs/decisions.md#glm53-indexer-workspace)
+
 ## Sources
 
 - [MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks) — the fp8-KV quality argument and the task shape (AGPL-3.0-or-later; this is an independent implementation)

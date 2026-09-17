@@ -89,6 +89,18 @@ than the others, which is not a comparison.
   the prompt is not actually being retrieved from context — raise `--context`
   and check the reply is quoting rather than inventing.
 
+## A high `code` number can be the corpus rather than the server
+
+Upstream re-measured their own task set on 2026-09-16 and qualified the column
+this workspace inherited: their `code` prompt is 50 byte-identical `clamp_NN`
+helpers differing by a two-digit suffix, and it measures the drafter at
+saturation (`p1/p2/p3 = 1.00/0.99/0.99`). That is a fine A/B fixture — both
+arms see the same prompt — and a poor absolute. A code number far above the
+prose one is the expected shape, not a finding.
+
+`prose` is the representative column. Read a config change off the delta
+between arms, never off the height of the `code` row.
+
 ## Sources
 
 - [MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks) — the task set and the finding (AGPL-3.0-or-later; independent implementation)

@@ -92,6 +92,17 @@ POS_RE = re.compile(r'position="(\d+)"')
 # subtracting two metric snapshots.
 SGL_RE = re.compile(r"^(sglang:[a-zA-Z0-9_]+)(?:\{([^}]*)\})?\s+(\S+)$")
 
+# Below this many drafts the ladder is noise and `verdict` says so instead of
+# guessing. Upstream's gate uses the same floor against live traffic; this tool
+# drives its own prompts and clears it inside one default run.
+MIN_DRAFTS = 100
+
+# The no-decay floor for the vllm#53030 verdict. 0.995 rather than 1.0 because
+# these are cumulative ratios: one step of real disagreement puts a genuinely
+# pinned server a hair under 1.00, and an exact test would miss the bug. The
+# best honest structured ladder measured here ends at 0.88 - a wide gap.
+PINNED_FLOOR = 0.995
+
 # Deliberately two very different regimes. See the module docstring: a single
 # prompt class produces a number nobody can interpret without the other one.
 PROMPTS = {
@@ -446,6 +457,19 @@ def measure(base: str, model: str, cls: str, runs: int, max_tokens: int,
     }
 
 
+# How each verdict prints. `thin` is not a FLAG: "not enough traffic yet" is a
+# statement about the RUN, not about the server, and marking it like a fault
+# trains the reader to ignore the column.
+MARKS = {
+    "ok": "  ok  ",
+    "thin": " ---- ",
+    "mask": " FLAG ",
+    "pinned": " FLAG ",
+    "weak": " FLAG ",
+    "none": " FLAG ",
+}
+
+
 def verdict(m: dict) -> tuple[str, str]:
     """Name the shape - but only where the shape means something.
 
@@ -487,8 +511,37 @@ def verdict(m: dict) -> tuple[str, str]:
 
     if not pos or m["drafts"] == 0:
         return ("none", "no drafts were produced")
+
+    # TOO FEW DRAFTS TO READ A SHAPE OFF. Every verdict below describes the
+    # shape of a curve, and at a handful of drafts a perfect ladder is the
+    # LIKELY reading rather than a suspicious one. Returning "ok" here would be
+    # this tool's own version of the silent failure it exists to catch.
+    if m["drafts"] < MIN_DRAFTS:
+        return ("thin", f"only {m['drafts']:,} drafts so far - below about "
+                        f"{MIN_DRAFTS:,} the ladder is noise, not a shape. Raise "
+                        "--max-tokens or --runs and read it again")
+
     head = pos[0]
     tail = median(pos[max(1, len(pos) // 2):]) or 0.0
+
+    # PINNED AT 1.00 ALL THE WAY OUT IS A BUG, and it is the one reading here
+    # that looks like the best possible result. vllm#53030: a piecewise-CUDA-
+    # graph BatchDescriptor collision reports every drafted token as accepted
+    # at every position, whatever the drafter did.
+    #
+    # THE TEST IS THE ABSENCE OF DECAY, NOT A HIGH HEAD - convicting on
+    # position 0 would flag this repo's own healthy GLM ladder, which starts at
+    # 1.00. Acceptance is monotone in difficulty, so a real ladder always gives
+    # something up by the end; one that gives up nothing does not exist.
+    if len(pos) >= 3 and min(pos) >= PINNED_FLOOR:
+        return (
+            "pinned",
+            f"no decay at all across {len(pos)} positions, all at "
+            f"{min(pos):.2f} or above. A real drafter loses ground as the draft "
+            "gets longer, so this is the vllm#53030 signature - the counters "
+            "report full acceptance whatever the drafter did. Re-read it with "
+            "--enforce-eager: if the ladder decays there, the graphs are lying",
+        )
 
     if m.get("class") != "structured":
         # Prose is the hard class by construction. Only a low HEAD says
@@ -557,7 +610,7 @@ def report(m: dict) -> None:
     if m.get("engine") == "sglang":
         report_sglang(m)
         kind, why = verdict(m)
-        mark = {"ok": "  ok  ", "mask": " FLAG ", "weak": " FLAG ", "none": " FLAG "}[kind]
+        mark = MARKS[kind]
         body = textwrap.wrap(why, width=64)
         print(f"\n    [{mark}] {body[0]}")
         for line in body[1:]:
@@ -584,7 +637,7 @@ def report(m: dict) -> None:
     for i, p in m["per_pos"]:
         print(f"      pos {i}  [{bar(p)}]  {p:.2f}")
     kind, why = verdict(m)
-    mark = {"ok": "  ok  ", "mask": " FLAG ", "weak": " FLAG ", "none": " FLAG "}[kind]
+    mark = MARKS[kind]
     body = textwrap.wrap(why, width=64)
     print(f"\n    [{mark}] {body[0]}")
     for line in body[1:]:

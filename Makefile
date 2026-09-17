@@ -52,7 +52,7 @@ help:  ## Show this help
 # --- Checks that run anywhere (and in CI) ----------------------------------
 
 .PHONY: check
-check: lint syntax smoke render handlers optional-tags workspaces detectors quant-ab checkpoint-config spec-accept prefill-ladder storage docs lockfile shellcheck  ## Every offline check (what CI runs)
+check: lint syntax smoke render handlers optional-tags workspaces detectors quant-ab checkpoint-config spec-accept indexer-workspace prefill-ladder storage docs lockfile shellcheck  ## Every offline check (what CI runs)
 
 .PHONY: deps
 deps:  ## Install the pinned collections
@@ -152,6 +152,14 @@ spec-accept:  ## The acceptance probe's parser and ladder verdicts still hold
 # contaminated rung is FAST rather than wrong - it reads as an optimisation
 # that worked. The parser that proves coldness fails silently in exactly that
 # direction, so it is checked here rather than trusted.
+# The sparse-indexer workspace bound sizes a buffer the indexer gathers INTO,
+# so being too SMALL is a correctness failure that reads as a performance one.
+# The floor, and the claim that right-sizing covers the shortfall workspace.yml
+# records at 800k, are asserted rather than described.
+.PHONY: indexer-workspace
+indexer-workspace:  ## The indexer right-sizing bound and its capping rewrite still hold
+	@python3 tests/check_indexer_workspace.py
+
 .PHONY: prefill-ladder
 prefill-ladder:  ## The prefill ladder proves a cold rung cold, and a clean run stays clean
 	@python3 tests/check_prefill_ladder.py
@@ -173,10 +181,16 @@ storage:  ## gx10-storage classifies weights as weights and never plans to delet
 lockfile:  ## The ML lockfile must be a real resolution, not a hand-edit
 	@python3 tests/check_lockfile.py
 
+# SHELLCHECK SKIPS WHAT GIT SKIPS. `grep -r` walked workspaces/, and the agent
+# workspaces keep a live working directory under work/ that is gitignored - so
+# a local run linted scripts an AGENT wrote at runtime and failed the whole
+# gate on files CI never sees. `git ls-files -co --exclude-standard` lists
+# tracked AND new-but-not-ignored files, so a script you just wrote is still
+# checked before you add it.
 .PHONY: shellcheck
 shellcheck:  ## Lint the shell scripts (skipped if shellcheck is absent)
 	@if command -v shellcheck > /dev/null; then \
-		files="bootstrap.sh $$(grep -rl '^#!.*bash' roles/*/files/ workspaces/ 2>/dev/null | sort || true)"; \
+		files="bootstrap.sh $$(git ls-files -co --exclude-standard roles/*/files/ workspaces/ | xargs grep -l '^#!.*bash' 2>/dev/null | sort || true)"; \
 		shellcheck -x $$files && echo "shellcheck: clean ($$(echo $$files | wc -w) files)"; \
 	else \
 		echo "shellcheck: not installed locally - CI runs it"; \
