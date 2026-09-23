@@ -30,6 +30,20 @@
          | selectattr('gx10_versions', 'defined')
          | map(attribute='inventory_hostname') | list }}
 
+    # The subset that shares a collective: interconnect members, the hosts a
+    # cluster_index is defined for (see inventory.yml). Driver and kernel are
+    # only compared among these, because the failure this assert guards -
+    # ranks that disagree abort or hang at NCCL init reading like a fabric
+    # problem - structurally needs the fabric. A mesh-only GB10 on a newer
+    # factory DGX OS shares no collective with the pair, so its 580.178 image
+    # is reported per-node rather than failing the run; its TORCH is still
+    # compared across every node, because the same lockfile on every box is
+    # what makes the boxes interchangeable at all, cable or no cable.
+    fabric_version_hosts: >-
+      {{ version_hosts | map('extract', hostvars)
+         | selectattr('cluster_index', 'defined')
+         | map(attribute='inventory_hostname') | list }}
+
   tasks:
     - name: Read node state
       ansible.builtin.shell:
@@ -101,8 +115,8 @@
     # This cannot be a verify_checks entry - those are shell commands run on one
     # host, and nothing in a shell on node A can see node B's state.
     #
-    # Both tasks below compare all hosts at once, so they need to run on ONE of
-    # them. `inventory_hostname == ansible_play_hosts | first` rather than
+    # The comparison tasks below each look at every host at once, so they need
+    # to run on ONE of them. `inventory_hostname == ansible_play_hosts | first` rather than
     # run_once: identical under the default linear strategy, and it does not
     # trip run-once[task], whose warning about `strategy: free` is real - under
     # it a host can reach this before the other has recorded anything.
@@ -117,7 +131,27 @@
         - inventory_hostname == ansible_play_hosts | first
         - version_hosts | length < 2
 
-    - name: Assert the nodes agree on driver, kernel and torch version
+    - name: Assert the fabric nodes agree on driver and kernel version
+      ansible.builtin.assert:
+        that: >-
+          fabric_version_hosts | map('extract', hostvars, ['gx10_versions', item.key])
+          | unique | length == 1
+        fail_msg: >-
+          {{ item.key }} differs across the interconnect nodes:
+          {% for h in fabric_version_hosts %}{{ h }}={{ hostvars[h].gx10_versions[item.key] | default('(none)', true) }} {% endfor %}
+          -- ranks that disagree fail in ways that look like a fabric problem. {{ item.hint }}
+      loop:
+        - { key: driver, hint: "See docs/runbooks/upgrade-drivers.md" }
+        - { key: kernel, hint: "See docs/runbooks/upgrade-drivers.md" }
+      loop_control:
+        label: "{{ item.key }}"
+      when:
+        - inventory_hostname == ansible_play_hosts | first
+        - fabric_version_hosts | length > 1
+
+    # torch across EVERY node, not just the fabric - see the
+    # fabric_version_hosts comment for why driver/kernel do not.
+    - name: Assert every node agrees on the torch version
       ansible.builtin.assert:
         that: >-
           version_hosts | map('extract', hostvars, ['gx10_versions', item.key])
@@ -125,10 +159,8 @@
         fail_msg: >-
           {{ item.key }} differs across nodes:
           {% for h in version_hosts %}{{ h }}={{ hostvars[h].gx10_versions[item.key] | default('(none)', true) }} {% endfor %}
-          -- ranks that disagree fail in ways that look like a fabric problem. {{ item.hint }}
+          -- two boxes on one lockfile is the whole claim. {{ item.hint }}
       loop:
-        - { key: driver, hint: "See docs/runbooks/upgrade-drivers.md" }
-        - { key: kernel, hint: "See docs/runbooks/upgrade-drivers.md" }
         - { key: torch,  hint: "Re-run: make apply TAGS=ml. See docs/runbooks/troubleshoot.md" }
       loop_control:
         label: "{{ item.key }}"

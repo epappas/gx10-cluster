@@ -52,7 +52,13 @@ Waittime=0
 # not WiFi. It exists only once the QSFP cable is in; roles/slurm asserts that
 # before it installs anything, rather than leaving the controller to mark a
 # node DOWN for reasons that never mention cabling.
-{% for h in groups['gx10'] %}
+#
+# Members without a cluster_index (mesh-only - see inventory.yml) get no
+# NodeName: this file only describes the fabric, and a mesh member's jobs
+# would run over WiFi and look correct, which is what the paragraph above is
+# about. The role skips those hosts per-host; joining one to the queue is a
+# separate decision, deliberately not half-made from a template.
+{% for h in groups['gx10'] if hostvars[h].cluster_index is defined %}
 NodeName={{ h }} NodeAddr={{ cluster_subnets[0] }}.{{ hostvars[h].cluster_index }} CPUs={{ ansible_facts['processor_vcpus'] | default(20) }} RealMemory={{ (ansible_facts['memtotal_mb'] | default(121000) * 0.9) | int }} State=UNKNOWN
 {% endfor %}
 PartitionName=gx10 Nodes=ALL Default=YES MaxTime=INFINITE State=UP

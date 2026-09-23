@@ -99,8 +99,15 @@
           become: true
 
     # --- the peers: the clients --------------------------------------------
+    # Interconnect members only. vars/main.yml already filters the export ACL
+    # and the ufw rules to defined cluster_index values, and a mesh-only node
+    # (inventory.yml) has neither an export entry nor a route to the fabric
+    # address - mounting it would fail the play under any_errors_fatal over a
+    # share that was never meant for it. The controller exports to the cable.
     - name: Mount the share on the peers
-      when: inventory_hostname != cluster_controller
+      when:
+        - inventory_hostname != cluster_controller
+        - cluster_index is defined
       block:
         - name: Install the NFS client
           ansible.builtin.apt:

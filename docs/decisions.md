@@ -185,6 +185,51 @@ which was wrong twice over:
 Control plane on the always-up link, data plane on the cable. Ask for
 `<node>.cluster` when you explicitly want the 200G path.
 
+## <a name="mesh-only-member"></a>A mesh-only GB10 is in `gx10` with no `cluster_index`, and every fabric consumer filters on that
+
+`gb10-homer` is a third DGX Spark, and it is neither on the cable nor on the
+LAN: the only path **into** it is Meshnet. The group stays `gx10` — it names
+the hardware, and homer is that hardware, provisioned by the same `site.yml`.
+What homer does not have is an interconnect, and the group had been quietly
+encoding "exactly the cabled pair" in places where order decides behavior:
+inventory order is alphabetical, `gb10-homer` sorts first, so a naive entry
+would have made it odysseus's "peer" in `/etc/gx10/interconnect.peers`
+(that is what `twonode.sh` reads to pick rank 1), the elected "controller" of
+the pairwise benchmarks, and a permanent failure in verify's driver/kernel
+drift assert. Silence was the failure mode: two-node launches pointing at a
+box with no `mlx5`, and a `make bench` that goes green having run nothing on
+the fabric.
+
+The marker is therefore **the presence of `cluster_index`**, not a second
+group: it is already, in `roles/nfs`, the thing consumers
+`select('defined')` on, so extending it is a convention being followed, not
+invented. It now guards every fabric-scoped consumer — `.cluster` names, the
+peers file, benchmark pairing, the driver/kernel comparison, and the
+`end_role` skips in ray/slurm (both would otherwise hard-error templating
+`{{ cluster_index }}` before their "cable it" assert could fire; a mesh
+member there is not waiting for a cable, and a Slurm job on it would
+"run over WiFi and look correct", the exact failure the roles' own headers
+refuse to enable). NFS clients likewise mount only over the fabric they can
+reach. torch, by contrast, is compared across **every** node: same lockfile
+everywhere is what makes the boxes interchangeable, cable or not.
+
+Homer's `ansible_host` is its mesh address because that is the one address
+the peers can actually reach — measured before this was believed: inbound to
+its WiFi from this LAN is 100% loss, while outbound over the pair's wired
+addresses is 7-14 ms and the SSH host keys at those addresses were verified
+byte-identical to odysseus and poseidon. A duplicate-range network looks
+exactly like a working route until you compare keys. So the management
+invariant — every node can reach every node's `ansible_host` — holds
+asymmetrically, and the plain-name half of [#hosts-split](#hosts-split) stays
+unconditional; only `.cluster` requires an index on both ends. The mesh
+address is not pinned (`mgmt_addr_static: false`) because it is Nord's lease,
+not a DHCP one: the pin would also write this site's gateway and DNS into the
+`nordlynx` profile, which is a different planet's default route. And it keeps
+the nickname it registered with — `gb10-homer`, no `gx10-` prefix — because
+the operator asked for that name, aliases already resolve to it, and a rename
+buys a churn of the mesh namespace to prevent a collision that does not
+exist.
+
 ## <a name="ufw-peers"></a>ufw trusts the peer nodes wholesale on the management path
 
 NCCL's bootstrap listener on rank 0 binds an **ephemeral** port on the

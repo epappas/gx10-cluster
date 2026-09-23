@@ -11,7 +11,15 @@
 # The peer NAME is the management name, deliberately: gx10-interconnect --peer
 # starts its RDMA server over SSH, and SSH must not depend on the very link
 # the probe is trying to test.
-{% for h in groups['gx10'] if h != inventory_hostname %}
+#
+# Interconnect members only (cluster_index defined): this file is what
+# twonode.sh and `ws check` read to pick their rank-1, and a peer with no
+# cable has no interconnect address to name - listing one would put a
+# mesh-only box at the head of an alphabetized group and make every two-node
+# launch on the pair point at it. The task that writes this file is itself
+# skipped on such a node; the filter here is what keeps it right for its
+# cabled peers.
+{% for h in groups['gx10'] if h != inventory_hostname and hostvars[h].cluster_index is defined %}
 {% for s in cluster_subnets %}
 {{ h }} {{ s }}.{{ hostvars[h].cluster_index }}
 {% endfor %}

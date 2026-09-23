@@ -53,16 +53,29 @@
     bench_rdma_seconds: 10
     bench_tcp_seconds: 10
 
+    # Interconnect members in this run, play order. EVERY pairwise number here
+    # measures the cable - perftest, iperf3 on the fabric, the NCCL floor -
+    # so the peer set is hosts with a cluster_index, not the whole group.
+    # `groups['gx10'] | first` is alphabetical, and an uncabled mesh member
+    # (see inventory.yml) sorts BEFORE odysseus; deriving the pair from the
+    # group instead of from this list would elect a box with no mlx5 device
+    # "controller" and quietly skip every fabric test on the two nodes that
+    # actually have one - a green run that measured nothing.
+    bench_fabric_hosts: >-
+      {{ ansible_play_hosts | map('extract', hostvars)
+         | selectattr('cluster_index', 'defined')
+         | map(attribute='inventory_hostname') | list }}
+
     # The other node. Pairwise work runs from the controller and delegates the
     # server half here.
-    bench_peer: "{{ groups['gx10'] | difference([inventory_hostname]) | first | default('') }}"
+    bench_peer: "{{ bench_fabric_hosts | difference([inventory_hostname]) | first | default('') }}"
 
     # True on exactly one host, and only when the peer is actually in this run.
     # `--limit odysseus` therefore skips every pairwise test rather than
     # hanging against a host ansible was told not to touch.
     bench_is_controller: >-
-      {{ inventory_hostname == (ansible_play_hosts | first)
-         and (ansible_play_hosts | length) > 1 }}
+      {{ inventory_hostname == (bench_fabric_hosts | first | default(''))
+         and (bench_fabric_hosts | length) > 1 }}
 
     # Base port for the perftest servers. One per partition, so they do not
     # collide when both run at once.
@@ -374,13 +387,14 @@
     - name: Note when the cross-node benchmarks were skipped
       ansible.builtin.debug:
         msg: >-
-          Only {{ ansible_play_hosts | join(', ') }} took part, so the fabric
-          and collective benchmarks did NOT run - those need both nodes. Run
+          Only {{ ansible_play_hosts | join(', ') }} took part, and fewer than
+          two of them are interconnect members, so the fabric and collective
+          benchmarks did NOT run - those need the two cabled nodes. Run
           `make bench` with no --limit before trusting the cluster for
           distributed work.
       when:
         - inventory_hostname == ansible_play_hosts | first
-        - (ansible_play_hosts | length) < 2
+        - (bench_fabric_hosts | length) < 2
 
     # A missing number is not a passing benchmark. Without this the assertions
     # below simply skip and the run ends green having measured nothing, which

@@ -82,13 +82,19 @@
     # lineinfile there and this blockinfile would each rewrite the other's copy
     # on every run, and `make idempotence` would never settle. The `.cluster`
     # names are all emitted here, self included, because the interconnect
-    # address is this role's business and nothing else writes it.
+    # address is this role's business and nothing else writes it - but only
+    # between interconnect members: a name whose address exists on no wire
+    # this node can reach is a timeout pretending to be a host, so a mesh-only
+    # member (no cluster_index - inventory.yml) gets no `.cluster` lines in
+    # either direction, and neither do its peers for it.
     block: |
       {% for h in groups['gx10'] %}
       {% if h != inventory_hostname %}
       {{ hostvars[h].ansible_host }}  {{ h }}
       {% endif %}
+      {% if cluster_index is defined and hostvars[h].cluster_index is defined %}
       {{ cluster_subnets[0] }}.{{ hostvars[h].cluster_index }}  {{ h }}.cluster
+      {% endif %}
       {% endfor %}
   become: true
 
@@ -121,6 +127,11 @@
 #   poseidon.cluster  interconnect - the 200G cable, absent until cabled
 #   poseidon.nord     Meshnet      - reachable from off the LAN entirely
 #
+# The `.cluster` block exists only between interconnect members - see the
+# /etc/hosts task - so a mesh-only node carries two names per peer, and the
+# fast-path name resolves to nothing on it rather than to an unreachable
+# /24 somewhere else.
+#
 # The .nord alias maps to the Meshnet NICKNAME rather than the name Nord
 # generates, because the generated one is random and gets recycled: poseidon
 # registered as <account>-everest.nord, a name that belonged to a Windows box an
@@ -141,12 +152,14 @@
           User {{ primary_user }}
           IdentityFile ~/.ssh/id_gx10_cluster
           StrictHostKeyChecking accept-new
+      {% if cluster_index is defined and hostvars[h].cluster_index is defined %}
 
       Host {{ h }}.cluster
           HostName {{ cluster_subnets[0] }}.{{ hostvars[h].cluster_index }}
           User {{ primary_user }}
           IdentityFile ~/.ssh/id_gx10_cluster
           StrictHostKeyChecking accept-new
+      {% endif %}
       {% if hostvars[h].nordvpn_nickname | default('') | length > 0 %}
 
       Host {{ h }}.nord
@@ -300,6 +313,11 @@
     group: root
     mode: "0644"
   become: true
+  # Interconnect members only. On a mesh-only node the absence of this file
+  # IS the answer: twonode.sh refuses with "no peer found; set PEER" rather
+  # than launching a two-node job onto a box with no /dev/infiniband, and
+  # `ws check` reports no peers rather than a phantom one.
+  when: cluster_index is defined
 
 # /usr/local/bin, not ~/.local/bin where gx10-status lives. The deciding case
 # is `ssh <node> gx10-interconnect`: that is a NON-login shell, which never

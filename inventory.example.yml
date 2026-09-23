@@ -44,7 +44,10 @@
 # under this file. See mgmt_addr_static in group_vars/all.yml.
 #
 # cluster_index is the host octet on BOTH interconnect subnets, matching
-# NVIDIA's connect-two-sparks playbook: .10 and .11.
+# NVIDIA's connect-two-sparks playbook: .10 and .11. It is also the marker of
+# interconnect membership - defined exactly on the boxes that hold a cable,
+# and every fabric-scoped consumer filters on its definedness. A mesh-only
+# GB10 omits it; see docs/decisions.md#mesh-only-member.
 #
 # cluster_rank names rank 0 - the torchrun master, the Ray head and the Slurm
 # controller. Everything derives the controller from THIS field via

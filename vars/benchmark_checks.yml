@@ -29,21 +29,28 @@ benchmark_checks:
   - name: "roce partitions active"
     kind: gate
     cmd: "[ \"$(rdma link show 2>/dev/null | grep -c 'state ACTIVE')\" -eq 2 ]"
+    # Reported, not fatal: these gates run on EVERY host, and an uncabled
+    # mesh member (no cluster_index - inventory.yml) legitimately has zero
+    # ACTIVE links. Verify's cable-dependent block is the precedent for the
+    # same fact. On the cabled pair this still prints the failure it means.
+    required: false
     provenance: >-
       Count, not a rate. hardware.md: each QSFP port presents two PCIe x4
       partitions which must both be up and on different subnets to reach the
       full width.
-    hint: "Fewer (or more) than two ACTIVE RoCE links. See docs/runbooks/connect-cluster.md"
+    hint: "Fewer (or more) than two ACTIVE RoCE links. Expected zero on an uncabled mesh node. See docs/runbooks/connect-cluster.md"
 
   # The Ethernet rate the HCA negotiated. Note this is NOT the achievable
   # bandwidth - see the PCIe gate below, which is the real ceiling.
   - name: "roce link rate 200G"
     kind: gate
     cmd: "[ \"$(ibstat 2>/dev/null | awk '/Rate:/{print $2}' | sort -rn | head -1)\" = '200' ]"
+    # Reported, not fatal, for the same reason as the partitions gate above.
+    required: false
     provenance: >-
       Read from the HCA (ibstat Rate), not a number chosen by us. 200 is what
       a cabled ConnectX-7 QSFP port on this hardware reports.
-    hint: "No port negotiating 200. Reseat/replace the QSFP cable. See docs/runbooks/connect-cluster.md"
+    hint: "No port negotiating 200. Expected on an uncabled mesh node; otherwise reseat/replace the QSFP cable. See docs/runbooks/connect-cluster.md"
 
   # The bottleneck that actually decides fabric throughput on this box, and the
   # one people misread: the NIC advertises 200 Gb/s Ethernet per port while

@@ -15,6 +15,19 @@
 # node and slurmctld at the other, with nothing to say so.
 
 # --- The interconnect is a hard prerequisite --------------------------------
+# No cluster_index means no interconnect to join through, ever - a mesh-only
+# member (see inventory.yml) - and unlike the cabled boxes there is no "cable
+# it and re-run" to offer. Skip the role before the assert below templates
+# slurm_node_addr and hard-errors. Excluding it from the scheduler entirely
+# is the honest half of that: this role's NodeAddr IS the fabric on purpose,
+# and a queued mesh member would have jobs "run, over WiFi, and look correct"
+# - the sentence below about what NOT to do is exactly what joining one over
+# the mesh would achieve. Joining it deliberately is its own decision with its
+# own plumbing; docs/runbooks/add-a-node.md says what a mesh-only member gets.
+- name: Skip Slurm on nodes with no interconnect to join through
+  ansible.builtin.meta: end_role
+  when: cluster_index is not defined
+
 # Same exposure as roles/ray, handled the same way: slurm.conf gives every node
 # a NodeAddr on the first interconnect subnet, and that address does not exist
 # until a QSFP cable links the boxes - the ConnectX-7 is not on the PCI bus

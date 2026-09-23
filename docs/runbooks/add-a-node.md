@@ -107,6 +107,43 @@ Three fields, and each has a job:
   the file cannot silently move the controller. **Do not give the new node
   rank 0** unless you are deliberately moving the controller — see step 7.
 
+#### If the node will never hold a cable
+
+A GB10 you reach only over Meshnet is still a `gx10` member — the group names
+the hardware — but it must not carry a `cluster_index`, which is the marker of
+interconnect membership: present exactly on the boxes that can hold a DAC, and
+every fabric-scoped consumer (`.cluster` names, the peer file `twonode.sh`
+picks rank 1 from, the benchmark pair, verify's driver/kernel comparison, and
+the ray/slurm/nfs roles) keys off its definedness. Inventory order is
+alphabetical, and an indexed-looking newcomer sorting first would otherwise
+silently *become* the pair's "peer". The shape, from `gb10-homer`:
+
+```yaml
+        gb10-homer:
+          ansible_host: 100.75.97.15   # the mesh address: the one peers can reach
+          cluster_rank: 2              # deliberately no cluster_index
+          mgmt_addr_static: false      # Nord owns that lease
+          nordvpn_nickname: gb10-homer # keep the name it registered with
+```
+
+Two things to measure before writing `ansible_host`, because the invariant is
+"every node can reach every node's management address" and a mesh member
+satisfies it asymmetrically: inbound to the node's own LAN/WiFi may be dead
+(homer's is — 100% loss), while outbound from it to the pair's addresses may
+work fine (homer's does, at 7-14 ms). And verify you are reaching the *right*
+machine before believing the route: compare SSH host keys, not just ping
+reply. What such a node skips: the interconnect addressing, `<node>.cluster`
+in either direction, `/etc/gx10/interconnect.peers` (so two-node launches
+there refuse with "no peer found" instead of aiming at a missing
+`/dev/infiniband`), Ray, Slurm, and the NFS mount. The full reasoning,
+measured numbers included, is
+[decisions.md#mesh-only-member](../decisions.md#mesh-only-member).
+
+Everything below assumes the indexed, cableable case; skip step 6 entirely for
+a mesh-only member, and mind the `LIMIT=` note in step 7 — a full-play run now
+needs every node, mesh member included, powered and meshed
+(`serial: 1` + `any_errors_fatal` still stop the play at the first failure).
+
 ### 3. Provision the new node
 
 ```bash
@@ -188,10 +225,18 @@ requirement will fail on that node, which is correct and is the point.
 make verify                             # NO --limit
 ```
 
-`verify.yml` compares driver, kernel and torch **across** nodes, because ranks
-that disagree fail in ways that read like a fabric problem. A newly provisioned
-node picking up a newer driver than the others is exactly the drift this
-catches.
+`verify.yml` compares driver and kernel **across the interconnect nodes** and
+torch across **every** node: ranks that disagree on a collective fail in ways
+that read like a fabric problem, and the same lockfile on two boxes is what
+makes those boxes interchangeable — but a driver point-release difference
+between nodes that will never share a collective is a fact to report, not a
+failure to abort on. A newly provisioned cabled node picking up a newer driver
+than the others is still exactly the drift this catches. The full-play caveat:
+every node in the group must be reachable for this and for `make apply` —
+including a mesh-only member, asleep behind an account-wide mesh. For a
+pair-only run: `make verify LIMIT=odysseus,poseidon` (driver/kernel and torch
+among the pair; the cross-node comparison then just names the hosts that took
+part).
 
 ```bash
 gx10-top                                # three columns now, with no configuration
@@ -219,7 +264,10 @@ on the node, because binding to an address the box does not hold is
 about cabling. **An uncabled node cannot join the standing Ray cluster** — that
 refusal is deliberate, and falling back to the management interface is
 explicitly not offered, because it would put every object transfer on the slow
-path and still report success.
+path and still report success. A mesh-only member (no `cluster_index`, step 2)
+does not even reach the assert — the role ends at its door: "cable it and
+re-run" is not advice for a node that never will be cabled. Slurm skips the
+same way; see [decisions.md#mesh-only-member](../decisions.md#mesh-only-member).
 
 ### 9. Weights, which are not shared
 

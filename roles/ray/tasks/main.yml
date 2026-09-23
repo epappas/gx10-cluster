@@ -8,6 +8,15 @@
 #   ansible-playbook optional.yml --tags ray -K
 
 # --- The interconnect is a hard prerequisite --------------------------------
+# A node that is not an interconnect member at all - no cluster_index, because
+# it joins over the mesh and never will hold a DAC (see inventory.yml) - has
+# nothing to gate ON, so the assert below would fail templating ray_node_ip
+# before it could refuse. It exits the role quietly: the refusal message is
+# "cable them and re-run", which is not advice for this node.
+- name: Skip Ray on nodes with no interconnect to join through
+  ansible.builtin.meta: end_role
+  when: cluster_index is not defined
+
 # ray.service binds --node-ip-address to this node's address on the first
 # interconnect subnet, so Ray's object transfers use the 200G ConnectX-7 link.
 # That address does not exist on an uncabled box: the CX-7 is not even on the
