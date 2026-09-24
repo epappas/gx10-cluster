@@ -33,6 +33,32 @@
     checksum: "sha256:cc9bff9344b005df90f5a13a18a9729ebacb078052c60742bdf85803efc2f940"
   become: true
 
+# The DGX onboarding assistant ships its own NordVPN source (`nordvpn-app.list`
+# on gb10-homer, dated to its first-boot setup). Same class of collision the
+# GitHub CLI source got in roles/base: two files for one URI, possibly with
+# different keyrings, and apt's duplicate/conflicting-source complaints land on
+# every task that touches apt afterwards. Delete any file that references
+# NordVPN's repo EXCEPT the one this apt_repository owns below - excluding our
+# own is what keeps the task from deleting-and-recreating its file on every
+# run, which would make `make idempotence` never settle.
+- name: Find apt sources that claim the NordVPN repository
+  ansible.builtin.find:
+    paths: /etc/apt/sources.list.d
+    patterns:
+      - "*.list"
+      - "*.sources"
+    contains: 'repo\.nordvpn\.com'
+  register: nordvpn_sources
+
+- name: Remove competing NordVPN apt sources
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  become: true
+  loop: "{{ nordvpn_sources.files | rejectattr('path', 'match', '.*/nordvpn\\.list$') | list }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+
 # Note the suite is literally `stable`, not the distro codename - NordVPN
 # publishes one distro-agnostic suite, unlike tailscale's per-release ones.
 # arm64 is published there; verified against the repo's own Packages index.

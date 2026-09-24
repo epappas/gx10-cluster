@@ -151,6 +151,87 @@
   become: true
   when: sudo_passwordless | bool
 
+# The GitHub CLI repository block below lives BEFORE the first apt touch on
+# the box for a reason that only shows up on re-onboarded nodes: DGX OS
+# onboarding (the first-boot assistant, whose files a re-run leaves behind)
+# installs gh with upstream's own script, whose source file -
+# `github_git-lfs.list`, or a second line in `github-cli.list` - signs the
+# SAME cli.github.com URI with a DIFFERENT keyring path (/etc/apt/keyrings vs
+# this role's /usr/share/keyrings). apt then refuses the ENTIRE source list:
+# "Conflicting values set for option Signed-By", and every apt task on the box
+# dies at it, including the plain cache refresh below. Verified on gb10-homer,
+# 2026-09-23: its github-cli.list carried both lines and `Update apt cache`
+# was the first casualty. Clear the field, then own the file - before anything
+# asks apt a question.
+#
+# apt_repository is deliberately GONE here, not just demoted. Its `present` is
+# append-if-the-URI-is-not-there-yet, so it neither replaces a polluted file
+# nor notices a second Signed-By on the same URI - and the role that claims to
+# set the state has set only part of it. `copy` with content makes
+# github-cli.list exactly one line, on every node, on every run - which is
+# also what an identical-machine cluster is for.
+#
+# From GitHub's own repo, not Ubuntu's. Noble ships gh 2.45 (early 2024)
+# against upstream's 2.98 - old enough to be missing subcommands you will
+# reach for. Same pattern as the NordVPN client in roles/remote: signed,
+# apt-managed, pinnable, and no curl-pipe-shell.
+#
+# THE REPO ALONE DOES NOTHING, and did nothing here for months. Ubuntu Pro
+# pins ESM above the archive at 510; a third-party repo gets the default 500.
+# So apt kept installing 2.45 from ESM while cli.github.com sat there at 500
+# offering 2.98, and nothing reported it: ansible-lint passes, `make diff`
+# says ok, and `state: present` is satisfied by ANY version. See
+# github-cli.pref, which is what makes these tasks mean anything.
+- name: Find apt sources that claim the GitHub CLI repository
+  ansible.builtin.find:
+    paths: /etc/apt/sources.list.d
+    patterns:
+      - "*.list"
+      - "*.sources"
+    contains: 'cli\.github\.com'
+  register: gh_cli_sources
+
+- name: Remove apt sources that claim the GitHub CLI repository
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  become: true
+  loop: "{{ gh_cli_sources.files }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+
+- name: Add the GitHub CLI apt key
+  ansible.builtin.get_url:
+    url: https://cli.github.com/packages/githubcli-archive-keyring.gpg
+    dest: /usr/share/keyrings/githubcli-archive-keyring.gpg
+    mode: "0644"
+  become: true
+
+- name: Declare the GitHub CLI apt repository
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/github-cli.list
+    owner: root
+    group: root
+    mode: "0644"
+    content: "deb [arch={{ arch_deb }} signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\n"
+  become: true
+  # No cache-refresh task here on purpose: the `Update apt cache` that follows
+  # is already the refresh, and the `Install the GitHub CLI` task is
+  # `update_cache: true` as a backstop - the apt module sees a sources file
+  # newer than the cache and re-reads regardless of cache_valid_time.
+
+# BEFORE the install, not after: the pin decides which candidate that task
+# resolves, so applying it afterwards would leave the first run on ESM's 2.45
+# and quietly fix itself on the second.
+- name: Outrank Ubuntu Pro's ESM pin for the GitHub CLI
+  ansible.builtin.copy:
+    src: github-cli.pref
+    dest: /etc/apt/preferences.d/github-cli
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+
 - name: Update apt cache
   ansible.builtin.apt:
     update_cache: true
@@ -241,45 +322,6 @@
       - pciutils
       - ca-certificates
     state: present
-  become: true
-
-# From GitHub's own repo, not Ubuntu's. Noble ships gh 2.45 (early 2024)
-# against upstream's 2.98 - old enough to be missing subcommands you will
-# reach for. Same pattern as the NordVPN client in roles/remote: signed,
-# apt-managed, pinnable, and no curl-pipe-shell.
-#
-# THE REPO ALONE DOES NOTHING, and did nothing here for months. Ubuntu Pro pins
-# ESM above the archive at 510; a third-party repo gets the default 500. So apt
-# kept installing 2.45 from ESM while cli.github.com sat there at 500 offering
-# 2.98, and nothing reported it: ansible-lint passes, `make diff` says ok, and
-# `state: present` is satisfied by ANY version. See github-cli.pref, which is
-# what makes the three tasks below mean anything.
-- name: Add the GitHub CLI apt key
-  ansible.builtin.get_url:
-    url: https://cli.github.com/packages/githubcli-archive-keyring.gpg
-    dest: /usr/share/keyrings/githubcli-archive-keyring.gpg
-    mode: "0644"
-  become: true
-
-- name: Add the GitHub CLI apt repository
-  ansible.builtin.apt_repository:
-    repo: >-
-      deb [arch={{ arch_deb }} signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg]
-      https://cli.github.com/packages stable main
-    filename: github-cli
-    state: present
-  become: true
-
-# BEFORE the install, not after: the pin decides which candidate that task
-# resolves, so applying it afterwards would leave the first run on ESM's 2.45
-# and quietly fix itself on the second.
-- name: Outrank Ubuntu Pro's ESM pin for the GitHub CLI
-  ansible.builtin.copy:
-    src: github-cli.pref
-    dest: /etc/apt/preferences.d/github-cli
-    owner: root
-    group: root
-    mode: "0644"
   become: true
 
 # `latest`, and the noqa is deliberate rather than a silenced warning. The rule
