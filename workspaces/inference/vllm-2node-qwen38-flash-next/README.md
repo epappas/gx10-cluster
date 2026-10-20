@@ -1,8 +1,19 @@
 # vllm-2node-qwen38-flash-next
 
 > Qwen3.8-Flash-Next NVFP4 across both Sparks — TP2 + expert parallel + MTP3.
-> **Two mandatory patches are not written yet**, and `up.sh` refuses to launch
-> until they are.
+> The three mandatory image patches are written and staged on every launch;
+> `up.sh` refuses rather than serve a server that dies seven minutes in.
+>
+> **Serving this workspace right now** (as of 2026-10-20): rank 0 + rank 1 are
+> up on odysseus + poseidon. Nothing here changes a running server — the flags
+> below describe the NEXT boot. If you are deciding whether this pair should
+> keep spending both Sparks on this model, read
+> [`tensorfold-qwen38-flash-next-spark`](../tensorfold-qwen38-flash-next-spark/README.md)
+> first: one Spark on the NVIDIA QAD FP4 checkpoint decodes prose FASTER
+> (46–55 vs this server's 33.1 tok/s, batch-1) and frees the second node, at
+> the cost of 5 streams vs 8, ~23% prefill, and a different checkpoint's
+> quality profile. The pair still wins on concurrency and on the 985k YaRN
+> retrieval measured below.
 
 | | |
 |---|---|

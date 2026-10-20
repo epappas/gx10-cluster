@@ -4,6 +4,17 @@ engine: vllm
 provenance: unverified
 summary: DeepSeek-V4.1-Flash EXL3 2.9bpw across both nodes - ported, NOT yet run here (disk)
 
+# SUPERSEDED at the recipe layer (2026-10-20): upstream moved this model to
+# TensorFold's native Zig engine and renamed the checkpoint out from under
+# this port. The current path is
+# ../tensorfold-2node-dsv41-flash-1017 - new checkpoint id AND revision
+# (`e8ac7684`, the one an HF cache copy under this name may hold, is gone from
+# the Hub; the tree's name redirects but the cache keys on both), NEW Engram
+# tables whose sizes are checked (the old release's must not be reused), and
+# the old vLLM overlay tag `:exl3`/`:2.9bpw` kept mutable. This workspace
+# stays as the vLLM arm and the disk arithmetic that killed it; the 1017
+# workspace carries the corrected numbers.
+#
 # UNVERIFIED, and the reason is disk rather than doubt. Every flag below is
 # transcribed from a configuration its authors measured on this exact hardware
 # (2x GB10, sm_121a, CX7). What has NOT happened is a boot on odysseus +

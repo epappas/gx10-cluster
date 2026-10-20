@@ -1,0 +1,74 @@
+name: tensorfold-2node-glm53-flash-exl3
+kind: inference
+engine: tensorfold
+provenance: unverified
+summary: GLM-5.3-Flash EXL3 on the pair with the TensorFold engine - upstream's own recommended path, 1M window, 60-115 tok/s single-stream decode
+
+# WHAT THIS IS: MiaAI-Lab's TensorFold GLM kit (Apache-2.0) at a pinned
+# commit, run as they ship it - their image pulled BY DIGEST, their 107
+# engine patches inside it, their launcher. The engine is TensorFold v0.6.0's
+# native server; TP=2 with one rank per Spark is this kit's REFERENCE
+# topology - the exact pair this cluster is.
+#
+# WHY IT EXISTS: upstream moved. The AGPL vLLM kit's own README now opens with
+# "everyone should use that [TensorFold] recipe", its default weights became
+# the Apache-2.0 TensorFold EXL3 pack, and the measured picture on two Sparks
+# (kit README, 1M window, PARALLEL=4, fp8 KV, DENSE=q4, DFlash2+copy drafts):
+#
+#   decode x1     60.4 prose / 114.7 structured tok/s     ours (vLLM): 26-67
+#   decode x4    108.8 / 227.9 aggregate                  (at PARALLEL=8: 130.8 / 167.0)
+#   prefill       ~1,950-2,000 tok/s at 8k-66k
+#   1M needle     found (TTFT 967 s at 982k)
+#
+# versus ../vllm-2node-glm53-flash-exl3, which runs a vLLM overlay image on a
+# MUTABLE tag whose bytes may no longer be what our 26-67 numbers were taken
+# on (docs/decisions.md#glm53-indexer-workspace). Same model family, newer
+# engine, digest-pinned.
+#
+# The quality posture is theirs and stated: DENSE=q4 + KV=fp8 "prioritize
+# throughput... expected to have lower numerical fidelity... particularly on
+# sensitive tasks or long-context workloads" (kit README:93-99) - GSM8K 98.8,
+# HumanEval 95.7 under the defaults, an explicit trade, not a defect. The
+# drafter is DFlash2, CC BY-NC-ND 4.0 (see README "licence"); DRAFTER=mtp
+# avoids it but forces PARALLEL=1.
+
+# UNVERIFIED: not booted here. Requires one thing this cluster does not have
+# switched on yet - the head exporting its HF cache over the link (the kit's
+# WORKER_WEIGHTS=nfs, the only weight layout that fits poseidon's 125 GB).
+# The README gives the one Ansible command that turns it on.
+
+requires:
+  gpu_arch: "12.1"
+  # The engine sizes the KV pool from MemAvailable less a 14.5 GiB reserve
+  # (grows with PARALLEL) and needs the ~9.7+164/2 GiB of weights per rank
+  # resident; upstream's measured start on a clean pair keeps rank 0 at
+  # ~88 GiB. 100 is the honest ws-check floor: the pair server (96/node) must
+  # be down to start this one anyway.
+  min_unified_gb: 100
+  # Head: the checkpoint (~176 GB per the kit's own MIN_FREE_GB) + the image
+  # (~25 GB under docker's root). The worker stores NEITHER with
+  # WORKER_WEIGHTS=nfs - it reads the head's cache over the cable.
+  min_disk_gb: 210
+  docker: true
+  rdma: true
+  peers: 1
+
+images:
+  # Pulled by digest by the kit's prepare.sh - a tag can be moved, a digest
+  # cannot. The same image serves TP=2 and TP=3.
+  - ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-tensorfold@sha256:14b5072e8e9918f1080153f57321415a387bc7d78cf9c9b44a7aeae2d4399ccf
+
+models:
+  - Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold
+  - incoai/GLM-5.3-Flash-DFlash2
+
+container: glm53-flash-tf
+
+endpoints:
+  - "http://127.0.0.1:8902/v1  (OpenAI-compatible; /v1/messages bridge per patch 0084)"
+
+sources:
+  - https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold
+  - https://huggingface.co/Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold
+  - https://huggingface.co/incoai/GLM-5.3-Flash-DFlash2
+  - https://github.com/ashhart/TensorFold

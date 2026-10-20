@@ -1370,6 +1370,12 @@ place to look for what the ranks were told. Anything reachable through
 
 ### The licence is not this repo's usual one
 
+*(2026-10-20: this paragraph is superseded at the checkpoint layer — upstream's
+default weights moved to the Apache-2.0 TensorFold EXL3 pack, which retires the
+ShapleyMCG clause outright; only DFlash2 stays CC BY-NC-ND. See
+[#tensorfold-era](#tensorfold-era) and the new arm,
+`workspaces/inference/tensorfold-2node-glm53-flash-exl3`.)*
+
 The recipe is ours. The **weights are not MIT**: the EXL3/TR3 checkpoint is
 under ShapleyMCG License 1.0, and the DFlash2 drafter is **CC BY-NC-ND 4.0 —
 non-commercial, research and evaluation only**. That is a real constraint on
@@ -1538,6 +1544,13 @@ the bench workspaces read the same value from `API_KEY`.
   GPU row-tiling cost −61% at 8k, and raising the fused temp rows to 1024 cost
   −13% to −24% across the ladder. Recording a negative result is worth more here
   than shipping the knob, because the knob's name makes it sound like a free win.
+  **Corrected 2026-10-20:** the negative result aged. Upstream shipped a
+  *coupling* instead of the 1024 arm — `EXL3_TEMP_ROWS_FUSED` is a launcher
+  default now (32 with the E3 grouped kernels, 256 with E2), `EXL3_FAT_GROUPED`
+  is the kit default at TP2/TP3 (+37–45% cold prefill), and both are forwarded
+  by `up.sh` with the mutable-image caveat in
+  [#tensorfold-era](#tensorfold-era). `EXL3_MOE_ROW_TILE` stays where this
+  paragraph left it.
 
 ### The boot-shape warmup got ported, default off — which is the earlier decision resolved, not reversed
 
@@ -2383,6 +2396,13 @@ leaves the machine.
 
 ## <a name="qwen38-flash-next"></a>Qwen3.8-Flash-Next: the port where the licence decided the scope
 
+*(2026-10-20: the scope has a second answer now — one Spark carries this model
+faster single-stream than the pair does, on NVIDIA's QAD FP4 checkpoint via
+TensorFold's Zig engine: `workspaces/inference/tensorfold-qwen38-flash-next-spark`
+and [#tensorfold-era](#tensorfold-era). The pair keeps concurrency and the
+985k retrieval; "the licence decided the scope" still describes the vLLM port
+exactly.)*
+
 [MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks)
 is the only published two-node GB10 configuration for this model, and it is the
 third recipe from that lab this repo has mined ([#two-node-vllm](#two-node-vllm),
@@ -2513,6 +2533,14 @@ node or never fires at all.
   behave unlike every other one in this directory.
 
 ## <a name="dsv41-flash-exl3"></a>DeepSeek-V4.1-Flash EXL3: the port where the disk decided the design
+
+*(2026-10-20: storage still decides, one floor higher — upstream renamed the
+checkpoint, shipped NEW size-checked Engram tables, and moved the recipe to
+its TensorFold engine:
+`workspaces/inference/tensorfold-2node-dsv41-flash-1017`, also blocked, with
+~505/310 GB of demand against this pair's 343/125 free. The diagnosis here —
+a per-rank local replica the worker cannot hold — is what the 1017 disk table
+re-measures. See [#tensorfold-era](#tensorfold-era).)*
 
 [MiaAI-Lab/DeepSeek-v4.1-Flash-EXL3-2x-DGX-Sparks](https://github.com/MiaAI-Lab/DeepSeek-v4.1-Flash-EXL3-2x-DGX-Sparks)
 is the fourth recipe from that lab this repo has mined
@@ -2852,3 +2880,211 @@ One caveat they now flag that this repo inherited: their `code` benchmark is 50
 byte-identical `clamp_NN` helpers at `p1/p2/p3 = 1.00/0.99/0.99` — the drafter
 at saturation. Valid for A/B deltas, not as an absolute. `prose` is the
 representative column, and `workspaces/bench/decode-content-mix` now says so.
+
+## <a name="kit-runner-workspaces"></a>Three workspaces run Mia's kit at a pinned sha instead of re-implementing it, because the kit IS the safety layer
+
+Every inference workspace before 2026-10-20 in this repo is a hand-written
+launcher: the flags were transcribed, the reasoning copied into comments, and
+the AGPL ones re-implemented from the documented mechanism. That posture was
+right for vLLM, where the launcher is thirty flags and the hard parts live
+inside an image this repo pulls.
+
+The TensorFold recipes are not that. Their `start.sh` is a launch SYSTEM -
+argument pre-check against the image's `capabilities --json` before anything
+is stopped, per-rank weight-file writers, MANIFEST verification of generated
+RoPE tables, an `await-memory` re-read, a `memguard` watchdog that kills a
+rank's container before unified memory is exhausted enough to FREEZE the
+machine, log archival before `docker rm`, and a smoke test. Every one of those
+exists because something upstream failed without it, on this hardware, in the
+open - and every one is exactly the kind of machinery that re-implementation
+would silently lose a line of. Fork it wrong and the failure it prevents comes
+back as a power-cycled Spark.
+
+So `tensorfold-*` workspaces pin the FULL COMMIT SHA of the kit, fetch it with
+`git fetch --depth 1 origin <sha>` through `workspaces/lib/kit.sh`, and exec
+the kit's own `start.sh`/`stop.sh` with this repo's `PORT`, `WORKER`,
+`FABRIC_PEER` and `WORKER_WEIGHTS` in the environment - the kit reads
+environment first, so nothing in it is edited. What the workspace adds is
+exactly what the kit cannot know: the port allocation, the peer resolution
+from `/etc/gx10/interconnect.peers`, the Ansible-owned NFS export as a
+prerequisite (checked, never mounted), and disk gates with THIS cluster's
+measured free space.
+
+The pin is load-bearing in both directions. It is what makes "run their code"
+as reproducible as a vendored file - and it is the mutable-tag lesson
+[#glm53-indexer-workspace](#glm53-indexer-workspace) records, applied at the
+recipe layer: upstream rebuilds behind tags; a sha cannot move. A recipe
+update lands as a new pin plus a fresh reading of what moved, never as drift
+under a running server. The licences allow it: these three kits are MIT or
+Apache-2.0, unlike the GLM vLLM kit - and where the distinction bites
+(`libtfgrammar`'s provenance, the FP8-KV descent from the AGPL GLM recipe)
+the kits' own NOTICE files carry it, which is one more thing a fork-in-place
+would have quietly dropped.
+
+## <a name="tensorfold-era"></a>The third pass over MiaAI-Lab: the engine layer moved, and so did the licence
+
+2026-10-20, five weeks after [#glm53-indexer-workspace](#glm53-indexer-workspace).
+All seven linked repositories re-read at their heads: the Qwen single-Spark
+zig kit (`656879f`), the DeepSeek-V4.1-Flash-1017 pair kit (`31eea46`, created
+10-19), the GLM-5.3 vLLM kit (`a8cc40d`, AGPL) and its TensorFold sibling
+(`3fd60df`, Apache-2.0), Nemotron-3.5-Bolt (`6f61d77`, MIT),
+`deepseek-ai/DeepInfer` and Mia's fork of it (both `774ce24`/`8b16149`,
+Apache-2.0, initial commits dated THE DAY OF THIS READING - see "Not now"
+below).
+
+### The shape of what changed: every model family moved to TensorFold
+
+Two months ago Mia's recipes were vLLM overlay images. Today: Qwen3.8-Flash-
+Next ships single-Spark on TensorFold's Zig engine; DeepSeek-V4.1 got a NEW
+kit on the same engine with a two-rank TP=2 `dsv41` family by BertholomusAI;
+GLM-5.3's TensorFold kit has 107 patches, a digest-pinned published image, and
+its AGPL sibling's README now opens with "everyone should use that recipe."
+The engine this repo declined to evaluate in August - "vLLM is the engine
+this cluster runs" - is now the engine upstream's numbers for this exact
+hardware are taken on. Three workspaces ship from this reading
+([#kit-runner-workspaces](#kit-runner-workspaces)):
+`tensorfold-qwen38-flash-next-spark`, `tensorfold-2node-glm53-flash-exl3`,
+`tensorfold-2node-dsv41-flash-1017`, all `unverified` or `blocked` - none of
+them can boot while the 2-node vLLM holds the pool, and the running server is
+not restartable as a side effect of a reading. They are next-boot recipes
+with the pins ready.
+
+### What this repo changed in its CURRENT serving arms, without touching the running server
+
+- `lib/twonode.sh`: the host-memory preflight became an `await-memory` loop
+  (`HOST_MEM_WAIT_S`, default 30) - a short read right after a build or a big
+  copy is the page cache not yet written back, and one read refused starts
+  the Spark could take (their PR #7, measured 111.1 settling to 119 GiB) -
+  and `twonode_warn_clock_ceilings`, because TP=2 meets twice a layer and a
+  one-node clock cap silently costs 3-6% of prefill. Both fire only at
+  launch; a running server is not affected by a library change any more than
+  a shell function affects the process that already sourced it.
+- `vllm-2node-glm53-flash-exl3`: `MIXED_PREFILL_CHUNK` default moved `skip`
+  -> `fair` (upstream's default since 2026-09-30: a 2k newcomer's first token
+  ~12 s beside incumbent streams keeping 80-90%, against full serialisation;
+  ~20% off mixed-load wall time, replies bit-identical), and `up.sh` now
+  forwards the E3 grouped fat-expert prefill (`EXL3_FAT_GROUPED=1` +
+  `EXL3_TEMP_ROWS_FUSED=32`, +37-45% cold prefill at TP2 on their measure)
+  and `GLM53_DRAFT_KV_COMPACT=1` (-30.5% repeat TTFT) - all named defaults
+  with documented one-line reversions, all gated on the same caveat: this
+  workspace pins a MUTABLE tag, and neither node had the image on disk at the
+  2026-10-20 check, so the next boot pulls today's bytes. The .env.example now
+  says to pin the digest `docker pull` reports BEFORE trusting any number
+  against a previous boot. `GLM53_DENSE_FP8=all` + `GLM53_KDA_BF16_LARGE_M=1`
+  stay off: upstream's defaults at TP2, +3.9-5.2% decode for ~3.26 GiB
+  retained per rank, which is the shape of bet to make on a ladder, not in a
+  re-read.
+- `vllm-2node-qwen38-flash-next`: README header corrected - it still claimed
+  "two mandatory patches are not written yet" while the workspace it describes
+  is `verified`, has all three patches, and is the server answering the
+  session that made this edit. Same header now carries the single-Spark
+  pointer and what the pair still wins.
+- `vllm-2node-dsv41-flash-exl3`: header records the supersession at the recipe
+  layer - the checkpoint was RENAMED WITH CONTENT (`e8ac7684` is gone from the
+  Hub; the HF cache keys on name+revision, so a copy under the old identifier
+  is invisible to the new pins and would trigger a 196 GiB re-download), the
+  1017 Engram tables are NEW and size-checked, and the old engine's
+  `:exl3`/`:2.9bpw` tags are exactly as mutable as this file has complained
+  about since August.
+
+### What it corrected in this file's earlier verdicts
+
+Read in order with [#glm53-second-pass](#glm53-second-pass); each of these
+upgrades a paragraph there, none of them reverses a mechanism argument:
+
+- "The licence is not this repo's usual one" - the TR3-ShapleyMCG constraint
+  is now avoidable outright: upstream's default checkpoint for the whole GLM
+  line (`Mia-AiLab/...-4bpw-TensorFold`, Apache-2.0) is what the new
+  workspace already serves, and the .env.example offers it to the vLLM arm.
+  Only DFlash2 stays CC BY-NC-ND 4.0, named in the workspace README as the
+  operator decision it is.
+- "EXL3_FAT_KERNEL and EXL3_TEMP_ROWS_FUSED are not exposed, and that is the
+  finding" - outdated: the fused-rows knob now ships as a COUPLED launcher
+  default (32 with E3, 256 with E2). The negative result was about raising it
+  to 1024; the coupling is upstream's resolution of the same question.
+- "Fair v5 mixed-prefill... ~1,000 lines" - the version moved to decode-floor
+  v7 (integrating KV-refusal recovery, priority ranking under
+  `--scheduling-policy priority`, and the fail-closed installer migration
+  matrix). The decline-to-COPY stands; it is now moot in the interesting way:
+  the image's own overlay does it, and this repo flipped the flag above.
+- "Cooperative decode MoE... their own tool rejects a rebuild that is not the
+  pin" - superseded by #294: validation moved from an ELF-hash allowlist to
+  SOURCE PROVENANCE (pinned ExLlamaV3 commit, input-tree digest, compiler
+  provenance). The opaque-binary objection is materially weakened; the AGPL
+  objection stands; still declined.
+- "The P3-P8 improvement plan... Upstream stopped after P2" - no longer true:
+  FP8 non-routed GEMMs and the dual-rail/CX7 routing work both landed as
+  defaults in the window.
+- "the InstantTensor image... Not resolved" - moved toward resolved: the
+  default tag is now `:exl3-instanttensor` (boot 259->122 s), and a GHCR
+  adoption guard means retagged builds only serve matching recipe stamps. The
+  digest-at-boot habit above is this repo's half of the same fix.
+- "INDEXER_WORKSPACE=rightsize... nothing here has booted with it" - still
+  true here, weaker evidence everywhere: upstream booted it enough to default
+  it. It stays first-on-the-ladder, not first-by-default, because OUR
+  re-implementation is the one that has not booted.
+- fp8 KV, from the Qwen re-read: their independent measure of the SAME trade
+  is 98.8% top-1 against bf16 - convergent with
+  [#glm53-second-pass](#glm53-second-pass)'s 8-of-8 `tok/step` cells and this
+  file's "quality trade, not capacity" position. Their fp8-KV mechanism
+  descends from the AGPL GLM recipe; the code still does not get copied.
+
+### Declined, and why - the reasoning is allowed to have an expiry date
+
+- **DeepInfer, now.** DeepSeek's production framework, open-sourced (Apache-
+  2.0) as offline inference for V4.1-Flash-1017, derived from vLLM. Its
+  kernels (FlashMLA/DeepGEMM/DeepEP, flash-attn-4) target SM100 - not sm_121;
+  its smallest efficient unit is 64P+64D GPUs inside one scale-up domain with
+  NVLink expert shuffle and a 3FS KV tier; nothing in the tree names a Spark
+  or GB10. The Q&A is worth having read for the arithmetic (bounded SWA
+  replay: recompute the last 128 tokens only, ring 134 = window 128 +
+  backtrack 6; DSpark draft-5 + confidence head, -30% verified draft tokens
+  at equal accept length) - all of it mechanisms this cluster already reaches
+  from other directions. WATCH for a community sm_121 port; adopt nothing.
+- **memguard as a daemon.** It stays a kit-internal, container-lifetime
+  mechanism, not a role. The doctrine of "zero monitoring daemons" survives
+  because what the watchdog guards is a workspace's own process tree, started
+  and stopped by that workspace's lifecycle - but the doctrine's honesty now
+  depends on that distinction, so it is spelled out here: the reason to run
+  the TensorFold kits rather than re-implement their launchers includes their
+  watchdogs, and this repo will not ship a home-grown one onto a machine that
+  is not serving a model.
+- **Nemotron-3.5-Bolt as a fourth workspace.** MIT, one Spark, 24.5 GB of
+  IQ2_XXS-squashed 74B, 71-114 tok/s single-stream decode, structured output
+  at 131 tok/s (FASTER under grammar constraints, because the mask raises
+  draft acceptance), and batch-invariance done properly - decode/verify
+  always on the K-split GEMM with sequence-length-chosen key chunks, so
+  concurrent replies are bit-identical to solo ones. Recorded as the next
+  single-Spark candidate after the Qwen one, unshipped because a reading is
+  not a boot and the catalogue already has three unverified entries. If it
+  ships, it ships at `tensorfold-` + `lib/kit.sh`, with the same
+  `logprobs`-absent caveat as its siblings.
+- **Reduced-vocabulary MTP drafting:** unchanged from
+  [#glm53-second-pass](#glm53-second-pass) - their +8.4% is fp8-KV->tuned, our
+  arm is `auto`; still an open question, not a closed one.
+
+### Recorded, not acted on
+
+- NVIDIA's `Qwen3.8-Flash-Next-FP4-Local` is a QAD checkpoint in ModelOpt
+  NVFP4 format - the format vLLM's `modelopt` path reads. Whether the 2-node
+  vLLM arm could serve THAT export (96 GiB, 26.8 GiB table) instead of the
+  133 GiB `...-NVFP4` (51 GB table) is a live throughput question with a
+  cheap answer available the next time the pair is legitimately down: boot it
+  at `nvidia/Qwen3.8-Flash-Next-FP4-Local` and let the prefill ladder and
+  quality gate speak.
+- Their n-gram table read from disk via host `pread` (26.8 GiB never
+  GPU-resident) is the mechanism this repo declined once as `PLE_OFFLOAD` -
+  declined against a 51 GB resident table and a vLLM path without the
+  pread loop. It stays declined for the running server and recorded as what
+  would change the arithmetic.
+- Their "keep 10 GiB MemAvailable" watchdog floor and the
+  `NV_ERR_NO_MEMORY` driver-spam pattern (cosmetic on 580.173.02 /
+  6.17.0-1029-nvidia - both Sparks run EXACTLY that driver+kernel pair, verified
+  2026-10-20) are worth a line in the troubleshooting runbook the next time it
+  is edited for any reason.
+- The interleave-prefill, image-keyed prompt cache, repeat-prompt cache and
+  burst admission are engine mechanisms, not flags: the vLLM analogues are
+  the already-adopted `--long-prefill-token-threshold` and prefix caching.
+  Where a TensorFold workspace is up, the question "does it reuse a resumed
+  conversation" has `tools/prompt_reuse.py` for it - `vllm-prefill-ladder`
+  does not, and should not pretend to.

@@ -201,6 +201,15 @@ up. If it does not apply, the container exits rather than serve.
 Published on the source kit — **not measured here**, and quoted for calibration
 rather than as a target. DFlash2 k=7, temp 0, thinking off, warm.
 
+**These are already a kit generation behind** (2026-10-20): the source kit's
+TP2 defaults have since moved to `fair` mixed-prefill scheduling and E3
+grouped fat-expert prefill (+37-45% cold prefill on their measure), the
+maintained image tag is `:exl3-instanttensor`, and upstream now recommends its
+TensorFold engine for this model outright — see
+[`tensorfold-2node-glm53-flash-exl3`](../tensorfold-2node-glm53-flash-exl3/README.md).
+This workspace's own `vllm-prefill-ladder` expected-cells ride the old numbers
+too; re-take them against whatever image digest a boot actually pinned.
+
 Cold **prefill** on the same kit, for the other half of a request: ~895 tok/s at
 8k (8.9 s TTFT), ~975 at 100k, ~940 at 300k — all at `MAX_NUM_BATCHED_TOKENS=2048`,
 which is this workspace's default because it won a measured ladder

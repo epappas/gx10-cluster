@@ -1,0 +1,83 @@
+name: tensorfold-qwen38-flash-next-spark
+kind: inference
+engine: tensorfold
+provenance: unverified
+summary: Qwen3.8-Flash-Next on ONE Spark (TensorFold Zig engine, NVIDIA FP4 QAD) - single-stream decode ABOVE the 2-node vLLM, and the other Spark comes free
+
+# WHAT THIS IS, in one line: MiaAI-Lab's single-Spark TensorFold recipe, run at
+# a pinned commit of their MIT-licensed kit. The engine is TensorFold's native
+# Zig server (`tensorfold-native`), NOT vLLM, and the checkpoint is NVIDIA's
+# quantization-aware-distilled `Qwen3.8-Flash-Next-FP4-Local` - a DIFFERENT
+# artifact from the `...-NVFP4` export ../vllm-2node-qwen38-flash-next serves.
+#
+# WHY IT EXISTS AS A WORKSPACE - the numbers, upstream's, measured on a Spark
+# with sparkDash on the box (kit README Performance, 2026-10-17/18, FP4
+# checkpoint, 262,144-token window, fp8 KV, vision on, MTP depth 6):
+#
+#   decode, prose      1 stream 46-55 tok/s        ours (2-node vLLM): 33.1
+#   decode, code       1 stream 67.9               ours: 37.7 at 1 stream
+#   decode, aggregate  5 streams 132.7 prose       ours: 179.1 at 8 streams
+#   prefill            16k-131k  ~2,200-2,500      ours: 3,253-3,286
+#   TTFT (1 stream)    181-195 ms                  ours: 195-250 ms band
+#
+# One Spark beats BOTH of ours on single-stream prose, at the cost of the
+# concurrency ceiling (5 refused-not-queued streams, against 8), ~23% prefill,
+# and the 985k YaRN retrieval we validated on the pair (their 194,723-token
+# needle passes on one Spark; the 1M window is allowed with auto-YaRN x4 but
+# the prefill scratch for a 1M prompt is not budgeted there). Serving this
+# workspace is therefore not "the 2-node server, smaller" - it is a different
+# point on the intelligence/throughput/utilisation curve, and its real prize
+# is that it leaves a whole GB10 free for another model.
+#
+# The quality question is the checkpoint's, not the engine's: the model card
+# (upstream's numbers, not re-measured here) puts FP4 QAD at GPQA Diamond 91.5%
+# and ToolEvalBench 88.7% against 92.2 / 89.4 for bf16, and the fp8 KV is
+# ~98.8% top-1 agreement with a bf16 cache - a free-running reply can diverge
+# after 85-350 characters. `ws up vllm-quality-gate` and
+# `ws up quant-quality-ab` are the tools for deciding that about YOUR corpus.
+
+# UNVERIFIED, and it cannot be verified without stopping the 2-node server this
+# repo is currently serving (and being asked through). Nothing in the memory
+# arithmetic here is ours yet: it is the kit's, transcribed. What IS ours is
+# the hardware agreement - the kit was measured on driver 580.173.02 / kernel
+# 6.17.0-1029-nvidia, and both Sparks here run that exact kernel.
+
+requires:
+  gpu_arch: "12.1"
+  # mem_need_gib at the default window: 81 (weights, table included) + 4.4
+  # (one 262k fp8 window) + 8 (prefill scratch slack) + 2 (vision helper) + 10
+  # (reserve floor) + 2 = ~108 GiB of MemAvailable at start. On THIS box that
+  # means the two-node vLLM must be down first - `ws check` refusing while a
+  # 96 GB/node server holds the pool is the correct answer, not a bug.
+  min_unified_gb: 108
+  # The kit asks MIN_FREE_GB = checkpoint + 18 (96 + 18 = 114) for the
+  # download and IMAGE_FREE_GB = 40 for the image build under docker's root.
+  # 160 is its own "fresh, keep >= 100 GB" guidance with headroom. This is why
+  # poseidon (125 GB free at the 2026-10-20 measurement) cannot host it today
+  # and odysseus (343) can.
+  min_disk_gb: 160
+  docker: true
+
+images:
+  # Built locally at first run: the tag THIS tree's patches hash to
+  # (zig-db28187-c0a2df4c680d) is NOT on ghcr - the newest published image is
+  # 1.0.0 (zig-db28187-4144696f21e3 @ sha256:cb98098439d95d2bff27bc771ba180e5857613ecc41f6b6e81e494782df9433a),
+  # whose patches 0001-0009 stop at INT4-AutoRound, before the NVIDIA FP4
+  # loader landed. The build is the same for either checkpoint. ~6 minutes of
+  # Zig compile on a Spark, this base under it.
+  - nvcr.io/nvidia/pytorch:26.07-py3
+
+models:
+  - nvidia/Qwen3.8-Flash-Next-FP4-Local
+  - azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound
+
+container: qwen38-flash-next-tf
+
+endpoints:
+  - "http://127.0.0.1:8901/v1  (OpenAI-compatible)"
+
+sources:
+  - https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold
+  - https://github.com/ashhart/TensorFold
+  - https://huggingface.co/nvidia/Qwen3.8-Flash-Next-FP4-Local
+  - https://huggingface.co/azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound

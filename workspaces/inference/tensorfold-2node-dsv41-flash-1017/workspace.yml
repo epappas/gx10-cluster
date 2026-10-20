@@ -1,0 +1,64 @@
+name: tensorfold-2node-dsv41-flash-1017
+kind: inference
+engine: tensorfold
+provenance: blocked
+summary: DeepSeek-V4.1-Flash-1017 EXL3 2.9bpw on the pair (TensorFold Zig engine) - upstream's current path, blocked here on DISK, and the arithmetic is in the README
+
+# WHAT THIS IS: MiaAI-Lab's DeepSeek-V4.1-Flash-1017 kit (Apache-2.0, created
+# 2026-10-19) at a pinned commit - TensorFold's native Zig engine, BertholomusAI's
+# `dsv41` family at TP=2, one rank per Spark. It supersedes
+# ../vllm-2node-dsv41-flash-exl3 on every axis upstream:
+#
+#   - engine: Zig tensorfold-native + tf-dsv41-lanes, image pullable by tag
+#     (exl3-tp2-7c9bf5d36350), interleave-ON and image-prompt-cache patches
+#     measured on the pair (120k cold prompt: a decoding stream's longest
+#     token gap 90 s -> 1.3 s)
+#   - checkpoint: Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw @
+#     6d54be4f - the OLD name (and the old revision e8ac7684) do not resolve
+#     under today's pins; a cache copy under either is not this checkpoint
+#   - Engram: from deepseek-ai/DeepSeek-V4.1-Flash-1017 @ 1bae0e10, shards
+#     47+48, ~203 GB - NEW tables; the older release's MUST NOT be used
+#     (the kit's prepare.sh checks shard sizes exactly)
+#   - decode (their pair, sparkDash): prose 74.9 / code 109.9 tok/s single
+#     stream; 130.0 / 155.5 at 4; prefill ~2,100-2,200 tok/s to 128k, 2,000 at
+#     256k; 1,048,576 window default, 524,288 practical on a busy head
+#
+# WHY `blocked` AND NOT `unverified`: the disk. The kit needs ~505 GB on the
+# head (checkpoint 196 + Engram 203 + rank 0's weight file 106 + image 25) and
+# ~310 GB on the worker (Engram copy + rank 1's weight file + image). Measured
+# 2026-10-20: odysseus 343 GB free, poseidon 125. poseidon is ~185 GB short
+# before any question about the head, and the head is short too. README
+# "The disk arithmetic" carries the numbers a reclaim must clear; the RL
+# archive and stale weights are the same levers the vLLM port named.
+
+requires:
+  gpu_arch: "12.1"
+  # ~98-99 GiB of weights a rank; rank 0 holds ~104 GiB on the GPU; the kit
+  # refuses to start under MIN_AVAIL_GIB=112 per Spark. That is the floor for
+  # THIS machine layout (a head that also runs a desktop was left ~3.1 GiB
+  # clear at the worst point of a 100k prompt); CONTEXT=524288 or less.
+  min_unified_gb: 112
+  # Head: the kit's own number (README Requirements: ~505 GB, image included).
+  min_disk_gb: 505
+  docker: true
+  rdma: true
+  peers: 1
+
+images:
+  - ghcr.io/miaai-lab/deepseek-v4.1-flash-1017-2x-dgx-sparks-tensorfold:exl3-tp2-7c9bf5d36350
+
+models:
+  - Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw
+  - deepseek-ai/DeepSeek-V4.1-Flash-1017
+
+container: dsv41-1017-exl3-tf
+
+endpoints:
+  - "http://127.0.0.1:8903/v1  (OpenAI-compatible, on the head)"
+
+sources:
+  - https://github.com/MiaAI-Lab/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks
+  - https://huggingface.co/Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw
+  - https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017
+  - https://github.com/bertholomus/TensorFold
+  - https://github.com/bertholomus/deepseek-v4.1-tensorfold-tp2-2xgb10

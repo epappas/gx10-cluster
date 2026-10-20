@@ -253,11 +253,60 @@ EXTRA_ENV=(
     -e "GLM53_SUPPRESS_STOPS_IN_REASONING=${SUPPRESS_STOPS_IN_REASONING:-1}"
 
     # Do not mix a peer's prefill into a step where another sequence is
-    # decoding. The cost is visible and honest - concurrent cold prefills
-    # SERIALISE, and the second caller waits - and the alternative is that one
-    # long prefill lands in a decode step and stalls every stream in flight.
-    # `skip` = decode-only steps, N>0 = cap mixed prefill tokens, 0 = stock.
-    -e "GLM53_MIXED_PREFILL_CHUNK=${MIXED_PREFILL_CHUNK:-skip}"
+    # decoding. `skip` = decode-only steps, N>0 = cap mixed prefill tokens,
+    # 0 = stock.
+    #
+    # DEFAULT MOVED TO `fair` on 2026-10-20, following upstream's own move
+    # (their scheduler is at decode-floor v7 now, integrating KV-refusal
+    # recovery, priority ranking and the fail-closed installer, and `fair`
+    # became the kit default on 2026-09-30). What it buys on THIS topology,
+    # measured by them at TP=2: a 2k newcomer's first token ~12 s and a 30k
+    # one ~164 s while incumbent streams keep 80-90% of their pace - against
+    # `skip`, where concurrent cold prefills serialise and the second caller
+    # waits out the first one entirely. What it costs: ~20% off total mixed-
+    # load wall time, and the first long prompt slows (53 -> 111 s on their
+    # five-100k bench). Replies stay bit-identical under every arm.
+    # MIXED_PREFILL_CHUNK=skip in .env restores the old default. ONE CAVEAT
+    # IS OURS, not theirs: the fair path lives in the overlay's bytes, and
+    # this workspace pins the MUTABLE tag :exl3 - upstream has rebuilt behind
+    # it (see docs/decisions.md#glm53-indexer-workspace "Not resolved"). If
+    # the boot's scheduler is older than the v5 fair mode, the env var is
+    # inert and the behaviour is whatever that image shipped. Pin a digest in
+    # IMAGE= on the boot whose numbers you mean to keep.
+    -e "GLM53_MIXED_PREFILL_CHUNK=${MIXED_PREFILL_CHUNK:-fair}"
+    # The fair scheduler's own budget, kit defaults spelled out so a .env can
+    # override one line without knowing the overlay's internals.
+    -e "GLM53_FAIR_PREFILL_CHUNK=${FAIR_PREFILL_CHUNK:-256}"
+    -e "GLM53_FAIR_PREFILL_SHARE=${FAIR_PREFILL_SHARE:-0.30}"
+    -e "GLM53_FAIR_PREFILL_MAX_INTERVAL_MS=${FAIR_MAX_INTERVAL_MS:-2000}"
+    -e "GLM53_FAIR_PREFILL_MAX_STEP_MS=${FAIR_MAX_STEP_MS:-2000}"
+
+    # E3 grouped fat-expert MoE PREFILL: three GPU-driven launches per MoE
+    # layer (gather, gate/up+SwiGLU, down+scatter) from device-side segment
+    # tables - no per-expert host loop, no repack, no host sync. Upstream
+    # defaulted it on for TP=2/TP=3 on 2026-09-30 with +37-45% cold prefill
+    # measured on the two-Spark kit and decode unchanged; EXL3_TEMP_ROWS_FUSED
+    # is COUPLED to it (32 with E3, 256 with E2 - raising it to 1024 was this
+    # repo's old negative finding, and the coupling is how upstream resolved
+    # that knob). Whether these bytes are in the image is the same mutable-tag
+    # caveat as above: they post-date 2026-09-30. Absent means inert, wrong
+    # E3/E2 pairing is a correctness question, hence EXL3_FAT_GROUPED=0 +
+    # EXL3_TEMP_ROWS_FUSED=256 restores the documented legacy pair.
+    # (The DSV4.1 port's "E3 does not apply to the mul1 K2/K3 tree" is about
+    # THAT checkpoint's quant geometry; GLM's 4bpw tree is what upstream's
+    # +37-45% was measured on.)
+    -e "EXL3_FUSED_MOE=${EXL3_FUSED_MOE:-1}"
+    -e "EXL3_FAT_KERNEL=${EXL3_FAT_KERNEL:-1}"
+    -e "EXL3_FAT_GROUPED=${EXL3_FAT_GROUPED:-1}"
+    -e "EXL3_TEMP_ROWS_FUSED=${EXL3_TEMP_ROWS_FUSED:-32}"
+
+    # Compact draft KV, now the kit default under SPEC_METHOD=dflash:
+    # repeated-turn TTFT -30.5% (their A/B). It interacts with
+    # patch_hybrid_prefix_hit's group flagging above, so it is forwarded as a
+    # named default, not as advice - if the follow-up-turn reuse probe
+    # (warmup.sh) drops below its recorded 7168-at-8k behaviour, this is the
+    # first line to set to 0.
+    -e "GLM53_DRAFT_KV_COMPACT=${DRAFT_KV_COMPACT:-1}"
 
     # EngineCore's stock 300 s execute timeout is shorter than a cold
     # Triton/TileLang JIT on TP=2, so the stock value turns a slow compile into

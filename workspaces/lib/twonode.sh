@@ -340,7 +340,13 @@ MSG
 # utilisation is in MODEL_ARGS. No such flag means no claim, and no check.
 #
 # Ported from the preflight_memory() gate in
-# MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks.
+# MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks, plus its await-memory fix from
+# MiaAI-Lab/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks (pull request #7, ezoushen):
+# a node right after a big copy or a build counts its page cache as available
+# only as it is written back, so ONE read can refuse a start the Spark could
+# take - measured there as 111.1 GiB read a few seconds after a build against
+# 119 GiB once it settled. Hence the re-read loop below: refuse only what has
+# stayed short for HOST_MEM_WAIT_S seconds (0 reads once).
 twonode_util_from_args() {  # prints the --gpu-memory-utilization value, if any
     local a prev=
     # ${arr[@]+"${arr[@]}"} is the set -u safe expansion of a possibly-unset
@@ -365,32 +371,40 @@ twonode_meminfo() {  # $1 = "local" | <host>; prints "<MemTotal_kB> <MemAvailabl
 }
 
 twonode_require_host_memory() {
-    local util short=0 where label total avail msg
+    local util where label total avail msg msgs waited=0
     util=$(twonode_util_from_args) || return 0
 
     # Headroom above the claim itself: between vLLM's check and the allocation
     # sit the loader's own buffers. 4 GiB is what a cold two-node boot needed.
     local headroom=${HOST_MEM_HEADROOM_GIB:-4}
+    # How long a node may stay short before the refusal stands. A short read
+    # right after a big copy is the page cache not yet written back, not a
+    # missing 8 GiB; see the await-memory note above.
+    local wait_s=${HOST_MEM_WAIT_S:-30}
 
-    for where in local "${PEER:-}"; do
-        [[ -n $where ]] || continue
-        label=$where; [[ $where == local ]] && label=$(hostname)
-        read -r total avail <<<"$(twonode_meminfo "$where")"
-        # An unreadable peer is twonode_up's problem, not this check's.
-        [[ -n ${total:-} && -n ${avail:-} ]] || continue
-        # One awk: it decides AND formats, so the arithmetic exists once.
-        # Empty output means the node is fine.
-        msg=$(awk -v l="$label" -v t="$total" -v a="$avail" -v u="$util" -v h="$headroom" 'BEGIN{
-            need = t * u + h * 1048576
-            if (a >= need) exit
-            printf "host memory on %s is short: MemAvailable %.1f of %.1f GiB, and utilisation %s plus %s GiB headroom wants %.1f", l, a/1048576, t/1048576, u, h, need/1048576
-        }') || continue
-        [[ -n $msg ]] || continue
-        echo "$msg" >&2
-        short=1
+    # Each pass collects one message per short node (the awk decides AND
+    # formats, so the arithmetic exists once). The refusal is printed only
+    # once it stands - a node that clears inside the wait costs nothing.
+    while :; do
+        msgs=()
+        for where in local "${PEER:-}"; do
+            [[ -n $where ]] || continue
+            label=$where; [[ $where == local ]] && label=$(hostname)
+            read -r total avail <<<"$(twonode_meminfo "$where")"
+            # An unreadable peer is twonode_up's problem, not this check's.
+            [[ -n ${total:-} && -n ${avail:-} ]] || continue
+            msg=$(awk -v l="$label" -v t="$total" -v a="$avail" -v u="$util" -v h="$headroom" 'BEGIN{
+                need = t * u + h * 1048576
+                if (a >= need) exit
+                printf "host memory on %s is short: MemAvailable %.1f of %.1f GiB, and utilisation %s plus %s GiB headroom wants %.1f", l, a/1048576, t/1048576, u, h, need/1048576
+            }') || continue
+            [[ -n $msg ]] && msgs+=("$msg")
+        done
+        (( ${#msgs[@]} )) || { (( waited )) && echo "host memory cleared after ${waited}s"; return 0; }
+        (( waited < wait_s )) || break
+        sleep 2; waited=$((waited + 2))
     done
-
-    (( short )) || return 0
+    for msg in "${msgs[@]}"; do echo "$msg - still short after ${waited}s" >&2; done
     cat >&2 <<'MSG'
 
   The GPU pool here IS system RAM. vLLM makes this same check itself, but a
@@ -399,7 +413,8 @@ twonode_require_host_memory() {
   the cable rather than at the memory.
 
   Free some (a stale container; ws down, then retry), lower the utilisation,
-  or raise the margin with HOST_MEM_HEADROOM_GIB= in .env.
+  or raise the margin with HOST_MEM_HEADROOM_GIB= in .env. A node that is
+  legitimately busy settling can be given more time with HOST_MEM_WAIT_S=.
 MSG
     return 1
 }
@@ -430,12 +445,44 @@ twonode_evict_page_cache() {
     return 0
 }
 
+# DO THE TWO GPUs SHARE ONE CLOCK CEILING?
+#
+# With TP=2 the ranks meet twice a layer, so the slower GPU sets the pace for
+# BOTH. Measured by MiaAI-Lab/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks (README
+# Requirements): one Spark locked at 1,800 MHz against 2,200 on the other cost
+# 3-6% of prefill and 3% of decode, silently - every tok/s number is just
+# slightly lower than it should be, with nothing in the log to find. A warning,
+# not a refusal: an intentionally capped head (thermals, a shared box) is a
+# legitimate choice; the crime is not KNOWING.
+twonode_warn_clock_ceilings() {
+    [[ -n ${PEER:-} ]] || return 0
+    # NO PIPE IN THE QUERY STRING: run locally the expansion of $q puts `|`
+    # through as an ARGUMENT (pipes parse before word expansion, not after),
+    # while the ssh'd copy is re-parsed by the remote shell and works - so a
+    # piped query "passes" on the peer and fails at home, and the failure
+    # message prints nvidia-smi's usage text as the local clock. One GPU per
+    # GB10; there is nothing to head.
+    local q="nvidia-smi --query-gpu=clocks.max.sm --format=csv,noheader,nounits"
+    local here there
+    here=$($q 2>/dev/null | tr -d '[:space:]')
+    there=$(ssh -n -o BatchMode=yes -o ConnectTimeout=5 "$PEER" "$q" 2>/dev/null | tr -d '[:space:]')
+    # A dead query - either end - is not a verdict: the warning exists to
+    # distinguish equal from unequal ceilings, not from unreachable nodes.
+    [[ $here =~ ^[0-9]+$ && $there =~ ^[0-9]+$ ]] || return 0
+    if [[ $here != "$there" ]]; then
+        echo "WARN: the two GPUs have different clock ceilings: $(hostname) ${here} MHz vs $PEER ${there} MHz." >&2
+        echo "  TP=2 meets twice a layer, so the lower one sets the pace for both (~3-6% prefill, ~3% decode)." >&2
+        echo "  Equalise with 'sudo nvidia-smi -lgc 0,<max>' on the capped node, or accept the tax." >&2
+    fi
+}
+
 twonode_up() {
     twonode_resolve || return 1
     twonode_common_env
     twonode_pull || { echo "image pull failed - see above" >&2; return 1; }
     twonode_evict_page_cache
     twonode_require_host_memory || return 1
+    twonode_warn_clock_ceilings
 
     local peer_mgmt
     peer_mgmt=$(getent hosts "$PEER" | awk '{print $1; exit}')
