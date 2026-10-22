@@ -18,7 +18,11 @@ cd "$(dirname "$(readlink -f "$0")")"
 source ../../lib/kit.sh
 
 KIT_URL=${KIT_URL:-https://github.com/MiaAI-Lab/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks.git}
-KIT_SHA=31eea4608f8bb292a92e2f7a1db400e928620c78
+# Re-pinned 2026-10-20 from 31eea46: upstream's 31eea46-era config pinned a
+# checkpoint commit (6d54be4f) that the Hub repo's same-day "super-squash"
+# rewrite erased. 370daf0 carries the re-pin to 45ee5d0f, plus the RDMA
+# idle-nap, pool/window consistency and cache-residency fixes.
+KIT_SHA=370daf0cc38f348516a98ebab38f6053858eab1f
 KIT_NAME=dsv41-1017-tensorfold
 
 export PORT=${PORT:-8903}
@@ -81,7 +85,7 @@ kit_fetch || exit 1
 cd "$KIT_DIR" || exit 1
 
 echo
-echo "model    Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw @ 6d54be4f"
+echo "model    Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw @ 45ee5d0f (verified at HEAD)"
 echo "         + Engram tables from deepseek-ai/DeepSeek-V4.1-Flash-1017 @ 1bae0e10"
 echo "         (the 1017 tables - the older release's must NOT be used; prepare.sh checks)"
 echo "image    built locally if the pins' tag is unpublished (275 s, measured 2026-10-20)"

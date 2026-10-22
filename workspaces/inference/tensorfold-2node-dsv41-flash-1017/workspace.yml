@@ -9,13 +9,23 @@ summary: DeepSeek-V4.1-Flash-1017 EXL3 2.9bpw on the pair (TensorFold Zig engine
 # `dsv41` family at TP=2, one rank per Spark. It supersedes
 # ../vllm-2node-dsv41-flash-exl3 on every axis upstream:
 #
-#   - engine: Zig tensorfold-native + tf-dsv41-lanes, image pullable by tag
-#     (exl3-tp2-7c9bf5d36350), interleave-ON and image-prompt-cache patches
-#     measured on the pair (120k cold prompt: a decoding stream's longest
-#     token gap 90 s -> 1.3 s)
+#   - engine: Zig tensorfold-native + tf-dsv41-lanes (image tag hashes off the
+#     kit tree and is not reliably published - it BUILDS locally in ~5 min),
+#     interleave-ON and image-prompt-cache patches measured on the pair (120k
+#     cold prompt: a decoding stream's longest token gap 90 s -> 1.3 s), plus
+#     at re-pin time: RDMA idle-nap, shared-pool>window, both-rank pool/window
+#     consistency (370daf0)
 #   - checkpoint: Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw @
-#     6d54be4f - the OLD name (and the old revision e8ac7684) do not resolve
-#     under today's pins; a cache copy under either is not this checkpoint
+#     45ee5d0f (HEAD verified 2026-10-20). This repo REWROTE ITS HISTORY the
+#     day it was born - a "super-squash" erased the 6d54be4f the kit pinned an
+#     hour earlier, and the download failed "Revision not found" until the kit
+#     re-pinned. e8ac7684 (vLLM-port era) is gone too. A cache copy under any
+#     older revision is not this checkpoint.
+#   - quality receipt (model card, same-day): teacher-forced KL vs the
+#     original weights - agentic 0.0068 nats (98.0% top-1), code 0.0074
+#     (98.2%), tool-calling 0.0113 (97.3%); weakest chat 0.0357 (94.0%).
+#     Teacher-forced, <=32.7k context only; free-generation quality is still
+#     what vllm-quality-gate and quant-quality-ab exist to measure HERE.
 #   - Engram: from deepseek-ai/DeepSeek-V4.1-Flash-1017 @ 1bae0e10, shards
 #     47+48, ~203 GB - NEW tables; the older release's MUST NOT be used
 #     (the kit's prepare.sh checks shard sizes exactly)
@@ -47,12 +57,14 @@ requires:
   peers: 1
 
 images:
-  # Built LOCALLY on first boot: the tree's patches hash to tag
-  # exl3-tp2-8eb5919ff0a4, which is NOT published (the README still names the
-  # older 7c9bf5d36350). Confirmed 2026-10-20: kit pulled base, 275 s Zig
-  # build, identical image on both Sparks. The name below is what exists
-  # today upstream, not what this pin uses.
-  - ghcr.io/miaai-lab/deepseek-v4.1-flash-1017-2x-dgx-sparks-tensorfold:exl3-tp2-8eb5919ff0a4  # unpublished -> local build
+  # Built LOCALLY - twice now, because the kit tree moves daily and the tag
+  # hashes the patches. First boot (31eea46 tree) built exl3-tp2-8eb5919ff0a4
+  # in 275 s, identical on both Sparks; the 370daf0 re-pin adds 4 patches, so
+  # the next boot rebuilds against ITS hash. The README's advertised ghcr tag
+  # (7c9bf5d36350) matches neither. Treat the image line as the build recipe,
+  # not a pull: PULL tries the tree's hash, fails, builds. The base below is
+  # the real pull; the result is a local tensorfold-dsv41:<tree-hash> image.
+  - nvcr.io/nvidia/pytorch:26.07-py3
 
 models:
   - Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw

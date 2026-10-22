@@ -65,13 +65,17 @@ arithmetic stays here because it is the recipe's permanent requirement. The reci
 
 ## What moved since the vLLM port, and why the old cache does not count
 
-- **Checkpoint renamed with content.** `Mia-AiLab/DeepSeek-V4.1-Flash-EXL3-2.9bpw`
-  (what `vllm-2node-dsv41-flash-exl3` pins, rev `e8ac7684`, which the Hub no
-  longer serves) → `Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw`
-  @ `6d54be4f`. The old name redirects at the repo level, but the HF cache is
-  keyed by NAME+REVISION: a copy under either old identifier is invisible to
-  this pin, and prepare.sh refuses to download 196 GiB into a disk that
-  cannot hold it (their guard, 2026-10-19, for exactly this confusion).
+- **Checkpoint renamed with content, then REWROTE ITS HISTORY.**
+  `Mia-AiLab/DeepSeek-V4.1-Flash-EXL3-2.9bpw` (what `vllm-2node-dsv41-flash-exl3`
+  pins, rev `e8ac7684`, which the Hub no longer serves) →
+  `Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw`. The kit born on
+  10-19 pinned rev `6d54be4f`; the same day a *"super-squash"* commit erased
+  that revision from the repo's history, and the first boot here failed
+  exactly at that pin: `Revision not found`. Kit head `370daf0` re-pinned to
+  `45ee5d0f` (today's HEAD, verified resolvable) — which is what this
+  workspace runs. The HF cache keys on NAME+REVISION: a copy under any older
+  identifier is not this checkpoint, and prepare.sh refuses to download
+  196 GiB into a disk that cannot hold it.
 - **Engram's tables are NEW in 1017** (shards 47+48 of
   `deepseek-ai/DeepSeek-V4.1-Flash-1017` @ `1bae0e10`). The model card lists
   their sha256; `VERIFY_SHA=1` checks them. **The older release's tables must
@@ -110,7 +114,7 @@ the three questions, pointed at 8903 — remembering `tensorfold-native` returns
 no token probabilities, so acceptance is proven by `tools/exact.py`
 (drafted == plain), not by `spec-decode-accept`.
 
-### The first boot attempt (2026-10-20) taught three things
+### The first boot attempts (2026-10-20) taught four things
 
 - **The prebuilt image did not exist for these pins.** The kit computed tag
   `exl3-tp2-8eb5919ff0a4` — not the `7c9bf5d36350` its README still advertises
@@ -126,6 +130,22 @@ no token probabilities, so acceptance is proven by `tools/exact.py`
   transient, not a full box** — the exact failure upstream's
   `MIN_AVAIL_WAIT_S` exists for. `ws check` reads once; wait a few minutes
   (or `sync` first) and retry. The kit's own preflight re-reads for 30 s.
+- **The download then failed `Revision not found`** — the Hub repo squashed
+  its own history the day it shipped, erasing the kit's pinned commit. This
+  is why the workspace pins the KIT sha (which carries the re-pin) rather
+  than trusting a model revision to be permanent; see "What moved". The
+  re-pin at `370daf0` resolves — verified with a single-file fetch before
+  anything was committed. Re-pin when a kit moves: `up.sh`'s `KIT_SHA` is the
+  one line.
+
+**Quality, now on the card (same day as these attempts):** teacher-forced
+next-token fidelity vs the original `1bae0e10` weights — agentic **0.0068
+KL nats / 98.0% top-1**, code 0.0074 / 98.2%, tool-calling 0.0113 / 97.3%,
+thinking-agentic 0.0076 / 97.3%; weakest chat (0.0357 / 94.0%) and
+multilingual. The strata that matter for coding sessions are the *best*
+measured. Still unmeasured by them: free generation and anything past 32.7k
+context — which is exactly what `vllm-quality-gate`, `quant-quality-ab` and
+this repo's needle protocol are for on the first real boot.
 
 ## Licence
 
@@ -136,7 +156,7 @@ gated, MIT) replaces 104 attention tensors — not enabled here. Published image
 
 ## Sources
 
-- [`MiaAI-Lab/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks`](https://github.com/MiaAI-Lab/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks) @ `31eea46`
-- [`Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw`](https://huggingface.co/Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw) @ `6d54be4f`
+- [`MiaAI-Lab/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks`](https://github.com/MiaAI-Lab/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks) @ `370daf0` (was `31eea46`; re-pin 2026-10-20)
+- [`Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw`](https://huggingface.co/Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw) @ `45ee5d0f` (post-squash HEAD; supersedes the erased `6d54be4f`)
 - [`deepseek-ai/DeepSeek-V4.1-Flash-1017`](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017) @ `1bae0e10` (Engram shards 47-48 only)
 - `docs/decisions.md#tensorfold-era`

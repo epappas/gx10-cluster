@@ -2925,8 +2925,9 @@ would have quietly dropped.
 
 2026-10-20, five weeks after [#glm53-indexer-workspace](#glm53-indexer-workspace).
 All seven linked repositories re-read at their heads: the Qwen single-Spark
-zig kit (`656879f`), the DeepSeek-V4.1-Flash-1017 pair kit (`31eea46`, created
-10-19), the GLM-5.3 vLLM kit (`a8cc40d`, AGPL) and its TensorFold sibling
+zig kit (`656879f`), the DeepSeek-V4.1-Flash-1017 pair kit (created 10-19;
+read at `31eea46`, re-pinned to `370daf0` that same day - see the note below),
+the GLM-5.3 vLLM kit (`a8cc40d`, AGPL) and its TensorFold sibling
 (`3fd60df`, Apache-2.0), Nemotron-3.5-Bolt (`6f61d77`, MIT),
 `deepseek-ai/DeepInfer` and Mia's fork of it (both `774ce24`/`8b16149`,
 Apache-2.0, initial commits dated THE DAY OF THIS READING - see "Not now"
@@ -2986,6 +2987,24 @@ with the pins ready.
   1017 Engram tables are NEW and size-checked, and the old engine's
   `:exl3`/`:2.9bpw` tags are exactly as mutable as this file has complained
   about since August.
+
+### Post-reading note, same day: the model-layer pin broke first, and it wasn't ours
+
+The first live boot of `tensorfold-2node-dsv41-flash-1017` died at
+`hf download`: **`Revision not found`** on the checkpoint the kit had pinned
+ONE DAY earlier — the Hub repo had "super-squashed" its own `main`, erasing
+`6d54be4f` from history. Kit head `370daf0` re-pinned to `45ee5d0f` (verified
+this time by resolving a single file at the revision before committing the
+sha); our workspace tracks the KIT sha, so the re-pin is one line in `up.sh`
+plus whatever the kit's own config says — which is exactly the division of
+labour [#kit-runner-workspaces](#kit-runner-workspaces) argues for: model
+revisions are the recipe's to own, recipe shas are ours. The re-pin arrived
+with the quality receipts this reading could not find: teacher-forced KL vs
+the original weights — **agentic 0.0068 / code 0.0074 / tool-calling 0.0113
+nats (98.0 / 98.2 / 97.3% top-1), weakest on chat (94.0%)** — the strata that
+matter for this cluster's intended use measuring the BEST. Free generation
+and >32.7k contexts remain unmeasured by them and are the first boot's
+`vllm-quality-gate`/`quant-quality-ab` assignment.
 
 ### What it corrected in this file's earlier verdicts
 
