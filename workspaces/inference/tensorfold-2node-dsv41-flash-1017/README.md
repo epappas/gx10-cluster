@@ -1,6 +1,6 @@
 # `tensorfold-2node-dsv41-flash-1017` — DeepSeek-V4.1-Flash-1017 on the pair, on TensorFold
 
-**Nodes: 2** · **Memory: ~98–99 GiB of weights a rank** · **Port: 8903** · **Engine: TensorFold (native Zig, BertholomusAI `dsv41`)** · **Status: `blocked` — on disk, measurably**
+**Nodes: 2** · **Memory: ~98–99 GiB of weights a rank** · **Port: 8903** · **Engine: TensorFold (native Zig, BertholomusAI `dsv41`)** · **Status: `unverified` — disk cleared by an operator-approved reclaim 2026-10-20; only the live server's memory stands between it and a first boot**
 
 [MiaAI-Lab's 1017 kit](https://github.com/MiaAI-Lab/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks)
 (Apache-2.0, created 2026-10-19) at a pinned commit: EXL3 2.9 bpw EAQ-v1
@@ -32,10 +32,13 @@ Compare against this repo's measured DSpark-vLLM pair
 (`vllm-2node-deepseek-v4-flash`, FP8, ~100 GB/node): different checkpoint
 (2.9 bpw EXL3 vs FP8), different engine, strictly better per-stream decode.
 
-## The disk arithmetic — why this says `blocked`
+## The disk arithmetic — why this WAS `blocked`, until 2026-10-20
 
-Measured 2026-10-20 with the 2-node vLLM server up: **odysseus 343 GB free,
-poseidon 125 GB free.** The recipe needs, by the kit's own Requirements table:
+Measured earlier on 2026-10-20 with the 2-node vLLM server up: **odysseus
+343 GB free, poseidon 125 GB free** — hard-blocked. The reclaim that day
+(RL artifacts, experiment caches, stale images - see the workspace.yml note)
+changed that to **541 / 430 GB**: every gate below now passes. The
+arithmetic stays here because it is the recipe's permanent requirement. The recipe needs, by the kit's own Requirements table:
 
 | | head | worker |
 |---|---|---|

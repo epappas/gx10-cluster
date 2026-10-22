@@ -3088,3 +3088,17 @@ upgrades a paragraph there, none of them reverses a mechanism argument:
   Where a TensorFold workspace is up, the question "does it reuse a resumed
   conversation" has `tools/prompt_reuse.py` for it - `vllm-prefill-ladder`
   does not, and should not pretend to.
+
+### Acted on: the reclaim that un-blocked the 1017 (2026-10-20, operator-approved step by step)
+
+Deleted across both nodes: `/var/tmp/autoresearch-rl-models` (198 GB of Aug-Sep
+RL artifacts), `~/experiments` (28 GB, w33/w34-era), the experiment-era Qwen
+caches (2.5-14B/7B/1.5B/0.5B, 3-8B, 3-1.7B, 3.6-35B-A3B, 3.6-27B - **all
+re-downloadable, and the record that the sglang-int4 workspace's RedHatAI INT4
+4-bit pack was removed too: its next boot re-fetches ~19 GB**), and two stale
+images (`vllm/vllm-openai:cu130-nightly`, `nvcr.io/nvidia/pytorch:26.02-py3`).
+Kept: the live `Qwen3.8-Flash-Next-NVFP4` on both nodes, `Nemotron-3-Super` on
+poseidon, the gsm8k dataset. Net: odysseus 343 -> 541 GB free, poseidon 125 ->
+430. `tensorfold-2node-dsv41-flash-1017` moved `blocked` -> `unverified`; the
+root-owned fragments in `~/experiments` and a 0.5B cache stub were the last of
+the 2026-09 container-ran-as-root mess, now fully swept.

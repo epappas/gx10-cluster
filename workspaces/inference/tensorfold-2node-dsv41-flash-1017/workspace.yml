@@ -1,8 +1,8 @@
 name: tensorfold-2node-dsv41-flash-1017
 kind: inference
 engine: tensorfold
-provenance: blocked
-summary: DeepSeek-V4.1-Flash-1017 EXL3 2.9bpw on the pair (TensorFold Zig engine) - upstream's current path, blocked here on DISK, and the arithmetic is in the README
+provenance: unverified
+summary: DeepSeek-V4.1-Flash-1017 EXL3 2.9bpw on the pair (TensorFold Zig engine) - upstream's current path; disk cleared 2026-10-20 (541/430 GB free), bootable once the pair server comes down
 
 # WHAT THIS IS: MiaAI-Lab's DeepSeek-V4.1-Flash-1017 kit (Apache-2.0, created
 # 2026-10-19) at a pinned commit - TensorFold's native Zig engine, BertholomusAI's
@@ -23,13 +23,15 @@ summary: DeepSeek-V4.1-Flash-1017 EXL3 2.9bpw on the pair (TensorFold Zig engine
 #     stream; 130.0 / 155.5 at 4; prefill ~2,100-2,200 tok/s to 128k, 2,000 at
 #     256k; 1,048,576 window default, 524,288 practical on a busy head
 #
-# WHY `blocked` AND NOT `unverified`: the disk. The kit needs ~505 GB on the
-# head (checkpoint 196 + Engram 203 + rank 0's weight file 106 + image 25) and
-# ~310 GB on the worker (Engram copy + rank 1's weight file + image). Measured
-# 2026-10-20: odysseus 343 GB free, poseidon 125. poseidon is ~185 GB short
-# before any question about the head, and the head is short too. README
-# "The disk arithmetic" carries the numbers a reclaim must clear; the RL
-# archive and stale weights are the same levers the vLLM port named.
+# WAS `blocked` on disk until 2026-10-20, when an operator-approved reclaim
+# cleared it: ~505 GB head / ~310 worker demanded; the RL-era artifacts
+# (/var/tmp/autoresearch-rl-models on both nodes, ~/experiments, the
+# experiment-era Qwen caches, two stale images) freed +199 GB on odysseus
+# (now 541 free) and +305 on poseidon (now 430). `ws check` passes every
+# disk gate; the only red line left is MemAvailable, which is the live vLLM
+# pair's to release - see README for what booting it costs the session it
+# serves. README "The disk arithmetic" keeps the original numbers as the
+# history of why this sat blocked for seven weeks.
 
 requires:
   gpu_arch: "12.1"

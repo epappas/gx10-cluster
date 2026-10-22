@@ -38,7 +38,7 @@ the territory.
 | [`vllm-2node-dsv41-flash-exl3`](inference/vllm-2node-dsv41-flash-exl3/README.md) | **2** | **~112 GB/node** | 8897 | **`unverified`, superseded.** V4.1-Flash EXL3 2.9bpw on vLLM — blocked on disk, and upstream moved engine, checkpoint **and** Engram tables. [The 1017 recipe is the current arm](inference/tensorfold-2node-dsv41-flash-1017/README.md) |
 | [`tensorfold-qwen38-flash-next-spark`](inference/tensorfold-qwen38-flash-next-spark/README.md) | 1 | ~108 GB | 8901 | **`unverified`.** Flash-Next on ONE Spark (NVIDIA QAD FP4, Zig engine): prose 46–55 tok/s batch-1 — **above the pair** — 5 streams, and the second Spark free |
 | [`tensorfold-2node-glm53-flash-exl3`](inference/tensorfold-2node-glm53-flash-exl3/README.md) | **2** | rank 0 ~88 GB | 8902 | **`unverified`.** GLM-5.3 on the kit upstream now recommends: TensorFold TP=2, 1M window, 60.4/114.7 tok/s claimed, image **digest-pinned**, Apache-2.0 end to end except DFlash2 (CC BY-NC-ND, named) |
-| [`tensorfold-2node-dsv41-flash-1017`](inference/tensorfold-2node-dsv41-flash-1017/README.md) | **2** | ~99 GB/node | 8903 | **`blocked` on disk** (505/310 GB needed; 343/125 free 2026-10-20). V4.1-Flash-1017 EXL3 on TensorFold: 74.9/109.9 tok/s single-stream claimed, interleave on, memguard inside |
+| [`tensorfold-2node-dsv41-flash-1017`](inference/tensorfold-2node-dsv41-flash-1017/README.md) | **2** | ~99 GB/node | 8903 | **`unverified`** — was disk-blocked; cleared 2026-10-20 (541/430 GB free now). V4.1-Flash-1017 EXL3 on TensorFold: 74.9/109.9 tok/s single-stream claimed, interleave on, memguard inside |
 
 ### `bench` and `agent` — clients, which **do** co-exist with a server
 
