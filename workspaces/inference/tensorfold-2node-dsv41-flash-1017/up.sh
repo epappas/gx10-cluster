@@ -61,6 +61,22 @@ MSG
     exit 1
 fi
 
+# The kit's prepare.sh downloads the checkpoint with the HOST `hf` CLI, and
+# roles/ml keeps its Python stack in $ML_VENV rather than the system python
+# (docs/decisions.md#ml-lockfile). Put that bin - and ~/.local/bin - on PATH
+# for the kit's subprocesses, so it finds `hf` where this repo actually keeps
+# it. Do NOT pip --break-system-packages into the system env for this; the
+# first boot here died on "hf is not installed" and that workaround left a
+# user-site huggingface_hub shadowing the venv's pinned copy - cleanable with
+#   python3 -m pip uninstall --user huggingface_hub hf-xet httpx2 httpcore2 ...
+command -v hf >/dev/null 2>&1 || export PATH="${ML_VENV:-$HOME/venvs/ml}/bin:$HOME/.local/bin:$PATH"
+command -v hf >/dev/null 2>&1 || {
+    echo "no 'hf' CLI even with the ML venv on PATH - roles/ml puts it there:" >&2
+    echo "  make apply TAGS=ml   (or: ${ML_VENV:-$HOME/venvs/ml}/bin/hf download ...)" >&2
+    exit 1
+}
+echo "hf      $(command -v hf)"
+
 kit_fetch || exit 1
 cd "$KIT_DIR" || exit 1
 
@@ -68,7 +84,7 @@ echo
 echo "model    Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw @ 6d54be4f"
 echo "         + Engram tables from deepseek-ai/DeepSeek-V4.1-Flash-1017 @ 1bae0e10"
 echo "         (the 1017 tables - the older release's must NOT be used; prepare.sh checks)"
-echo "image    ghcr...deepseek-v4.1-flash-1017-2x-dgx-sparks-tensorfold:exl3-tp2-7c9bf5d36350 (or local build)"
+echo "image    built locally if the pins' tag is unpublished (275 s, measured 2026-10-20)"
 echo "pair     rank 0 here :$PORT ; rank 1 (tf-dsv41-lanes) on $WORKER"
 echo "engines  zig (default) or ENGINE=jl - the jl one checks memory AT RUN TIME"
 echo "         (4 GiB admission floor, 2K segments, eager instead of a failed graph)"

@@ -47,7 +47,12 @@ requires:
   peers: 1
 
 images:
-  - ghcr.io/miaai-lab/deepseek-v4.1-flash-1017-2x-dgx-sparks-tensorfold:exl3-tp2-7c9bf5d36350
+  # Built LOCALLY on first boot: the tree's patches hash to tag
+  # exl3-tp2-8eb5919ff0a4, which is NOT published (the README still names the
+  # older 7c9bf5d36350). Confirmed 2026-10-20: kit pulled base, 275 s Zig
+  # build, identical image on both Sparks. The name below is what exists
+  # today upstream, not what this pin uses.
+  - ghcr.io/miaai-lab/deepseek-v4.1-flash-1017-2x-dgx-sparks-tensorfold:exl3-tp2-8eb5919ff0a4  # unpublished -> local build
 
 models:
   - Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw

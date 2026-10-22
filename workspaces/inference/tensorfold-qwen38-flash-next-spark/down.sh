@@ -14,9 +14,10 @@ KIT_URL=${KIT_URL:-https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Sp
 KIT_SHA=656879fd752749bbd11a6e1a065a326c00940911
 KIT_NAME=qwen38-flash-next-tf
 
-if [[ -d ${KIT_DIR:-$HOME/.cache/gx10-kits/$KIT_NAME}/.git ]] \
-   && [[ $(git -C "${KIT_DIR:-$HOME/.cache/gx10-kits/$KIT_NAME}" rev-parse HEAD 2>/dev/null) == "$KIT_SHA" ]]; then
-    exec "$KIT_DIR"/stop.sh
+KD=$(kit_dir) || exit 1
+if [[ -d $KD/.git ]] \
+   && [[ $(git -C "$KD" rev-parse HEAD 2>/dev/null) == "$KIT_SHA" ]]; then
+    exec "$KD"/stop.sh
 fi
 
 echo "kit tree missing or at another commit - stopping the container directly," >&2

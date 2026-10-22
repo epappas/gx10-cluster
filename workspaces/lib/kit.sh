@@ -30,6 +30,12 @@
 #   KIT_NAME    short name for the cache directory and the log lines
 # and calls kit_fetch, which exports KIT_DIR (the checked-out tree).
 
+kit_dir() {  # resolves the kit tree path WITHOUT fetching - for stop/down
+    local name=${KIT_NAME:-$(basename "${KIT_URL:-}" .git)}
+    [[ -n $name ]] || { echo "kit: KIT_URL or KIT_NAME must be set" >&2; return 1; }
+    printf '%s' "${KIT_DIR:-${KIT_CACHE_ROOT:-$HOME/.cache/gx10-kits}/$name}"
+}
+
 kit_fetch() {
     : "${KIT_URL:?kit: KIT_URL must be set}" "${KIT_SHA:?kit: KIT_SHA must be set}"
     local name=${KIT_NAME:-$(basename "$KIT_URL" .git)}

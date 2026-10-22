@@ -96,10 +96,11 @@ Their 655360-token incident (issue #17: rank 0 killed during a cache-hit turn
 at 464k, head carried a desktop) is why this workspace keeps `CONTEXT ≤ 524288`
 as the practical default on a busy head even though the manifest says 1M.
 
-## Running it (when the disk is there)
+## Running it
 
 ```bash
-ws up   tensorfold-2node-dsv41-flash-1017      # disk gate, then the kit: build/pull, download, both ranks, smoke
+ws down vllm-2node-qwen38-flash-next           # frees the ~112 GiB this wants; ends any session on that server
+ws up   tensorfold-2node-dsv41-flash-1017      # kit: image, ~400 GB downloads, both ranks, smoke
 ws logs tensorfold-2node-dsv41-flash-1017 -f   # rank 0; rank 1: ssh <peer> docker logs -f dsv41-1017-exl3-tf
 ws down tensorfold-2node-dsv41-flash-1017
 ```
@@ -108,6 +109,23 @@ ws down tensorfold-2node-dsv41-flash-1017
 the three questions, pointed at 8903 — remembering `tensorfold-native` returns
 no token probabilities, so acceptance is proven by `tools/exact.py`
 (drafted == plain), not by `spec-decode-accept`.
+
+### The first boot attempt (2026-10-20) taught three things
+
+- **The prebuilt image did not exist for these pins.** The kit computed tag
+  `exl3-tp2-8eb5919ff0a4` — not the `7c9bf5d36350` its README still advertises
+  (the tree moved past that publish) — and fell back to a local build:
+  **275 s, both Zig builds, identical image on both Sparks after a cable
+  copy**. That path is fully automatic; budget six minutes, not hours.
+- **The kit needs the host `hf` CLI** and `roles/ml` keeps it in the ML venv.
+  `up.sh` now puts `$ML_VENV/bin` on PATH for the kit's subprocesses. (The
+  first attempt's `pip install --break-system-packages` workaround left a
+  user-site copy shadowing the venv — `python3 -m pip uninstall --user
+  huggingface_hub` cleans it whenever convenient; nothing depends on it now.)
+- **A refusal at 109-of-112 GiB right after the build was the page-cache
+  transient, not a full box** — the exact failure upstream's
+  `MIN_AVAIL_WAIT_S` exists for. `ws check` reads once; wait a few minutes
+  (or `sync` first) and retry. The kit's own preflight re-reads for 30 s.
 
 ## Licence
 

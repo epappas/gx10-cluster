@@ -59,6 +59,18 @@ MSG
     exit 1
 fi
 
+# The kit's prepare.sh needs the HOST `hf` CLI for the checkpoint download,
+# and roles/ml keeps it in $ML_VENV, not the system python (see the same note
+# in ../tensorfold-2node-dsv41-flash-1017/up.sh - the first 1017 boot died on
+# exactly this). Point the kit's subprocesses at where this repo keeps it.
+command -v hf >/dev/null 2>&1 || export PATH="${ML_VENV:-$HOME/venvs/ml}/bin:$HOME/.local/bin:$PATH"
+command -v hf >/dev/null 2>&1 || {
+    echo "no 'hf' CLI even with the ML venv on PATH - roles/ml puts it there:" >&2
+    echo "  make apply TAGS=ml" >&2
+    exit 1
+}
+echo "hf      $(command -v hf)"
+
 kit_fetch || exit 1
 cd "$KIT_DIR" || exit 1
 

@@ -14,9 +14,10 @@ KIT_URL=${KIT_URL:-https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks
 KIT_SHA=3fd60dfc836fab0f1ed0fd4f0afaf2a1d62b2aab
 KIT_NAME=glm53-flash-tensorfold
 
-if [[ -d ${KIT_DIR:-$HOME/.cache/gx10-kits/$KIT_NAME}/.git ]] \
-   && [[ $(git -C "${KIT_DIR:-$HOME/.cache/gx10-kits/$KIT_NAME}" rev-parse HEAD 2>/dev/null) == "$KIT_SHA" ]]; then
-    exec "$KIT_DIR"/stop.sh
+KD=$(kit_dir) || exit 1
+if [[ -d $KD/.git ]] \
+   && [[ $(git -C "$KD" rev-parse HEAD 2>/dev/null) == "$KIT_SHA" ]]; then
+    exec "$KD"/stop.sh
 fi
 
 echo "kit tree missing or at another commit - stopping both containers directly," >&2
