@@ -70,32 +70,6 @@ command -v hf >/dev/null 2>&1 || {
     exit 1
 }
 
-gb_free() { df -BG --output=avail "$1" 2>/dev/null | tail -1 | tr -dc '0-9'; }
-# Head: image 25 + checkpoint 211 + rank 0 106 is the worst moment of the
-# reordered stages (342); the 360 default keeps margin. Worker: Engram copy
-# (203) + its rank file, the copy guard's spare already counted by its own
-# logic - 340. Both overridable to re-measure, never to skip.
-head_min=${HEAD_MIN_GB:-360}; worker_min=${WORKER_MIN_GB:-340}
-head_cache=${HF_HOME:-$HOME/.cache/huggingface}   # NOT the kit's HF_CACHE (defined after sourcing
-                                                          # its config.sh); a near-duplicate name here is
-                                                          # exactly what shellcheck SC2153 caught once
-here_gb=$(gb_free "$head_cache")
-there_gb=$(ssh -n -o BatchMode=yes -o ConnectTimeout=6 "$WORKER" \
-    "df -BG --output=avail '${WORKER_HF_CACHE:-$HOME/.cache/huggingface}' | tail -1 | tr -dc '0-9'" 2>/dev/null || echo 0)
-if (( here_gb < head_min || there_gb < worker_min )); then
-    cat >&2 <<MSG
-DISK, and the reordered stages cannot dodge all of it: ~${head_min} GB free on
-$(hostname) (checkpoint 211 + rank-0 file 106 + image 25) and ~${worker_min} GB
-on $WORKER (Engram copy 203 + rank-1 file 106). Engram CANNOT be shared over
-NFS - a decode round reads ~70 random 4 KiB rows and 940 us/read over NFS cost
-~690-890 tok/s against 90 us and ~2,200 local (kit README, measured). Now:
-$(hostname) ${here_gb} GB, $WORKER ${there_gb} GB. gx10-storage classifies
-what is on these drives; a reclaim is an operator decision this repo will not
-make. HEAD_MIN_GB=/WORKER_MIN_GB= override with a measured reason.
-MSG
-    exit 1
-fi
-
 # ---- 2. stages (each step prints [k/6] and skips what is in place) ---------
 kit_fetch || exit 1
 KD=$(kit_dir)
@@ -111,6 +85,14 @@ source ./scripts/config.sh
 source ./scripts/nodes.sh
 mkdir -p "$STATE_DIR"
 in_hf() { docker run --rm --network none --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$HF_CACHE:/hf" "$@"; }
+# prepare.sh calls this at its line 57 before anything touches NFS: it probes
+# the link and fills LINK_HEAD_ADDR/LINK_WORKER_ADDR, and nfs_server() (its
+# own words, nodes.sh:74) falls back to that table when NFS_SERVER is unset.
+# Skipping it made stage 3 die with "no NFS server address" on a link that
+# start.sh's own DRY output had just resolved perfectly - the kit's helpers
+# depend on the kit's calling ORDER, not only its names. (Found by the first
+# real staged run, 2026-10-21, after the checkpoint's 211 GB had landed.)
+detect_links
 
 SNAP="$(model_cache_dir)/snapshots/$(snapshot_rev)"
 SNAP_C="/hf/hub/models--${MODEL_ID//\//--}/snapshots/$(snapshot_rev)"    # prepare.sh:147's container view
@@ -125,6 +107,39 @@ rank1_ok() { worker 1 "find \"\$(eval echo $WORKER_CACHE_DIR)\" -maxdepth 1 -nam
 big_shards() { find "$SNAP" -maxdepth 1 -name 'model-*-of-00039.safetensors' ! -name "$CKPT_KEEP" 2>/dev/null; }
 have_ckpt() { [[ -f "$SNAP/model.safetensors.index.json" ]]; }
 have_engram() { [[ -s "$ESNAP/${shards[1]}" ]]; }
+gb_free() { df -BG --output=avail "$1" 2>/dev/null | tail -1 | tr -dc '0-9'; }
+
+# THE DISK GATE, sized by what REMAINS to run - the reordering's whole point.
+# Fresh, the worst moment is image 25 + checkpoint 211 + rank 0 106 = ~342
+# (+margin 360); once the checkpoint has landed, the remaining head writes are
+# rank 0 (106, and the purge then returns ~191) and Engram's 203 - and stage 6
+# guards its own 215. A flat 360 would have refused to RESUME the first real
+# staged run after its 211 GB download had already succeeded: the gate is
+# measured against the future, never against a past that is on disk. Worker:
+# Engram copy (203) + rank file (106) + the kit's spare logic - 340. Overridable
+# to re-measure, never to skip.
+if have_ckpt; then head_min=${HEAD_MIN_GB:-140}; else head_min=${HEAD_MIN_GB:-360}; fi
+worker_min=${WORKER_MIN_GB:-340}
+here_gb=$(gb_free "$HF_CACHE")
+there_gb=$(ssh -n -o BatchMode=yes -o ConnectTimeout=6 "$WORKER" \
+    "df -BG --output=avail '${WORKER_HF_CACHE:-$HOME/.cache/huggingface}' | tail -1 | tr -dc '0-9'" 2>/dev/null || echo 0)
+if (( here_gb < head_min || there_gb < worker_min )); then
+    cat >&2 <<MSG
+DISK, and the reordered stages cannot dodge all of it: ~${head_min} GB free on
+$(hostname) are needed for what REMAINS (checkpoint+rank0+image from fresh is
+~360; after the checkpoint lands only rank 0, then Engram once the purge
+returns the shards' ~191) and ~${worker_min} GB on $WORKER (Engram copy 203 +
+rank-1 file 106). Engram CANNOT be shared over NFS - a decode round reads ~70
+random 4 KiB rows and 940 us/read over NFS cost ~690-890 tok/s against 90 us
+and ~2,200 local (kit README, measured). Now: $(hostname) ${here_gb} GB,
+$WORKER ${there_gb} GB. gx10-storage classifies these drives; a reclaim is an
+operator decision this repo will not make. HEAD_MIN_GB=/WORKER_MIN_GB= override
+with a measured reason.
+MSG
+    exit 1
+fi
+gate_note=", fresh"; have_ckpt && gate_note=", checkpoint already down"
+echo "gates     head ${here_gb} GB (needs ${head_min}${gate_note}), worker ${there_gb} GB (needs ${worker_min})"
 
 # DRY_RUN reports the state and hands to start.sh, whose own DRY_RUN prints
 # both ranks' docker lines. No stage runs, nothing is written.
