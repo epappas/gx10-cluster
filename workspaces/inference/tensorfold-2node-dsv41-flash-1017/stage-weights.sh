@@ -144,9 +144,15 @@ case "${1:---status}" in
     say "purged (+$(df_head) GB free now)"
     ;;
   --stage3)
-    rank0_ok && rank1_ok || { echo "purge gates first: run --stage2 then --purge before --stage3 (Engram needs the freed shards' space)" >&2; exit 1; }
+    if ! rank0_ok || ! rank1_ok; then
+        echo "purge gates first: run --stage2 then --purge before --stage3 (Engram needs the freed shards' space)" >&2
+        exit 1
+    fi
     say "downloading Engram's tables (~203 GB; hours; hf resumes)"
-    shards=($ENGRAM_SHARDS); inc=(--include model.safetensors.index.json --include config.json)
+    # read -a, not the kit's bare ($ENGRAM_SHARDS): same answer for these
+    # glob-free names, and this repo's shellcheck gate stays clean.
+    shards=(); read -r -a shards <<< "$ENGRAM_SHARDS"
+    inc=(--include model.safetensors.index.json --include config.json)
     for f in "${shards[@]}"; do inc+=(--include "$f"); done
     # prepare.sh:126 verbatim, include-patterned so the rest of the 475 GB base tree is never fetched.
     hf download "$ENGRAM_ID" ${ENGRAM_REVISION:+--revision "$ENGRAM_REVISION"} --cache-dir "$HF_CACHE/hub" "${inc[@]}" >/dev/null
