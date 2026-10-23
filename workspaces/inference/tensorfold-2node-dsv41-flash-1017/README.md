@@ -104,7 +104,17 @@ as the practical default on a busy head even though the manifest says 1M.
 
 `ws up` IS the interface — staging and booting are the same command, run as
 many times as it takes. It works **beside the running vLLM server**, because
-every stage before the boot needs disk and network, never memory:
+every stage before the boot needs disk and network, never memory. One-time
+prerequisite before stage [3/6] (rank 1 reads the head's cache over the link;
+`ws up` checks `/etc/exports` and refuses with this exact command):
+
+```bash
+make optional TAGS=nfs LIMIT=odysseus EXTRA='-e nfs_export_path=$HOME/.cache/huggingface'
+```
+
+The `EXTRA=` form is load-bearing: a bare `make … -e` is `make`'s own
+`--environment-overrides` flag, the variable never reaches Ansible, and the
+role runs having exported nothing — learned by living it.
 
 ```bash
 ws up   tensorfold-2node-dsv41-flash-1017      # [1/6] image -> [6/6] engram, kit prepare, then boot

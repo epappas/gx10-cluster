@@ -96,7 +96,7 @@ if [[ -n ${PEER:-} ]]; then
              echo >&2
              echo "  the checkpoint reaches the peer over NFS - it does not fit twice." >&2
              echo "  that export is Ansible's half:" >&2
-             echo "    make optional TAGS=nfs -e nfs_export_path=$MODEL" >&2
+             echo "    make optional TAGS=nfs LIMIT=odysseus EXTRA='-e nfs_export_path=$MODEL'" >&2
              echo >&2
              echo "  the packed Engram shard IS this script's half:" >&2
              echo "    ./stage-weights.sh --peer" >&2

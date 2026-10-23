@@ -2630,7 +2630,7 @@ export is `roles/nfs`, opt-in behind the `never` tag like every other optional
 role:
 
 ```bash
-make optional TAGS=nfs -e nfs_export_path=/home/<you>/.cache/dsv41-exl3/model
+make optional TAGS=nfs LIMIT=odysseus EXTRA='-e nfs_export_path=/home/<you>/.cache/dsv41-exl3/model'
 ```
 
 Four things in that role are decisions rather than plumbing:

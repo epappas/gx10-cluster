@@ -77,7 +77,7 @@ that half is [`roles/nfs`](../../../roles/README.md) — opt-in, behind the
 `never` tag:
 
 ```bash
-make optional TAGS=nfs -e nfs_export_path=$HOME/.cache/dsv41-exl3/model
+make optional TAGS=nfs LIMIT=odysseus EXTRA='-e nfs_export_path=$HOME/.cache/dsv41-exl3/model'
 ```
 
 Nothing in this workspace creates that mount. It *checks* for it and refuses —

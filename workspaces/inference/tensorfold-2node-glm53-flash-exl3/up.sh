@@ -59,7 +59,7 @@ WORKER_WEIGHTS=nfs needs the head exporting $NFS_PATH to the worker, and it
 is not in /etc/exports. One command (roles/nfs, opt-in like every optional
 role - it stops the peer's inference? no: it changes nothing live):
 
-    make optional TAGS=nfs -e nfs_export_path=$NFS_PATH
+    make optional TAGS=nfs LIMIT=odysseus EXTRA='-e nfs_export_path=$NFS_PATH'
 
 Or take the kit's default and give the worker the disk: WORKER_WEIGHTS=copy.
 MSG

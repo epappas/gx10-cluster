@@ -131,7 +131,7 @@ summary: DeepSeek-V4.1-Flash EXL3 2.9bpw across both nodes - ported, NOT yet run
 #    cost a `roles/nfs` on the Ansible side. It now exists, opt-in and behind
 #    the `never` tag like every other optional role:
 #
-#      make optional TAGS=nfs -e nfs_export_path=/home/<you>/.cache/dsv41-exl3/model
+#      make optional TAGS=nfs LIMIT=odysseus EXTRA='-e nfs_export_path=/home/<you>/.cache/dsv41-exl3/model'
 #
 #    Nothing in this workspace creates that mount. It CHECKS for it and refuses
 #    to launch without it, because a workspace that mounts a filesystem is

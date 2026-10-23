@@ -68,7 +68,7 @@ this file can make; the default is upstream's (dflash2) and the switch is one
 - **The NFS export is Ansible's half** (same seam as every other workspace):
 
   ```bash
-  make optional TAGS=nfs -e nfs_export_path=$HOME/.cache/huggingface
+  make optional TAGS=nfs LIMIT=odysseus EXTRA='-e nfs_export_path=$HOME/.cache/huggingface'
   ```
 
   `up.sh` checks `/etc/exports` and refuses with this exact command if it is

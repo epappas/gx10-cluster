@@ -141,6 +141,27 @@ fi
 gate_note=", fresh"; have_ckpt && gate_note=", checkpoint already down"
 echo "gates     head ${here_gb} GB (needs ${head_min}${gate_note}), worker ${there_gb} GB (needs ${worker_min})"
 
+# Rank 1 is built ON THE WORKER from this Spark's cache over the link (the
+# kit's docker NFS volume), and the worker's volume can only mount what the
+# head exports. The export is machine state - Ansible's half, opt-in role,
+# and NOTE the EXTRA= form: a bare `make ... -e` is eaten by make as
+# --environment-overrides and the variable never arrives (the Makefile says
+# so in its own words; our first application of this prerequisite proved it
+# the long way, 2026-10-23: the export play ran, silently skipped everything,
+# and stage 3 would have died on a mount of a path that was never exported).
+if ! grep -qF "${NFS_PATH:-$HF_CACHE}" /etc/exports 2>/dev/null; then
+    cat >&2 <<MSG
+The head exports nothing yet, and stage [3/6]'s worker volume needs
+${NFS_PATH:-$HF_CACHE} exported to the worker over the link. Once (needs root):
+
+    make optional TAGS=nfs LIMIT=odysseus EXTRA='-e nfs_export_path=${NFS_PATH:-$HF_CACHE}'
+
+(That EXTRA= form is load-bearing; a bare -e is swallowed by make, the role
+runs, prints nothing, and exports nothing.)
+MSG
+    exit 1
+fi
+
 # DRY_RUN reports the state and hands to start.sh, whose own DRY_RUN prints
 # both ranks' docker lines. No stage runs, nothing is written.
 if [[ "${DRY_RUN:-0}" == 1 ]]; then
