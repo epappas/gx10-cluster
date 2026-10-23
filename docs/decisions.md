@@ -2908,7 +2908,12 @@ environment first, so nothing in it is edited. What the workspace adds is
 exactly what the kit cannot know: the port allocation, the peer resolution
 from `/etc/gx10/interconnect.peers`, the Ansible-owned NFS export as a
 prerequisite (checked, never mounted), and disk gates with THIS cluster's
-measured free space.
+measured free space. The 1017's up.sh adds a third thing only this repo can
+know - a STAGE ORDER, because the kit's fixed sequence needs a peak disk this
+pair does not have and a second entry point to stage by hand is not an
+interface (the manifest must not over-refuse either: its min_unified_gb
+blocked the stageable half of ws up until it moved into start.sh, where the
+boot - and only the boot - needs the memory).
 
 The pin is load-bearing in both directions. It is what makes "run their code"
 as reproducible as a vendored file - and it is the mutable-tag lesson

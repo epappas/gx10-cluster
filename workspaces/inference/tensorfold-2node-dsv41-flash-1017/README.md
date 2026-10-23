@@ -102,19 +102,35 @@ as the practical default on a busy head even though the manifest says 1M.
 
 ## Running it
 
+`ws up` IS the interface — staging and booting are the same command, run as
+many times as it takes. It works **beside the running vLLM server**, because
+every stage before the boot needs disk and network, never memory:
+
 ```bash
-ws down vllm-2node-qwen38-flash-next           # frees the ~112 GiB this wants; ends any session on that server
-ws up   tensorfold-2node-dsv41-flash-1017      # kit: image, ~400 GB downloads, both ranks, smoke
+ws up   tensorfold-2node-dsv41-flash-1017      # [1/6] image -> [6/6] engram, kit prepare, then boot
 ws logs tensorfold-2node-dsv41-flash-1017 -f   # rank 0; rank 1: ssh <peer> docker logs -f dsv41-1017-exl3-tf
-ws down tensorfold-2node-dsv41-flash-1017
+ws down tensorfold-2node-dsv41-flash-1017      # both ranks, logs archived, by the kit
 ```
 
-`DRY_RUN=1` passes through to the kit and prints both ranks' commands. Then
-the three questions, pointed at 8903 — remembering `tensorfold-native` returns
-no token probabilities, so acceptance is proven by `tools/exact.py`
+Stages are guarded and skip whatever is in place; stages 2 and 6 are hours of
+resumable `hf` downloads — **rerun the same command to resume**, and keep the
+terminal alive with `tmux` for those. `DRY_RUN=1 ws up ...` prints the six
+stages' state and both ranks' docker commands, writing nothing. When all
+stages are done the kit's own `prepare.sh` runs *offline* to confirm every
+byte (MANIFEST, sizes, the worker's file check), then `start.sh` demands its
+112 GiB per Spark — the one thing only stopping the old server frees:
+
+```bash
+ws down vllm-2node-qwen38-flash-next           # ends any session on that server - including this one
+sleep 60                                        # let the freed memory settle (the kit re-reads 30 s itself)
+ws up   tensorfold-2node-dsv41-flash-1017      # stages already done -> straight to boot + smoke, ~15 min
+```
+
+Then the three questions, pointed at 8903 — remembering `tensorfold-native`
+returns no token probabilities, so acceptance is proven by `tools/exact.py`
 (drafted == plain), not by `spec-decode-accept`.
 
-### The first boot attempts (2026-10-20) taught four things
+### The first boot attempts (2026-10-20) taught five things
 
 - **The prebuilt image did not exist for these pins.** The kit computed tag
   `exl3-tp2-8eb5919ff0a4` — not the `7c9bf5d36350` its README still advertises
@@ -137,6 +153,16 @@ no token probabilities, so acceptance is proven by `tools/exact.py`
   re-pin at `370daf0` resolves — verified with a single-file fetch before
   anything was committed. Re-pin when a kit moves: `up.sh`'s `KIT_SHA` is the
   one line.
+- **A correct second entry point is still the wrong shape.** The disk math
+  (README above) forced a staging order the kit's fixed sequence could not
+  provide, and the first answer was a `stage-weights.sh` to run by hand —
+  which then shipped with a `"$0"`-after-`cd` bug its author only met on the
+  live box, and a manifest `min_unified_gb` that made `ws check` refuse the
+  *whole* command for a stage that needs no memory. Both are gone: the
+  ordering lives inside `ws up` as six idempotent stages, and the memory gate
+  belongs where the boot happens (start.sh's own `MIN_AVAIL_GIB`, with its
+  30 s await re-read). An interface a human must sequence by hand is the same
+  failure this repo's whole `ws` design exists to prevent.
 
 **Quality, now on the card (same day as these attempts):** teacher-forced
 next-token fidelity vs the original `1bae0e10` weights — agentic **0.0068

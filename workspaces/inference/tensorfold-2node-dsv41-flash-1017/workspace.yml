@@ -2,7 +2,7 @@ name: tensorfold-2node-dsv41-flash-1017
 kind: inference
 engine: tensorfold
 provenance: unverified
-summary: DeepSeek-V4.1-Flash-1017 EXL3 2.9bpw on the pair (TensorFold Zig engine) - upstream's current path; disk cleared 2026-10-20 (541/430 GB free), bootable once the pair server comes down
+summary: DeepSeek-V4.1-Flash-1017 EXL3 2.9bpw on the pair (TensorFold Zig engine) - ws up stages it disk-fit-ordered beside the live server; only the boot waits for the pair's memory
 
 # WHAT THIS IS: MiaAI-Lab's DeepSeek-V4.1-Flash-1017 kit (Apache-2.0, created
 # 2026-10-19) at a pinned commit - TensorFold's native Zig engine, BertholomusAI's
@@ -34,24 +34,35 @@ summary: DeepSeek-V4.1-Flash-1017 EXL3 2.9bpw on the pair (TensorFold Zig engine
 #     256k; 1,048,576 window default, 524,288 practical on a busy head
 #
 # WAS `blocked` on disk until 2026-10-20, when an operator-approved reclaim
-# cleared it: ~505 GB head / ~310 worker demanded; the RL-era artifacts
-# (/var/tmp/autoresearch-rl-models on both nodes, ~/experiments, the
-# experiment-era Qwen caches, two stale images) freed +199 GB on odysseus
-# (now 541 free) and +305 on poseidon (now 430). `ws check` passes every
-# disk gate; the only red line left is MemAvailable, which is the live vLLM
-# pair's to release - see README for what booting it costs the session it
-# serves. README "The disk arithmetic" keeps the original numbers as the
-# history of why this sat blocked for seven weeks.
+# cleared it: the kit's fixed step order wants ~545 GB head simultaneously;
+# the RL-era artifacts (/var/tmp/autoresearch-rl-models on both nodes,
+# ~/experiments, the experiment-era Qwen caches, stale images) freed +199 GB
+# on odysseus (541 free) and +305 on poseidon (430). Even that does not fit
+# the kit's ORDER - so `ws up` stages in a reordered sequence (up.sh header;
+# README "Running it") whose worst moment is ~342 GB, and the manifest
+# numbers follow the order that runs. What remains gated to a dead-server
+# window is the BOOT only: the kit's start.sh requires 112 GiB MemAvailable
+# per Spark and re-reads for 30 s before refusing - which is why there is no
+# min_unified_gb here: it would refuse the stageable half of the command.
+# README "The disk arithmetic" keeps the original numbers as history.
 
 requires:
   gpu_arch: "12.1"
-  # ~98-99 GiB of weights a rank; rank 0 holds ~104 GiB on the GPU; the kit
-  # refuses to start under MIN_AVAIL_GIB=112 per Spark. That is the floor for
-  # THIS machine layout (a head that also runs a desktop was left ~3.1 GiB
-  # clear at the worst point of a 100k prompt); CONTEXT=524288 or less.
-  min_unified_gb: 112
-  # Head: the kit's own number (README Requirements: ~505 GB, image included).
-  min_disk_gb: 505
+  # NO min_unified_gb, on purpose - and the first two boots prove why a
+  # manifest that over-refuses is a bug, not a safety margin. ~98-99 GiB of
+  # weights a rank means the BOOT needs MIN_AVAIL_GIB=112 per Spark, but that
+  # gate is the KIT's: start.sh checks both Sparks and re-reads for
+  # MIN_AVAIL_WAIT_S=30 before refusing (its own await-memory fix). Staging -
+  # the hours of downloads and rank files - needs NO memory at all and must
+  # run beside the live server; a manifest memory floor put the whole of
+  # `ws up` behind it and made the workspace stageable only by a script
+  # outside the interface. The boot phase still refuses, in start.sh, for the
+  # real reason. CONTEXT<=524288 on a head that carries a desktop; see README.
+  # Head: the reordered stages' worst moment is image 25 + checkpoint 211 +
+  # rank 0's file 106 = ~342 GB (the kit's own fixed order would need ~545 -
+  # see up.sh's header and README "The disk arithmetic"). Worker floor ~340,
+  # enforced inside up.sh because ws check sees only the node it runs on.
+  min_disk_gb: 360
   docker: true
   rdma: true
   peers: 1
