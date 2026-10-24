@@ -186,6 +186,23 @@ else
         --build-arg PATCHES_HASH="$(image_hash)" "$ctx" >/dev/null
     rm -rf -- "$ctx"
 fi
+# ...plus prepare.sh:86-99, the piece the reorder left behind: rank 1 RUNS
+# this image on the worker, so its copy must be content-IDENTICAL, not merely
+# present. The 2026-10-24 attempt died at worker_files_check with the daemon's
+# "Unable to find image ... pull access denied" (the kit had pruned poseidon's
+# tensorfold images in the reclaim, and the 370daf0 re-pin rebuilt only the
+# head's) - and the kit's wrapper blames NFS, a red herring until the image
+# exists to mount anything with. image_ident/worker_image_ident compare by
+# CONTENT (nodes.sh:192-198, store-agnostic), so the save|load ships only the
+# layers the worker lacks; their equality is the kit's own die() condition.
+ident=$(image_ident "$IMAGE")
+if [[ "$(worker_image_ident 1 "$IMAGE")" != "$ident" ]]; then
+    say 1 "copying $IMAGE to $(worker_host 1) (docker save | load; missing layers only)"
+    docker save "$IMAGE" | worker 1 docker load >/dev/null
+    [[ "$(worker_image_ident 1 "$IMAGE")" == "$ident" ]] || {
+        echo "$(worker_host 1)'s $IMAGE differs from this Spark's (prepare.sh:98)" >&2; exit 1; }
+fi
+say 1 "image $IMAGE identical on both Sparks"
 
 # [2/6] checkpoint whole at the pin - prepare.sh:114; hf resumes. Hours.
 if have_ckpt; then say 2 "checkpoint present ($(du -shL "$SNAP" 2>/dev/null | cut -f1))"
