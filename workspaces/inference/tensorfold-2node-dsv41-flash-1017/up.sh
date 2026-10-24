@@ -218,7 +218,17 @@ fi
 # theirs (nodes.sh:78,94).
 if rank0_ok && rank1_ok; then say 3 "both rank weight files present"
 else
-    ensure_nfs_volume 1; worker_files_check 1
+    # NOT the kit's worker_files_check: upstream it lives in prepare.sh:261,
+    # section "6. the worker's NFS volume" - AFTER section 4 has created the
+    # kit dir + MANIFEST and section 5 the token map, none of which exist
+    # this early in the reordered stages (the lifted-ahead check died on
+    # 2026-10-24 over a MANIFEST nothing had written yet, while its own
+    # first file - the checkpoint's config.json - had already read through
+    # the mount fine). The completion run of prepare.sh does the FULL check,
+    # in its own order, when its preconditions are on disk. Here, test only
+    # what stages 3-4 actually read over the volume: the checkpoint.
+    ensure_nfs_volume 1
+    worker_nfs 1 sh -ec "[ -s '$SNAP_C/config.json' ] || { echo 'rank 1 cannot read the checkpoint through /hf' >&2; exit 1; }"
     want=$(in_hf --entrypoint bash "$IMAGE" -c "tf-dsv41-rank-cache $SNAP_C /tmp/x 0 2 --index-only | sha256sum | cut -c1-20")   # prepare.sh:234
     if [[ -f "$RANK0_DIR/rank0of2-$want.bin" ]]; then say 3 "rank 0 ready"
     else
