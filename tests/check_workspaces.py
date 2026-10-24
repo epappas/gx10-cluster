@@ -10,6 +10,7 @@ It also enforces the two claims `ws list` makes: that a name matches its
 directory, and that provenance is one of the three values the colouring knows.
 """
 import pathlib
+import re
 import sys
 
 import yaml
@@ -27,6 +28,10 @@ KINDS = {"inference", "cluster", "rl", "bench", "agent"}
 PROVENANCE = {"verified", "unverified", "blocked"}
 REQUIRED = ("name", "kind", "engine", "provenance", "summary")
 KNOWN_REQUIRES = {"gpu_arch", "min_unified_gb", "min_disk_gb", "docker", "rdma", "peers"}
+
+# Kit-runner workspaces assign their pins at the top of each script, in both
+# plain and ${VAR:-default} form; this captures the value of either.
+KIT_PIN = re.compile(r"^(KIT_URL|KIT_SHA|KIT_NAME)=(?:\$\{\w+:-)?([^}\s]+)", re.M)
 
 
 def main() -> int:
@@ -99,6 +104,26 @@ def main() -> int:
         for script in d.glob("*.sh"):
             if not script.stat().st_mode & 0o111:
                 problems.append(f"{rel.parent}/{script.name}: not executable")
+
+        # A moved pin must move in EVERY script of the workspace at once. When
+        # 1017's kit re-pinned to 370daf0, up.sh got the line and down.sh kept
+        # 31eea46, so down.sh's HEAD check could never match the tree: every
+        # `ws down` fell to the direct-stop fallback and silently lost the
+        # kit's log archival - a drift visible only in the logs nobody reads,
+        # until the day they are needed. So it fails offline.
+        pins: dict[tuple[str, str], list[str]] = {}
+        for script in sorted(d.glob("*.sh")):
+            for key, val in KIT_PIN.findall(script.read_text()):
+                pins.setdefault((key, val), []).append(script.name)
+        for key in ("KIT_URL", "KIT_SHA", "KIT_NAME"):
+            vals = {v: names for (k, v), names in pins.items() if k == key}
+            if len(vals) > 1:
+                pretty = "; ".join(
+                    f"{v} in {'+'.join(sorted(set(n)))}" for v, n in sorted(vals.items())
+                )
+                problems.append(
+                    f"{rel.parent}: {key} is not one pin across the workspace: {pretty}"
+                )
 
     for p in problems:
         print(f"workspaces: {p}", file=sys.stderr)

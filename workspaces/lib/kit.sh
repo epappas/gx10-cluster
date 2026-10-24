@@ -25,8 +25,11 @@
 #
 # A workspace sets:
 #   KIT_URL     the repository
-#   KIT_SHA     the full commit sha it was read at (one source of truth:
-#               it appears in workspace.yml sources, here, nowhere else)
+#   KIT_SHA     the full commit sha it was read at - and the SAME string in
+#               every script of the workspace: tests/check_workspaces.py
+#               refuses a pin that moved in up.sh but not in down.sh, because
+#               down's HEAD check then fails forever and its fallback silently
+#               loses the kit's stop.sh (1017, 2026-10-20..24)
 #   KIT_NAME    short name for the cache directory and the log lines
 # and calls kit_fetch, which exports KIT_DIR (the checked-out tree).
 

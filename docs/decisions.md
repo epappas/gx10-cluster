@@ -3126,3 +3126,44 @@ poseidon, the gsm8k dataset. Net: odysseus 343 -> 541 GB free, poseidon 125 ->
 430. `tensorfold-2node-dsv41-flash-1017` moved `blocked` -> `unverified`; the
 root-owned fragments in `~/experiments` and a 0.5B cache stub were the last of
 the 2026-09 container-ran-as-root mess, now fully swept.
+
+## The ws check disk guard subtracts the landed bytes
+
+The decision `The model disk guard subtracts the whole plan` records for
+`make models` applies at the workspace seam the same way: `min_disk_gb`
+reserves room FOR THE DOWNLOAD, and a download that already happened is not a
+download. What `ws check` had was an all-or-nothing exemption - the guard was
+waived only when EVERY model in the manifest was present - and it failed a
+partially staged recipe at exactly the wrong moment: on 2026-10-24,
+`tensorfold-2node-dsv41-flash-1017` refused its own resume with "needs 360 GB
+free, has 323" while its 211 GB checkpoint sat in the cache being measured and
+`up.sh` had already sized what REMAINED at 140. The operator's choices were an
+override on a lying interface, or running the interface's guts by hand; both
+are wrong, so the guard now credits each manifest model's bytes on the
+filesystem it measures and refuses only when what remains to download does not
+fit: `needs 149 of 360; 211 GB already on disk`. The refusal this rule leaves
+standing is the point - `llamacpp-deepseek-v4-pro-gguf` on the same box, same
+"needs 360", nothing landed yet, is a measurement, not a bug.
+
+The first implementation of the credit was `du`, and it measured the 211 GB
+checkpoint as 1 GB: the newer `hf` CLI content-addresses blobs into a shared
+store (`hub/blobs/<xx>/<sha>`) and replaces the per-repo entries with
+symlinks, which `du` without `-L` sees as links and with `-L` counts twice
+(once via `blobs/`, once via `snapshots/`). The credit is now the sum of
+UNIQUE content reachable by following links - dev:inode dedup - correct for
+all three cache layouts and for hardlinks, and `up.sh`'s `du -shL` display of
+the snapshot was read-only cosmetics that same layout never fooled the way.
+
+Two known limits, both deferring to the stage logic. The credit is by
+presence, not revision: a hub dir at a wrong pin is credited here and refused
+there, where the workspace's own gates read revisions (`up.sh`'s
+`HEAD_MIN_GB`, the kit's `prepare.sh`) - `ws check` is the "may I try"
+question, the recipe is the authority. And the check still sees only the node
+it runs on, which is why the worker floors live inside `up.sh`.
+
+The same two days surfaced the kit-seam pin drift in `workspaces/lib/kit.sh`:
+1017's re-pin to `370daf0` reached `up.sh` and not `down.sh`, whose HEAD
+comparison then failed permanently and every stop fell to the direct-stop
+fallback, silently losing the kit's log archival. That is now a test failure
+and not a README anecdote: `make workspaces` refuses any workspace whose
+`KIT_URL`/`KIT_SHA`/`KIT_NAME` differ across its scripts.

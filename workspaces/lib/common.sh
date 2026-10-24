@@ -72,8 +72,9 @@ ws_all() {  # every workspace name, kind-sorted
 # Returns 0 if every requirement holds. Prints one line per requirement either
 # way, because "what exactly is missing" is the only useful output here.
 
-# WHERE ONE MODEL IS ON DISK, IF IT IS. Prints the layout it found and returns
-# 0; prints nothing and returns 1 if the model is not cached under any of them.
+# WHERE ONE MODEL IS ON DISK, IF IT IS. Prints its cached paths, one per line
+# (usually one; the flat layout is several files), and returns 0; prints
+# nothing and returns 1 if the model is not cached under any of them.
 #
 # THREE LAYOUTS, because two downloaders write here and one of them changed its
 # mind:
@@ -96,34 +97,86 @@ ws_all() {  # every workspace name, kind-sorted
 # The llama.cpp workspaces point LLAMA_CACHE inside HF_HOME so all three live
 # on the filesystem min_disk_gb actually measured - but the NAMING still
 # differs, which is what this function exists to absorb.
-ws_model_cache_layout() {  # $1 = model id -> prints "hub" | "llama.cpp"
+ws_model_cache_paths() {  # $1 = model id -> cached paths, one per line
     local v=$1
     local hf=${HF_HOME:-$HOME/.cache/huggingface}
     local lc=${LLAMA_CACHE:-$hf/llama.cpp}
     local slug="models--${v//\//--}"
-    [[ -d "$hf/hub/$slug" ]]                    && { printf 'hub';       return 0; }
-    [[ -d "$lc/$slug" ]]                        && { printf 'llama.cpp'; return 0; }
-    compgen -G "$lc/${v//\//_}_*" >/dev/null    && { printf 'llama.cpp'; return 0; }
-    return 1
+    [[ -d "$hf/hub/$slug" ]]                    && { printf '%s\n' "$hf/hub/$slug"; return 0; }
+    [[ -d "$lc/$slug" ]]                        && { printf '%s\n' "$lc/$slug";     return 0; }
+    compgen -G "$lc/${v//\//_}_*"
+}
+
+# Which layout the model was found in, for reporting.
+ws_model_cache_layout() {  # $1 = model id -> prints "hub" | "llama.cpp"
+    local hf p
+    hf=${HF_HOME:-$HOME/.cache/huggingface}
+    p=$(ws_model_cache_paths "$1" | head -1) || return 1
+    [[ -n $p ]] || return 1
+    [[ $p == "$hf/hub/"* ]] && printf hub || printf llama.cpp
 }
 
 # Are every model this manifest names already on disk? Used by the disk guard
-# to tell "no room to download" apart from "nothing left to download". Shares
-# ws_model_cache_layout with the weights report further down, so the guard and
-# the report can no longer disagree about what "cached" means - which they did,
-# silently, for as long as each carried its own copy of the globs.
+# to tell "no room to download" apart from "nothing left to download" - the
+# all-landed case. The partial case is ws_weights_landed_gb below, and the
+# guard and the report share ws_model_cache_paths, so the three can no longer
+# disagree about what "cached" means - which they did, silently, for as long
+# as each carried its own copy of the globs.
 ws_weights_cached() {
     local m=$1 v any=0
     while read -r v; do
         [[ -z $v ]] && continue
         any=1
-        ws_model_cache_layout "$v" >/dev/null || return 1
+        ws_model_cache_paths "$v" >/dev/null || return 1
     done < <(ws_list_field "$m" models)
     (( any ))
 }
 
+# How many GB of the manifest's models are ALREADY on the filesystem the disk
+# guard measures. This is docs/decisions.md#the-model-disk-guard-subtracts-the-whole-plan
+# brought to `ws check`: min_disk_gb reserves room for the download, so the
+# bytes that already landed are not what the reservation is for anymore -
+# subtract them per model, not all-or-nothing.
+#
+# Two honest limits. The credit is by PRESENCE, not revision: a hub dir at the
+# wrong pin gets credited here and refused by the workspace's own stage gate
+# (up.sh's HEAD_MIN_GB, the kit's prepare.sh), which is the authority that
+# actually reads revisions - `ws check` only asks "is there room to try". And
+# bytes on another filesystem are not credited: the guard measures free space
+# on one device, and a model on the USB stick frees nothing on the NVMe.
+#
+# WHAT "on disk" MEANS IS ITSELF A LAYOUT PROBLEM, and `du` was the first
+# answer that died on it: the newer `hf` CLI content-addresses blobs into a
+# shared store (hub/blobs/<xx>/<sha>) and replaces the per-repo entries with
+# SYMLINKS, so du without -L measured 1 GB for the 211 GB checkpoint (it saw
+# only the links and the small real files), while du -L would count every
+# blob twice over - once via blobs/, once via snapshots/. So the count is
+# UNIQUE CONTENT REACHABLE by following links: find -L reports each final
+# file under every path that reaches it, and INODE dedup makes each real file
+# count exactly once - correct for all three layouts at once, including
+# hardlinks, and a dangling link is not data and is skipped. Each path is
+# device-gated before it is walked, so inode numbers cannot collide across
+# filesystems. (find's %d is DEPTH, not device - %D is the device: the first
+# draft keyed on %d:%i, one shard then "deduped" as two files at two depths,
+# and the guard measured the 211 GB checkpoint at 422 - the cache's own shape,
+# three link generations deep, is what taught this line.)
+ws_weights_landed_gb() {  # $1 = manifest  $2 = probe dir on the measured fs
+    local m=$1 probe=$2 v p gb total=0 dev
+    dev=$(stat -c %d "$probe" 2>/dev/null) || { printf '0'; return; }
+    while read -r v; do
+        [[ -z $v ]] && continue
+        while read -r p; do
+            [[ -n $p && $(stat -c %d "$p" 2>/dev/null) == "$dev" ]] || continue
+            gb=$(find -L "$p" -type f -printf '%D:%i %s\n' 2>/dev/null |
+                 sort -u | awk '{s+=$2} END {printf "%d", (s + 999999999) / 1000000000}' || true)
+            total=$(( total + ${gb:-0} ))
+        done < <(ws_model_cache_paths "$v")
+    done < <(ws_list_field "$m" models)
+    printf '%s' "$total"
+}
+
 ws_preflight() {
-    local m=$1 fail=0 v need have
+    local m=$1 fail=0 v need have landed left fully
 
     need=$(ws_req "$m" gpu_arch)
     if [[ -n $need ]]; then
@@ -161,11 +214,21 @@ ws_preflight() {
         # reported "needs 360 GB free, has 242" on the one node that could
         # actually serve it. up.sh has skipped the guard on a present file
         # since that was found; this is the same rule in `ws check`, which is
-        # where people look first.
+        # where people look first. And the rule subtracts per model: when the
+        # guard only exempted an ALL-landed cache, a partially staged recipe
+        # refused its own resume - tensorfold-2node-dsv41-flash-1017 failed
+        # `ws up` with "needs 360, has 323" while its 211 GB checkpoint sat in
+        # the cache it was measuring and up.sh was ready to run what remained
+        # at 140. What remains to download is all the guard reserves for.
+        landed=$(ws_weights_landed_gb "$m" "${probe:-/}")
+        fully=0; ws_weights_cached "$m" && fully=1
+        left=$(( need > landed ? need - landed : 0 ))
         if (( ${have:-0} >= need )); then ok "disk ${have} GB free at $cache (needs ${need})"
-        elif ws_weights_cached "$m"; then
+        elif (( fully )); then
             ok "disk ${have} GB free at $cache (under ${need}, but the weights are already here)"
-        else bad "disk: needs ${need} GB free at $cache, has ${have:-0} GB"; fail=1; fi
+        elif (( ${have:-0} >= left )); then
+            ok "disk ${have} GB free at $cache (needs ${left} of ${need}; ${landed} GB already on disk)"
+        else bad "disk: needs ${left} GB free at $cache, has ${have:-0} GB"; fail=1; fi
     fi
 
     if [[ $(ws_req "$m" docker) == "true" ]]; then

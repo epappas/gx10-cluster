@@ -161,8 +161,10 @@ returns no token probabilities, so acceptance is proven by `tools/exact.py`
   is why the workspace pins the KIT sha (which carries the re-pin) rather
   than trusting a model revision to be permanent; see "What moved". The
   re-pin at `370daf0` resolves — verified with a single-file fetch before
-  anything was committed. Re-pin when a kit moves: `up.sh`'s `KIT_SHA` is the
-  one line.
+  anything was committed. Re-pin when a kit moves: `KIT_SHA` is one line in
+  `up.sh` **and one in `down.sh`** — the first re-pin missed the second, and
+  `ws down` lost the kit's log archival to its fallback until 2026-10-24;
+  `make workspaces` refuses the drift now.
 - **A correct second entry point is still the wrong shape.** The disk math
   (README above) forced a staging order the kit's fixed sequence could not
   provide, and the first answer was a `stage-weights.sh` to run by hand —

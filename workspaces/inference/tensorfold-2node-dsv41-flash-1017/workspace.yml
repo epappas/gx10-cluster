@@ -62,6 +62,9 @@ requires:
   # rank 0's file 106 = ~342 GB (the kit's own fixed order would need ~545 -
   # see up.sh's header and README "The disk arithmetic"). Worker floor ~340,
   # enforced inside up.sh because ws check sees only the node it runs on.
+  # This is the FRESH number: `ws check` credits every manifest model already
+  # on disk against it (lib/common.sh), so a resume - checkpoint down, Engram
+  # not yet - passes at 323 GB free and reaches up.sh's own dynamic 140.
   min_disk_gb: 360
   docker: true
   rdma: true

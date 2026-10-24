@@ -11,7 +11,11 @@ cd "$(dirname "$(readlink -f "$0")")"
 source ../../lib/kit.sh
 
 KIT_URL=${KIT_URL:-https://github.com/MiaAI-Lab/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks.git}
-KIT_SHA=31eea4608f8bb292a92e2f7a1db400e928620c78
+# MUST equal up.sh's pin - re-pinned here too, after 31eea46 lagged the 370daf0
+# move, the HEAD comparison below became permanently false, and every stop fell
+# to the fallback, losing the kit's log archival silently. `make workspaces`
+# now refuses a workspace whose KIT_SHA differs across its scripts.
+KIT_SHA=370daf0cc38f348516a98ebab38f6053858eab1f
 KIT_NAME=dsv41-1017-tensorfold
 CONT=dsv41-1017-exl3-tf
 

@@ -599,7 +599,7 @@ summary: one line, shown in `ws list`
 requires:                 # all optional; each is checked by `ws check`
   gpu_arch: "12.1"        # compute capability
   min_unified_gb: 40      # against MemAvailable
-  min_disk_gb: 170        # free space at HF_HOME — where the weights land
+  min_disk_gb: 170        # free at HF_HOME for what still downloads — landed models are credited
   docker: true
   rdma: true              # an ACTIVE RoCE port
   peers: 1                # SSH-reachable peer nodes
