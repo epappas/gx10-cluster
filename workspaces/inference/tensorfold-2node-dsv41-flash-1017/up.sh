@@ -55,11 +55,9 @@ export PORT=${PORT:-8903}
 export CONTAINER_NAME=${CONTAINER_NAME:-dsv41-1017-exl3-tf}
 
 # ---- 1. gates --------------------------------------------------------------
-PEERS_FILE=${GX10_PEERS_FILE:-/etc/gx10/interconnect.peers}
-peer=${PEER:-$(awk '!/^#/ && NF {print $1; exit}' "$PEERS_FILE" 2>/dev/null)}
-[[ -n $peer ]] || { echo "no interconnect peer in $PEERS_FILE - TP=2 needs the cabled pair" >&2; exit 1; }
-export WORKER=${WORKER:-$USER@$peer}
-export FABRIC_PEER=${FABRIC_PEER:-$(awk -v p="$peer" '!/^#/ && $1==p {print $2; exit}' "$PEERS_FILE")}
+# The pair, from the inventory (lib/kit.sh) - the SAME call down.sh makes, so
+# what `ws up` stages on rank 1 is always what `ws down` can reach.
+kit_pair || exit 1
 
 # The kit's prepare.sh needs the HOST `hf` CLI; roles/ml keeps it in the ML
 # venv, not the system python (docs/decisions.md#ml-lockfile). First boot died
@@ -102,8 +100,19 @@ CKPT_KEEP='model-00039-of-00039.safetensors'    # the only shard the runtime rea
 shards=(); read -r -a shards <<< "$ENGRAM_SHARDS"
 
 say()  { printf '%-9s %s   (head free: %s GB)\n' "[stage$1]" "$2" "$(gb_free "$HF_CACHE")"; }
-rank0_ok() { [[ -n "$(find "$RANK0_DIR" -maxdepth 1 -name 'rank0of2-*.bin' -size +100G -print -quit 2>/dev/null)" ]]; }
-rank1_ok() { worker 1 "find \"\$(eval echo $WORKER_CACHE_DIR)\" -maxdepth 1 -name 'rank1of2-*.bin' -size +100G 2>/dev/null | grep -q ."; }
+# A rank weight file is 106.1 GB - which is 98.83 GiB, and `find -size` counts
+# GiB, not GB. The guard said +100G, so it needed >100 GiB and NEVER matched a
+# COMPLETE file: on 2026-10-24 both ranks wrote 106.1 GB, stage [5/6] refused
+# its own purge ("a rank weight file is not in place - rerun ws up", advice
+# that could never come true), the 38 checkpoint shards stayed, and the head
+# ended at 35 GB free with Engram beside them. 90 GiB still refuses a
+# truncated write - which is what this guard is for - and accepts the real
+# size with 9 GiB of margin. The exact-name check lives where the hash is
+# known (stages [3/6]-[4/6] and the kit's prepare.sh); this is the coarse
+# "both files exist and are whole" gate stage [5/6] needs.
+RANK_MIN=+90G
+rank0_ok() { [[ -n "$(find "$RANK0_DIR" -maxdepth 1 -name 'rank0of2-*.bin' -size "$RANK_MIN" -print -quit 2>/dev/null)" ]]; }
+rank1_ok() { worker 1 "find \"\$(eval echo $WORKER_CACHE_DIR)\" -maxdepth 1 -name 'rank1of2-*.bin' -size $RANK_MIN 2>/dev/null | grep -q ."; }
 big_shards() { find "$SNAP" -maxdepth 1 -name 'model-*-of-00039.safetensors' ! -name "$CKPT_KEEP" 2>/dev/null; }
 have_ckpt() { [[ -f "$SNAP/model.safetensors.index.json" ]]; }
 have_engram() { [[ -s "$ESNAP/${shards[1]}" ]]; }
@@ -186,23 +195,34 @@ else
         --build-arg PATCHES_HASH="$(image_hash)" "$ctx" >/dev/null
     rm -rf -- "$ctx"
 fi
-# ...plus prepare.sh:86-99, the piece the reorder left behind: rank 1 RUNS
-# this image on the worker, so its copy must be content-IDENTICAL, not merely
-# present. The 2026-10-24 attempt died at worker_files_check with the daemon's
-# "Unable to find image ... pull access denied" (the kit had pruned poseidon's
-# tensorfold images in the reclaim, and the 370daf0 re-pin rebuilt only the
-# head's) - and the kit's wrapper blames NFS, a red herring until the image
-# exists to mount anything with. image_ident/worker_image_ident compare by
-# CONTENT (nodes.sh:192-198, store-agnostic), so the save|load ships only the
-# layers the worker lacks; their equality is the kit's own die() condition.
-ident=$(image_ident "$IMAGE")
-if [[ "$(worker_image_ident 1 "$IMAGE")" != "$ident" ]]; then
-    say 1 "copying $IMAGE to $(worker_host 1) (docker save | load; missing layers only)"
-    docker save "$IMAGE" | worker 1 docker load >/dev/null
-    [[ "$(worker_image_ident 1 "$IMAGE")" == "$ident" ]] || {
-        echo "$(worker_host 1)'s $IMAGE differs from this Spark's (prepare.sh:98)" >&2; exit 1; }
+# ...plus prepare.sh:86-99, the piece the reorder left behind - and it names
+# TWO images, not one. Rank 1 RUNS $IMAGE on the worker, and the kit's own
+# completion run EXECUTES $BASE_IMAGE there: prepare.sh:262's manifest `find`
+# and :278's Engram copy are `docker run` of the base on the worker. A base
+# missing there makes :262's `2>/dev/null || true` swallow the daemon's "No
+# such image" into an empty `have`, and prepare.sh dies saying the worker
+# "does not see every file over NFS" - the same red herring that sent the
+# 2026-10-24 morning attempt to the README's NFS section over a missing
+# $IMAGE (fixed by this block's first version). The pair has never staged
+# far enough to meet the base-image half of it. So: both images, each
+# content-IDENTICAL (image_ident/worker_image_ident compare by content,
+# nodes.sh:192-198, store-agnostic; equality is the kit's own die()
+# condition), each shipped by save|load so only the layers the worker lacks
+# cross the cable.
+if ! docker image inspect "$BASE_IMAGE" >/dev/null 2>&1; then
+    say 1 "pulling $BASE_IMAGE (the worker runs it: prepare.sh:262,278)"
+    docker pull -q "$BASE_IMAGE" >/dev/null
 fi
-say 1 "image $IMAGE identical on both Sparks"
+for img in "$BASE_IMAGE" "$IMAGE"; do
+    ident=$(image_ident "$img")
+    if [[ "$(worker_image_ident 1 "$img")" != "$ident" ]]; then
+        say 1 "copying $img to $(worker_host 1) (docker save | load; missing layers only)"
+        docker save "$img" | worker 1 docker load >/dev/null
+        [[ "$(worker_image_ident 1 "$img")" == "$ident" ]] || {
+            echo "$(worker_host 1)'s $img differs from this Spark's (prepare.sh:98)" >&2; exit 1; }
+    fi
+done
+say 1 "images $BASE_IMAGE and $IMAGE identical on both Sparks"
 
 # [2/6] checkpoint whole at the pin - prepare.sh:114; hf resumes. Hours.
 if have_ckpt; then say 2 "checkpoint present ($(du -shL "$SNAP" 2>/dev/null | cut -f1))"
@@ -224,11 +244,13 @@ else
     # this early in the reordered stages (the lifted-ahead check died on
     # 2026-10-24 over a MANIFEST nothing had written yet, while its own
     # first file - the checkpoint's config.json - had already read through
-    # the mount fine). The completion run of prepare.sh does the FULL check,
-    # in its own order, when its preconditions are on disk. Here, test only
-    # what stages 3-4 actually read over the volume: the checkpoint.
+    # the mount fine; the head's whole tensorfold-dsv41/ tree, MANIFEST and
+    # token map included, is first written by the completion run's own
+    # sections 4-5). The completion run does the FULL check, in its own
+    # order, when its preconditions are on disk. Here, test only what
+    # stages 3-4 actually read over the volume: the checkpoint snapshot.
     ensure_nfs_volume 1
-    worker_nfs 1 sh -ec "[ -s '$SNAP_C/config.json' ] || { echo 'rank 1 cannot read the checkpoint through /hf' >&2; exit 1; }"
+    worker_nfs 1 sh -ec "[ -s '$SNAP_C/config.json' ]" || die "$(worker_host 1) cannot read the checkpoint through $NFS_VOLUME (NFS :$NFS_PATH from $(nfs_server 1)) - check the export and the NFS server (README: NFS); a stale volume: docker volume rm $NFS_VOLUME on $(worker_host 1)"
     want=$(in_hf --entrypoint bash "$IMAGE" -c "tf-dsv41-rank-cache $SNAP_C /tmp/x 0 2 --index-only | sha256sum | cut -c1-20")   # prepare.sh:234
     if [[ -f "$RANK0_DIR/rank0of2-$want.bin" ]]; then say 3 "rank 0 ready"
     else
