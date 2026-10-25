@@ -20,6 +20,12 @@ KIT_NAME=dsv41-1017-tensorfold
 CONT=dsv41-1017-exl3-tf
 
 KD=$(kit_dir) || exit 1
+# The pair from the inventory - the SAME kit_pair up.sh calls (lib/kit.sh).
+# The kit's stop.sh stops rank 1 only through WORKER, and here it was unset:
+# 2026-10-24's `ws down` printed one WARN ("rank 1 was left alone") and
+# returned 0. Soft on purpose: a missing peer line must not stop stop.sh
+# from stopping rank 0 - stop.sh itself words that warning now.
+kit_pair || true
 if [[ -d $KD/.git ]] \
    && [[ $(git -C "$KD" rev-parse HEAD 2>/dev/null) == "$KIT_SHA" ]]; then
     exec "$KD"/stop.sh
@@ -28,8 +34,10 @@ fi
 echo "kit tree missing or at another commit - stopping both containers directly," >&2
 echo "without the worker-side stop or the log archival." >&2
 docker rm -f "$CONT" >/dev/null 2>&1 && echo "rank 0 stopped" || echo "rank 0 not running"
-PEERS_FILE=${GX10_PEERS_FILE:-/etc/gx10/interconnect.peers}
-peer=${PEER:-$(awk '!/^#/ && NF {print $1; exit}' "$PEERS_FILE" 2>/dev/null)}
-[[ -n ${peer:-} ]] && ssh -n -o BatchMode=yes -o ConnectTimeout=5 "$peer" \
-    "docker rm -f $CONT >/dev/null 2>&1" && echo "rank 1 on $peer stopped" \
-    || echo "rank 1: no peer reachable or not running"
+if [[ -n ${WORKER:-} ]]; then
+    ssh -n -o BatchMode=yes -o ConnectTimeout=5 "$WORKER" \
+        "docker rm -f $CONT >/dev/null 2>&1" && echo "rank 1 on $WORKER stopped" \
+        || echo "rank 1 on $WORKER: unreachable or not running"
+else
+    echo "rank 1: no peer in the interconnect inventory - nothing to reach it with" >&2
+fi

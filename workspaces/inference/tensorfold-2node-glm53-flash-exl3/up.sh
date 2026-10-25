@@ -23,17 +23,12 @@ export PORT=${PORT:-8902}          # 8893 is the vLLM GLM server's port; both ma
 export CONTAINER_NAME=${CONTAINER_NAME:-glm53-flash-tf}
 
 # ---- the pair, from the inventory, exactly once -----------------------------
-# WORKER is an ssh target; the peer's MANAGEMENT name resolves on this box
-# (roles/base owns /etc/hosts), so ssh does not depend on the very link the
-# launch is about to use. FABRIC_PEER is the worker's address ON the link -
-# the peers file exists for exactly this mapping (the same first-line lookup
-# lib/twonode.sh does; the same reason: a rank-1 whose addresses arrive from
-# two different sources is how ranks hang at init in silence).
-PEERS_FILE=${GX10_PEERS_FILE:-/etc/gx10/interconnect.peers}
-peer=${PEER:-$(awk '!/^#/ && NF {print $1; exit}' "$PEERS_FILE" 2>/dev/null)}
-[[ -n $peer ]] || { echo "no interconnect peer in $PEERS_FILE - this workspace needs the cabled pair" >&2; exit 1; }
-export WORKER=${WORKER:-$USER@$peer}
-export FABRIC_PEER=${FABRIC_PEER:-$(awk -v p="$peer" '!/^#/ && $1==p {print $2; exit}' "$PEERS_FILE")}
+# kit_pair (lib/kit.sh) - the SAME call down.sh makes, so what `ws up` stages
+# on rank 1 is always what `ws down` can reach. WORKER stays an ssh target on
+# the MANAGEMENT name (roles/base owns /etc/hosts, so ssh never depends on the
+# very link the launch is about to use); FABRIC_PEER is the worker's address
+# ON the link.
+kit_pair || exit 1
 
 # ---- how the weights reach the worker ---------------------------------------
 # copy (the kit's default) rsyncs ~166 GiB into the worker's own cache. That

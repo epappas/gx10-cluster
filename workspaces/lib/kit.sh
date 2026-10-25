@@ -31,7 +31,32 @@
 #               down's HEAD check then fails forever and its fallback silently
 #               loses the kit's stop.sh (1017, 2026-10-20..24)
 #   KIT_NAME    short name for the cache directory and the log lines
-# and calls kit_fetch, which exports KIT_DIR (the checked-out tree).
+# and calls kit_fetch, which exports KIT_DIR (the checked-out tree), and
+# kit_pair, which resolves the two Sparks from the inventory - the SAME call
+# in up.sh and down.sh, for the same reason as the pin rule: the pair is one
+# setting read by two scripts, and down.sh without WORKER cannot stop rank 1
+# any more than up.sh without it can stage rank 1 (2026-10-24: `ws down` did
+# exactly that, one WARN line, and left rank 1 alone on the worker).
+
+# kit_pair: the two Sparks, from the inventory, exported, exactly once - so
+# a workspace's up.sh and down.sh cannot disagree about what `ws down` must
+# reach. WORKER is rank 1's ssh target and FABRIC_PEER its address ON the
+# link; the peers file exists for exactly this mapping (the same first-line
+# lookup lib/twonode.sh does, and the same reason: ranks whose addresses
+# arrive from two different sources hang at init in silence). The kit's own
+# config.sh lets the environment win over scripts/local.sh, so these exports
+# are what start.sh/stop.sh/prepare.sh see without touching machine state.
+# A workspace's own .env still overrides (every value is ${VAR:-...}).
+kit_pair() {
+    local peers_file=${GX10_PEERS_FILE:-/etc/gx10/interconnect.peers} peer
+    peer=${PEER:-$(awk '!/^#/ && NF {print $1; exit}' "$peers_file" 2>/dev/null)}
+    [[ -n $peer ]] || {
+        echo "no interconnect peer in $peers_file - TP=2 needs the cabled pair" >&2
+        return 1
+    }
+    export WORKER=${WORKER:-$USER@$peer}
+    export FABRIC_PEER=${FABRIC_PEER:-$(awk -v p="$peer" '!/^#/ && $1==p {print $2; exit}' "$peers_file")}
+}
 
 kit_dir() {  # resolves the kit tree path WITHOUT fetching - for stop/down
     local name=${KIT_NAME:-$(basename "${KIT_URL:-}" .git)}

@@ -15,6 +15,12 @@ KIT_SHA=3fd60dfc836fab0f1ed0fd4f0afaf2a1d62b2aab
 KIT_NAME=glm53-flash-tensorfold
 
 KD=$(kit_dir) || exit 1
+# The pair from the inventory - the SAME kit_pair up.sh calls (lib/kit.sh):
+# the kit's stop.sh stops rank 1 only through WORKER, and a down.sh that
+# never set it would leave rank 1 alone with a WARN (1017, 2026-10-24 - the
+# same drift, caught here before it needed to be). Soft on purpose: a missing
+# peer line must not stop stop.sh from stopping rank 0.
+kit_pair || true
 if [[ -d $KD/.git ]] \
    && [[ $(git -C "$KD" rev-parse HEAD 2>/dev/null) == "$KIT_SHA" ]]; then
     exec "$KD"/stop.sh
@@ -23,8 +29,10 @@ fi
 echo "kit tree missing or at another commit - stopping both containers directly," >&2
 echo "without the worker-side stop, the state flush or the log archival." >&2
 docker rm -f glm53-flash-tf >/dev/null 2>&1 && echo "rank 0 stopped" || echo "rank 0 not running"
-PEERS_FILE=${GX10_PEERS_FILE:-/etc/gx10/interconnect.peers}
-peer=${PEER:-$(awk '!/^#/ && NF {print $1; exit}' "$PEERS_FILE" 2>/dev/null)}
-[[ -n ${peer:-} ]] && ssh -n -o BatchMode=yes -o ConnectTimeout=5 "$peer" \
-    "docker rm -f glm53-flash-tf >/dev/null 2>&1" && echo "rank 1 on $peer stopped" \
-    || echo "rank 1: no peer reachable or not running"
+if [[ -n ${WORKER:-} ]]; then
+    ssh -n -o BatchMode=yes -o ConnectTimeout=5 "$WORKER" \
+        "docker rm -f glm53-flash-tf >/dev/null 2>&1" && echo "rank 1 on $WORKER stopped" \
+        || echo "rank 1 on $WORKER: unreachable or not running"
+else
+    echo "rank 1: no peer in the interconnect inventory - nothing to reach it with" >&2
+fi
