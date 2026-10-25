@@ -56,6 +56,12 @@ KIT_NAME=dsv41-1017-tensorfold
 
 export PORT=${PORT:-8903}
 export CONTAINER_NAME=${CONTAINER_NAME:-dsv41-1017-exl3-tf}
+# The kit's 1,048,576 default left the head ~3 GB above memguard's 2.5 GiB
+# floor, and on 2026-10-25 memguard killed rank 0 three times on long agent
+# turns (184k, 153k, 271k tokens). 524288 is the kit's "practical default on a
+# busy head" and the README's claim for this workspace; the KV pool follows it
+# (~0.9 GiB a rank per 1M positions, kit README). Override per run: CONTEXT=...
+export CONTEXT=${CONTEXT:-524288}
 
 # ---- 1. gates --------------------------------------------------------------
 # The pair, from the inventory (lib/kit.sh) - the SAME call down.sh makes, so
