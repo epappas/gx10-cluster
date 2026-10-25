@@ -3167,3 +3167,30 @@ comparison then failed permanently and every stop fell to the direct-stop
 fallback, silently losing the kit's log archival. That is now a test failure
 and not a README anecdote: `make workspaces` refuses any workspace whose
 `KIT_URL`/`KIT_SHA`/`KIT_NAME` differ across its scripts.
+
+## <a name="dsv41-1017-checkpoint-stays-whole"></a>The 1017 checkpoint stays whole: the kit names its rank files by reading the shards
+
+`ws up` for `tensorfold-2node-dsv41-flash-1017` used to delete the
+checkpoint's 38 big shards (204.8 GB) once both rank weight files existed, so
+that Engram would fit on the head. The premise was that nothing reads the
+shards after the rank files are built. The kit does, at every `prepare.sh`
+run: it names each rank file by hashing `tf-dsv41-rank-cache --index-only`,
+and that listing needs the shards. Measured on 2026-10-25, the post-purge
+layout (small files plus shard 39) fails with `embed.weight|None:
+MissingTensor` - `embed.weight` lives in shard 1. `prepare.sh:234` runs the
+hash without `pipefail` inside the container, so the failure exits 0 with the
+hash of empty input, and `prepare.sh:235-237` then deletes rank 0's file for
+not matching it - in the same run that purged, because `up.sh` runs
+`prepare.sh` right after. It never fired here only by accident: a GiB/GB slip
+kept the purge's own guard from matching until 2026-10-24, and the flat disk
+gate refused the next run.
+
+So the purge is gone and the head holds image, checkpoint, rank 0 and Engram
+at once - ~558 GB from fresh (35 GB free on today's staged pair) - and the
+worker rank 1 plus its Engram copy, ~346. The same change replaced the flat
+140/340 GB disk gate, which refused a pair with every file in place, with one
+that judges each file against the pins (snapshot, rank-file name, Engram
+size), deletes this workspace's own files that do not fit, and asks only for
+what is still to write. It names rank files with `pipefail` and a 20-hex
+check and dies rather than guess. The kit's missing `pipefail` is upstream's;
+with the shards kept it has nothing to fail on.

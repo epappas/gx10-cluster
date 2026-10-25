@@ -37,8 +37,10 @@ Compare against this repo's measured DSpark-vLLM pair
 Measured earlier on 2026-10-20 with the 2-node vLLM server up: **odysseus
 343 GB free, poseidon 125 GB free** — hard-blocked. The reclaim that day
 (RL artifacts, experiment caches, stale images - see the workspace.yml note)
-changed that to **541 / 430 GB**: every gate below now passes. The
-arithmetic stays here because it is the recipe's permanent requirement. The recipe needs, by the kit's own Requirements table:
+changed that to **541 / 430 GB**, which fit the purge-based staging of the
+time. With the checkpoint kept whole since 2026-10-25 a fresh stage needs
+~558 / ~346 GB ("Running it"); this pair holds it only because it is already
+staged. The arithmetic stays here because it is the recipe's permanent requirement. The recipe needs, by the kit's own Requirements table:
 
 | | head | worker |
 |---|---|---|
@@ -61,7 +63,7 @@ arithmetic stays here because it is the recipe's permanent requirement. The reci
   autoresearch-rl-models` 28 GB, and the RL archive named in the old dsv41
   port lives on poseidon. None of it is deleted by anything in this repo
   without an operator choosing it. `ws check` refuses here until `df` agrees,
-  and `up.sh` refuses **both** nodes with these numbers printed.
+  and `up.sh` refuses with what is still to write on each node printed.
 
 ## What moved since the vLLM port, and why the old cache does not count
 
@@ -105,7 +107,7 @@ as the practical default on a busy head even though the manifest says 1M.
 `ws up` IS the interface — staging and booting are the same command, run as
 many times as it takes. It works **beside the running vLLM server**, because
 every stage before the boot needs disk and network, never memory. One-time
-prerequisite before stage [3/6] (rank 1 reads the head's cache over the link;
+prerequisite before stage [4/5] (rank 1 reads the head's cache over the link;
 `ws up` checks `/etc/exports` and refuses with this exact command):
 
 ```bash
@@ -117,15 +119,19 @@ The `EXTRA=` form is load-bearing: a bare `make … -e` is `make`'s own
 role runs having exported nothing — learned by living it.
 
 ```bash
-ws up   tensorfold-2node-dsv41-flash-1017      # [1/6] image -> [6/6] engram, kit prepare, then boot
+ws up   tensorfold-2node-dsv41-flash-1017      # [1/5] image -> [5/5] engram, kit prepare, then boot
 ws logs tensorfold-2node-dsv41-flash-1017 -f   # rank 0; rank 1: ssh <peer> docker logs -f dsv41-1017-exl3-tf
 ws down tensorfold-2node-dsv41-flash-1017      # both ranks, logs archived, by the kit
 ```
 
-Stages are guarded and skip whatever is in place; stages 2 and 6 are hours of
+Stages are guarded and skip whatever is in place; stages 2 and 5 are hours of
 resumable `hf` downloads — **rerun the same command to resume**, and keep the
-terminal alive with `tmux` for those. `DRY_RUN=1 ws up ...` prints the six
-stages' state and both ranks' docker commands, writing nothing. When all
+terminal alive with `tmux` for those. `DRY_RUN=1 ws up ...` prints every
+file's state against the pins and both ranks' docker commands, writing
+and deleting nothing. The disk gate asks only for what is still to write
+(0 GB on a fully staged pair; ~558 head / ~346 worker from fresh), and the
+checkpoint stays whole: the kit names the rank files by reading its shards
+([why](../../../docs/decisions.md#dsv41-1017-checkpoint-stays-whole)). When all
 stages are done the kit's own `prepare.sh` runs *offline* to confirm every
 byte (MANIFEST, sizes, the worker's file check), then `start.sh` demands its
 112 GiB per Spark — the one thing only stopping the old server frees:
@@ -171,7 +177,7 @@ returns no token probabilities, so acceptance is proven by `tools/exact.py`
   which then shipped with a `"$0"`-after-`cd` bug its author only met on the
   live box, and a manifest `min_unified_gb` that made `ws check` refuse the
   *whole* command for a stage that needs no memory. Both are gone: the
-  ordering lives inside `ws up` as six idempotent stages, and the memory gate
+  ordering lives inside `ws up` as five idempotent stages, and the memory gate
   belongs where the boot happens (start.sh's own `MIN_AVAIL_GIB`, with its
   30 s await re-read). An interface a human must sequence by hand is the same
   failure this repo's whole `ws` design exists to prevent.
