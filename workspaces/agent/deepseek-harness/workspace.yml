@@ -2,12 +2,19 @@ name: deepseek-harness
 kind: agent
 engine: dsh
 provenance: verified
-summary: DeepSeek Harness web UI, pointed at a model this cluster is serving
+summary: DeepSeek Harness web UI on gb10-homer, pointed at a model this cluster serves
 
 # VERIFIED on a GB10: `ws up` -> npx resolves the package tree into ./dsh-home
 # -> `dsh web: http://127.0.0.1:3080` -> the UI serves 200, with profiles/ and
 # storages/ created and owned by the invoking user rather than root. `ws down`
 # removes it cleanly.
+#
+# WHERE IT RUNS NOW. On gb10-homer, not on the head: a client holds no GPU and
+# no unified memory, and the head is the node memguard watches. up.sh deploys
+# compose.yml/.env/settings.yaml to the node over ssh and starts it there;
+# down.sh, logs.sh and ask.sh follow HARNESS_HOST. The server stays on
+# odysseus and the harness reaches it over the mesh - see README, "Where the
+# harness runs" and "Reaching the server".
 #
 # ONE NUMBER CHANGED. start_period was 3m and the first start took ~7.5 minutes
 # of npm resolution before anything bound the port, so `ws status` reported
@@ -44,7 +51,7 @@ images:
   - node:22-slim
 
 endpoints:
-  - "http://127.0.0.1:3080  (web UI)"
+  - "http://127.0.0.1:39090 on gb10-homer  (web UI; ssh -L 39090:127.0.0.1:39090 gb10-homer; DSH_PORT)"
 
 sources:
   - https://github.com/deepseek-ai/deepseek-harness

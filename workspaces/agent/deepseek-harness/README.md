@@ -7,10 +7,10 @@
 |---|---|
 | Kind | `agent` — a **client**, not a server |
 | Engine | `dsh` (Node) |
-| Nodes | 1, and it claims no GPU |
-| Endpoint | `http://127.0.0.1:3080` (web UI) |
-| Needs | Docker. That is all |
-| Provenance | **`verified`** — UI reached on :3080; `dsh` is still a **developer preview** by its own README |
+| Nodes | 1 — **gb10-homer**, the idle Spark — and it claims no GPU |
+| Endpoint | `http://127.0.0.1:39090` on gb10-homer (web UI; `ssh -L 39090:127.0.0.1:39090 gb10-homer`) |
+| Needs | Docker and key-based ssh to the node. That is all |
+| Provenance | **`verified`** — UI reached on :3080, and on :39090 on gb10-homer; `dsh` is still a **developer preview** by its own README |
 
 ## What
 
@@ -28,8 +28,8 @@ is.
 **So the pairing is the point, and no token leaves the house:**
 
 ```bash
-ws up vllm-2node-qwen38-flash-next    # the model, on the cluster
-ws up deepseek-harness                # the agent, talking to it
+ws up tensorfold-2node-dsv41-flash-1017   # the model, on the cluster
+ws up deepseek-harness                    # the agent, on gb10-homer, talking to it
 ```
 
 ### `kind: agent`, and why that is not bookkeeping
@@ -41,10 +41,11 @@ with a serving workspace**, which no two `inference` workspaces do.
 
 - **Host networking**, for two reasons. `dsh web` serves on `127.0.0.1:3080` —
   inside a bridge network that is the *container's* loopback, so `-p 3080:3080`
-  publishes a port nothing is listening on and the UI appears dead. And the
-  model server is also on loopback, so on host networking **the URL in
-  `settings.yaml` is the URL you would `curl`**. The cost is real: this
-  container has the host's whole network namespace.
+  publishes a port nothing is listening on and the UI appears dead. And on host
+  networking **the URL in `settings.yaml` is the URL you would `curl` from that
+  node's shell** — loopback when the harness and server share a node, the head's
+  mesh address when they do not. The cost is real: this container has the host's
+  whole network namespace.
 - **It runs as you (`1000:1000`), not root.** A container writing into
   `./dsh-home` as root leaves root-owned config you cannot edit without sudo —
   and `.credentials.yaml` is exactly the file you will want to edit.
@@ -52,9 +53,14 @@ with a serving workspace**, which no two `inference` workspaces do.
 ## Two honest warnings
 
 1. **It is a developer preview** by its own README, with compatibility changes
-   ongoing. `latest` is unpinned here deliberately — a month-old pin of a
-   preview is its own kind of broken. Pin `DSH_VERSION` once a version works for
-   you.
+   ongoing — and one of them landed: **0.2.1 moved provider config out of
+   `settings.yaml` into Cordis patch layers** and rejects the `llm-pi-ai`
+   section on import, so the harness fell back to DeepSeek's hosted route with
+   `MISSING_CREDENTIAL` (measured 2026-10-25). This workspace therefore pins
+   **`DSH_VERSION=0.1.5-rc.1`**, the version its `settings/` catalogue is
+   written for. Unpin deliberately, not by accident; the forward path is a
+   `$DSH_HOME/cordis.patch.yml` home patch, which one file covers for every
+   profile (web, headless, acp, sdk).
 2. **It is an agent harness.** It executes tool calls against whatever you mount
    at `/work`, on host networking. The default mount is `./work` — a directory
    that starts **empty** — rather than `$HOME`, and **that default is the
@@ -68,23 +74,96 @@ with a serving workspace**, which no two `inference` workspaces do.
 | You want agentic tool use with nothing leaving the house | You want to know it is answering correctly → [`vllm-quality-gate`](../../bench/vllm-quality-gate/README.md) |
 | You want to compare your server against DeepSeek's hosted API | You need a stable, pinned tool — this is a preview |
 
-## How
+## Where the harness runs
+
+**On gb10-homer, not on the head.** A client holds no GPU and no unified memory,
+so putting it on a node that is serving buys nothing and costs something: the
+head is the node `memguard` watches, and odysseus sat at **3.3 GiB MemAvailable**
+against a 2.5 GiB kill floor while the 1017 server ran. The harness is ~100 MB;
+it is not the reason the head is tight, but it is the one thing in the pair that
+can leave.
+
+`up.sh` is what moves it. It writes the settings file **on the node**, rsyncs
+`compose.yml` and `.env` there, and starts compose over ssh:
 
 ```bash
-# 1. a model, on the cluster. The default below is the one this repo ships
-#    settings for; any of the nine in `./use.sh` works.
-ws up vllm-2node-qwen38-flash-next
-
-# 2. point the harness at it — this is the whole point of the workspace
 cd workspaces/agent/deepseek-harness
-./use.sh vllm-2node-qwen38-flash-next
-cd -
+./up.sh                 # HARNESS_HOST=gb10-homer by default
+./ask.sh "what is in /work?"
+./down.sh
+```
 
-# 3. the agent
-ws up   deepseek-harness              # -> http://127.0.0.1:3080
+`ws up`, `ws down` and `ws logs` call those scripts, so the usual verbs still
+work:
+
+```bash
+ws up   deepseek-harness
 ws logs deepseek-harness -f
 ws down deepseek-harness
 ```
+
+**`ws status` is the one verb that stays local.** It asks each workspace's own
+docker, and the harness's container is on another machine. Use
+`ssh gb10-homer docker ps` for it; saying so is better than a command that
+reports "no workspace is running" while one is.
+
+`HARNESS_HOST=local` runs it here, unchanged. The bundle on the node is
+`~/ws-deepseek-harness/`; `dsh-home/` is the node's own state and no script here
+deletes it.
+
+## Reaching the server
+
+The 1017 server stays on odysseus and binds `0.0.0.0:8903`. From gb10-homer
+there are two paths, and only one of them is open today:
+
+| Path | Address | Status |
+|---|---|---|
+| **Mesh** | `http://<head-mesh>:8903` | **works** — `/health` 200 in 98 ms. odysseus's ufw allows the nordlynx interface wholesale, and homer's mesh address explicitly |
+| LAN | `http://<head-LAN>:8903` | **blocked** — `ping` and `:22` work over the LAN (8–13 ms), but odysseus's default-deny policy allows only `22/tcp from 192.168.0.0/16`; `:8903` from homer's LAN subnet is dropped |
+
+So `up.sh` defaults to the mesh: it takes the head's nordlynx address and
+rewrites the one `baseURL:` line to it. `127.0.0.1:8903` is correct **only when
+the harness runs on odysseus** — on gb10-homer it is homer's own loopback, where
+nothing listens.
+
+To use the LAN instead, two things must change: the firewall and `.env`.
+
+1. Allow `:8903` from homer's LAN address on the head. This belongs in the play,
+   not in a hand-typed rule: `roles/remote` writes the peer rules from
+   `cluster_peer_mgmt_addrs`, which is each peer's **`ansible_host`** — for
+   homer that is its mesh address by inventory design, so the LAN source has no
+   home in that list today. A port-scoped rule (or an `ufw_extra_sources` list)
+   has to be added to the role and then applied with `make apply`. A hand-typed
+   `ufw allow` survives until the next converge rewrites the policy, and the
+   failure after that is a silent timeout again.
+2. Set `HARNESS_ENDPOINT=http://<head-LAN>:8903` in `.env` and re-run
+   `./up.sh`.
+
+**The web UI stays on the node's loopback**, so it is reached with a tunnel
+regardless of which server path you pick:
+
+```bash
+ssh -L 39090:127.0.0.1:39090 gb10-homer
+ssh gb10-homer docker logs ws-deepseek-harness | grep -o 'http://[^ ]*token=[^ ]*'
+```
+
+## How
+
+```bash
+# 1. a model, on the cluster. The 1017 recipe is what this workspace ships
+#    settings for; any of the ten in `./use.sh` works.
+ws up tensorfold-2node-dsv41-flash-1017
+
+# 2. the agent, on the node that is not holding a rank. `ws up` runs up.sh,
+#    which deploys it to gb10-homer and points it at the 1017 server.
+ws up   deepseek-harness              # -> gb10-homer, :39090 (tunnel to it)
+ws logs deepseek-harness -f
+ws down deepseek-harness
+```
+
+`up.sh` refuses before starting anything if the node cannot reach the endpoint,
+and `use.sh` (which `up.sh` calls) warns if the server is up but serving a
+different id.
 
 **First start downloads the npm tree before it binds anything** — the
 healthcheck's `start_period` is 12 minutes for that reason.
@@ -93,7 +172,10 @@ healthcheck's `start_period` is 12 minutes for that reason.
 
 dsh reads exactly one file: `dsh-home/settings.yaml`, which `compose.yml`
 mounts. So "switch model" means **put a different file there**, and that is all
-[`use.sh`](use.sh) does — plus the one check worth doing.
+[`use.sh`](use.sh) does — plus the one check worth doing. When `HARNESS_HOST` is
+another node, `use.sh` writes it **there** and rewrites the `baseURL:` line to
+that node's view of the server, so `./use.sh <recipe>` switches the harness
+wherever it runs.
 
 ```bash
 ./use.sh                                  # what is available, and what is active
@@ -107,6 +189,7 @@ different ports, so the workspace is the only key that is unique:
 
 | `use.sh <this>` | Port | `models[].id` |
 |---|---|---|
+| [`tensorfold-2node-dsv41-flash-1017`](../../inference/tensorfold-2node-dsv41-flash-1017/README.md) | 8903 | `DeepSeek-V4.1-Flash-1017` — **the recipe `.env` now deploys to gb10-homer** |
 | [`vllm-2node-qwen38-flash-next`](../../inference/vllm-2node-qwen38-flash-next/README.md) | 8896 | `qwen3.8-flash-next` — **the default** |
 | [`vllm-2node-deepseek-v4-flash`](../../inference/vllm-2node-deepseek-v4-flash/README.md) | 8890 | `deepseek-v4-flash` |
 | [`vllm-2node-glm53-flash-exl3`](../../inference/vllm-2node-glm53-flash-exl3/README.md) | 8893 | `glm-5.3-flash-exl3` |
@@ -125,7 +208,7 @@ and writes the answer.
 ### Why `use.sh` curls the server
 
 `models[].id` must be the **served** name (`--served-model-name`), not the HF
-repo id — and a wrong one **does not fail at startup**. dsh binds :3080, the UI
+repo id — and a wrong one **does not fail at startup**. dsh binds its UI port, the UI
 loads, and the error arrives on the first message, long after you stopped
 thinking about settings. So `use.sh` asks the endpoint what it actually serves
 and says so before you open the tab. A server that is not up yet is a `note`,
@@ -194,10 +277,14 @@ reaches DeepSeek at all.
 
 | Variable | Default | Note |
 |---|---|---|
+| **`HARNESS_HOST`** | `gb10-homer` | The ssh target the harness runs on. `local` keeps it on this machine |
+| **`HARNESS_ENDPOINT`** | derived | The server, **without `/v1`**: the recipe's loopback URL when local, else the head's nordlynx address. See [Reaching the server](#reaching-the-server) |
+| `HARNESS_SETTINGS` | `tensorfold-2node-dsv41-flash-1017` | Which file in `settings/` `up.sh` deploys |
+| `DSH_PORT` | `3080` | The web UI port. Set it when the node already uses 3080 — **gb10-homer uses 39090** because VS Code's extension host holds a wide forwarded-port set there (3080, 3081, 8896, 8903, …) |
 | **`DSH_WORKSPACE`** | `./work` | **The one setting worth thinking about.** Point it at a project, not at `$HOME` |
 | `LOCAL_API_KEY` | `gx10` | Any non-empty string — a local server ignores the value, but the client library refuses to send a request without one |
 | `DEEPSEEK_API_KEY` | unset | Leaving it unset is a reasonable way to guarantee nothing reaches DeepSeek |
-| `DSH_VERSION` | `latest` | Pin it once a version works |
+| `DSH_VERSION` | `0.1.5-rc.1` | **Pinned**: 0.2.1 moved provider config to Cordis patches and rejects `settings.yaml`'s `llm-pi-ai` section |
 | `DSH_UID` / `DSH_GID` | `1000` | Set if `id -u` says otherwise, or `./dsh-home` fills with files you cannot edit |
 
 ## The five profiles
@@ -209,7 +296,7 @@ the transport and the session lifecycle, nothing about the agent itself.
 
 | Profile | Transport | Audience | Lifetime | Conversation | Ports |
 |---|---|---|---|---|---|
-| **`web`** | HTTP + browser GUI | a person | until `ws down` | yes | :3080 |
+| **`web`** | HTTP + browser GUI | a person | until `ws down` | yes | :3080 (39090 here) |
 | **`headless`** | argv in, stdout out | a person, or a script | one task, then exits | no — one turn | none |
 | **`acp`** | [ACP](https://agentclientprotocol.com) v1 JSON-RPC over stdio | another **program** | until the client disconnects | yes, and resumable | none |
 | `sdk` / `sdk-minimal` | DeepSeek's own JSON-RPC over stdio | another program | until shutdown | — | none |
@@ -321,8 +408,13 @@ a real project, the agent's output lands in *that* tree under *that* repo's
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Nothing on :3080, and `ws status` says `unhealthy` | First start is still resolving the npm tree — measured at ~7.5 minutes and ~476 MB here, during which nothing is listening | Wait, and watch `ws logs deepseek-harness -f` for `dsh web: http://127.0.0.1:3080`. `start_period` is 12m for this reason; health does not trigger a restart, so an `unhealthy` first start is not a loop |
-| Cannot reach the model | `baseURL`, or an empty API key | It is host networking — **if `curl` works from your shell, the same URL works**. `./use.sh` tells you which of the two it is |
+| Nothing on the UI port, and `ws status` says `unhealthy` | First start is still resolving the npm tree — measured at ~7.5 minutes and ~476 MB here, during which nothing is listening | Wait, and watch `ws logs deepseek-harness -f` for `dsh web: http://127.0.0.1:<DSH_PORT>`. `start_period` is 12m for this reason; health does not trigger a restart, so an `unhealthy` first start is not a loop |
+| `EADDRINUSE 127.0.0.1:3080` in the logs, container restarting | Another process on the node owns dsh's default port — on gb10-homer, VS Code's extension-host node service holds it | Set `DSH_PORT=39090` in `.env` and re-run `./up.sh`; tunnel to that port |
+| Cannot reach the model | `baseURL`, an empty API key, or a firewall between the node and the server | Host networking means the URL in `settings.yaml` is the URL **that node** would `curl`. `./use.sh` tells you which of the two it is; `up.sh` checks reachability from the node before it starts anything |
+| `up.sh` says the node cannot reach the endpoint | The mesh is down, or you set a LAN endpoint without the ufw rule | nordlynx up on both nodes; or add the `:8903` rule and `make apply` — see [Reaching the server](#reaching-the-server) |
+| Nothing on the UI port on the head, though `ws logs` shows `dsh web:` | The UI binds **127.0.0.1 on gb10-homer**; the head's loopback is a different one | `ssh -L 39090:127.0.0.1:39090 gb10-homer`, then open the tokenised URL |
+| `ws status` says no workspace is running | It is local-only by design | `ssh gb10-homer docker ps` |
+| `ask.sh` says the container is not running | It looks on `HARNESS_HOST`, which may not be where you started it | Check `HARNESS_HOST` in `.env`, or `ssh <node> docker ps` |
 | The UI errors on the first message only | `models[].id` is not the name the server answers to | `./use.sh <workspace>` — it prints the real ids when they disagree |
 | Switched model and nothing changed | dsh reads `settings.yaml` at startup | `ws down deepseek-harness && ws up deepseek-harness` |
 | `MISSING_CREDENTIAL: ... deepseek-official` | The provider is defined but not selected — dsh is still on its hosted default | Add `agent-default-model` (see above), or just re-run `./use.sh <workspace>` |
@@ -330,7 +422,8 @@ a real project, the agent's output lands in *that* tree under *that* repo's
 | UI sits on "Thinking…" until the whole answer lands | A field name, not a stall: these runtimes stream the trace as `reasoning`, OpenAI-compatible clients read `reasoning_content` | Nothing to fix on the server |
 | `./dsh-home` files are root-owned | `DSH_UID`/`DSH_GID` do not match you | Set them; `sudo chown -R $(id -u):$(id -g) dsh-home` |
 | The agent touched something you did not expect | It has tool access to everything under `/work` | That is what `DSH_WORKSPACE` is for. Scope it |
-| It behaves differently after a restart | `latest` moved | Pin `DSH_VERSION` |
+| It behaves differently after a restart | `latest` moved | Pin `DSH_VERSION=0.1.5-rc.1` |
+| `MISSING_CREDENTIAL: ... deepseek-official` right after an upgrade | 0.2.x imports `settings.yaml` once and rejects the `llm-pi-ai` section, falling back to the hosted route | Pin `DSH_VERSION=0.1.5-rc.1`, or move the provider to `$DSH_HOME/cordis.patch.yml` — the home patch outranks every profile |
 
 ## Sources
 

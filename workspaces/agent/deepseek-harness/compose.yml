@@ -43,6 +43,11 @@ services:
 
     environment:
       - DSH_HOME=/dsh
+      # The UI port. 3080 is dsh's default, but it is not reserved: on
+      # gb10-homer VS Code's extension-host node service already listens
+      # there, and dsh exits with EADDRINUSE rather than picking another.
+      # One setting, used by the command, the healthcheck and the tunnel.
+      - DSH_PORT=${DSH_PORT:-3080}
       # npx wants a writable HOME for its package cache. Pointing it at the
       # mount keeps the download out of the container layer, so a restart does
       # not re-fetch the whole tree.
@@ -64,16 +69,18 @@ services:
     working_dir: /work
 
     # npx resolves and downloads on every start, which is slow but avoids
-    # shipping a Dockerfile for a preview tool that changes weekly. Pin
-    # DSH_VERSION in .env once you have a version that works for you.
+    # shipping a Dockerfile for a preview tool that changes weekly. The default
+    # is PINNED to 0.1.5-rc.1: 0.2.1 moved provider config out of settings.yaml
+    # into Cordis patch layers and rejects the llm-pi-ai section this
+    # workspace's settings/ catalogue uses. See docs/decisions.md.
     command: >
-      npx -y @deepseek-ai/dsh@${DSH_VERSION:-latest}
-      web --no-open
+      npx -y @deepseek-ai/dsh@${DSH_VERSION:-0.1.5-rc.1}
+      web --no-open --port ${DSH_PORT:-3080}
 
     healthcheck:
       # A node image has no curl. Using node itself avoids installing anything
       # into a container whose whole point is that it is disposable.
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3080').then(()=>process.exit(0)).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:'+(process.env.DSH_PORT||3080)).then(()=>process.exit(0)).catch(()=>process.exit(1))"]
       interval: 15s
       timeout: 5s
       retries: 5
