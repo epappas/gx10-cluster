@@ -3194,3 +3194,61 @@ size), deletes this workspace's own files that do not fit, and asks only for
 what is still to write. It names rank files with `pipefail` and a 20-hex
 check and dies rather than guess. The kit's missing `pipefail` is upstream's;
 with the shards kept it has nothing to fail on.
+
+## <a name="harness-on-homer"></a>The harness runs on gb10-homer, and reaches the head over the mesh
+
+`deepseek-harness` was started on odysseus, beside the 1017 server it talks to.
+That is the wrong node for a client. It holds no GPU and no unified memory, so
+the pairing bought nothing, and it put a ~100 MB process on the node `memguard`
+watches: odysseus measured 3.3 GiB MemAvailable against a 2.5 GiB kill floor
+while the 1017 server ran, and memguard had already killed that container once
+that day (14:07). gb10-homer is the third Spark, idle, and needs nothing but
+docker and ssh.
+
+Two consequences, both measured rather than assumed:
+
+- **The endpoint is not `127.0.0.1` any more.** On homer that is homer's own
+  loopback. odysseus's ufw allows the nordlynx interface wholesale and homer's
+  mesh address explicitly, so `http://<head-mesh>:8903` answers in 98 ms. The
+  LAN address does not: ping and `:22` work over the LAN (8-13 ms), but the
+  default-deny policy allows only `22/tcp from 192.168.0.0/16`, and `:8903`
+  from homer's LAN subnet is dropped. Choosing the LAN is a play change
+  (`roles/remote` derives peer rules
+  from `ansible_host`, which for homer is the mesh address), not a hand-typed
+  rule that the next converge rewrites.
+- **The UI is on the node's loopback.** `dsh web` binds a concrete local
+  interface and cannot bind all of them, so the harness is reached with
+  `ssh -L 39090:127.0.0.1:39090 gb10-homer`. The port is 39090, outside VS
+  Code's forwarded-port set on that node: its extension-host node service
+  listens on 3080, 3081, 8896, 8903 and dozens more, and dsh exits with
+  `EADDRINUSE` rather than choosing another; `DSH_PORT` moves the command and
+  the healthcheck together. Host networking still makes
+  `settings.yaml` mean what that node's shell would `curl`.
+
+Why a workspace script and not Ansible: the machine is provisioned by the play;
+what runs on it is a recipe, and the repo's boundary is that workspaces are not
+Ansible. `up.sh` deploys the bundle over ssh, `down.sh`/`logs.sh`/`ask.sh`
+follow `HARNESS_HOST`, and `ws up`/`down`/`logs` keep working. `ws status` stays
+local-only, and the README says so rather than letting it report nothing
+running.
+
+## <a name="harness-pinned-015"></a>The harness is pinned to 0.1.5-rc.1: 0.2.1 moved provider config out of `settings.yaml`
+
+`latest` resolved to 0.2.1-rc.2 when the harness was deployed to gb10-homer on
+2026-10-25, and the deploy came up healthy while the model did not: `ask.sh`
+returned `MISSING_CREDENTIAL: ... deepseek-official`, i.e. DeepSeek's hosted
+route, not the cluster. The cause is a documented preview change, not a
+misconfiguration: 0.2.x imports a legacy `settings.yaml` once, maps only the
+sections the running composition accepts, renames the file to
+`settings.yaml.imported`, and persists provider config in Cordis patch layers
+instead. The import wrote the provider into `profiles/web/cordis.patch.yml`,
+so the web profile had it, but `--profile headless` has its own patch layer and
+did not. The cross-profile home patch is `$DSH_HOME/cordis.patch.yml`, which
+outranks every profile.
+
+This workspace's nine `settings/` files and `use.sh` are built on
+`settings.yaml`, and 0.1.5-rc.1 - the version that ran on odysseus for five
+weeks - reads it. So the pin is the README's own escape hatch, applied
+deliberately. Moving forward means converting `settings/*.yaml` to the patch
+array shape and writing one home patch; that is a workspace-wide change, not a
+one-line fix, and it should wait for a version that is not a release candidate.
