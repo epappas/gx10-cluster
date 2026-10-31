@@ -50,6 +50,7 @@ the territory.
 | [`vllm-prefill-ladder`](bench/vllm-prefill-ladder/README.md) | How long until the **first** character? Cold prefill tok/s, **proven** cold — the prefix cache makes a rerun look like an optimisation |
 | [`quant-quality-ab`](bench/quant-quality-ab/README.md) | Did a **quant** change the answers? Graded A/B against a saved baseline — the question the quality gate deliberately does not ask |
 | [`decode-content-mix`](bench/decode-content-mix/README.md) | Decode tok/s by **content type**. ~70 on copy against ~40 on prose, one server — so a single decode number is a claim about a corpus |
+| [`agentic-replay`](bench/agentic-replay/README.md) | Which model holds up on **long agentic coding**? Same tool conversations, recall probes, a prompt-cache soak and hidden-test coding tasks, on any server |
 | [`deepseek-harness`](agent/deepseek-harness/README.md) | An agent harness **on gb10-homer**, pointed at your own server. **Then use the thing you built** |
 | [`pi-harness`](agent/pi-harness/README.md) | The same idea **in your terminal**, and in a pipe: `-p`, JSON and RPC modes |
 | [`exo-harness`](agent/exo-harness/README.md) | An agent that **rewrites itself** — its own source, mounted in its own sandbox |

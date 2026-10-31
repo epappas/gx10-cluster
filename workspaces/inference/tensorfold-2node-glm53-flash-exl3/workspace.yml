@@ -53,10 +53,13 @@ requires:
   # ~88 GiB. 100 is the honest ws-check floor: the pair server (96/node) must
   # be down to start this one anyway.
   min_unified_gb: 100
-  # Head: the checkpoint (~176 GB per the kit's own MIN_FREE_GB) + the image
-  # (~25 GB under docker's root). The worker stores NEITHER with
-  # WORKER_WEIGHTS=nfs - it reads the head's cache over the cable.
-  min_disk_gb: 210
+  # The two DOWNLOADS only, as the DeepSeek 1017 manifest counts them: checkpoint
+  # 175.7 GB + DFlash2 2.3 GB, summed from each repo's own file list. `ws check`
+  # credits each landed model against this but cannot see the image, so counting
+  # the image too would refuse a resume the kit accepts. The kit's prepare.sh is
+  # the authority: it asks for what is missing + 5 GB + IMAGE_FREE_GB (35).
+  # The worker stores NEITHER with WORKER_WEIGHTS=nfs.
+  min_disk_gb: 179
   docker: true
   rdma: true
   peers: 1
