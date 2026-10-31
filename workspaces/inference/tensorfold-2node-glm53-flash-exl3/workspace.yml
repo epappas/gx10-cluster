@@ -37,6 +37,13 @@ summary: GLM-5.3-Flash EXL3 on the pair with the TensorFold engine - upstream's 
 # WORKER_WEIGHTS=nfs, the only weight layout that fits poseidon's 125 GB).
 # The README gives the one Ansible command that turns it on.
 
+# MEMORY GUARD: the kit has a stall watchdog and a start-time reserve but no
+# runtime guard, and its README says exhaustion tends to freeze the machine.
+# memory_guard.py is this repo's own, on both ranks: under 2.5 GiB MemAvailable
+# for 4 s, or under 1 GiB at once, it kills that rank's container. `ws up`
+# starts it after start.sh returns, so the weight load itself is NOT covered.
+# Tested on devbox docker only: never run on a GB10 or against a GLM boot.
+
 requires:
   gpu_arch: "12.1"
   # The engine sizes the KV pool from MemAvailable less a 14.5 GiB reserve
