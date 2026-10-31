@@ -60,6 +60,15 @@ def check_docker_absent(ws: Path, root: Path) -> None:
     assert "no workspace is running" not in done.stdout, "a lie: nothing could be checked"
 
 
+def check_docker_unreachable(ws: Path) -> None:
+    """Real docker, pointed at a socket nothing listens on."""
+    env = {**os.environ, "DOCKER_HOST": "unix:///nonexistent/docker.sock"}
+    done = subprocess.run([str(shutil.which("bash")), str(ws), "status"], capture_output=True,
+                          text=True, env=env, timeout=60)
+    assert done.returncode != 0, done.stdout
+    assert "docker is not reachable" in done.stderr, done.stderr
+
+
 def local_image() -> str | None:
     wanted = os.environ.get(IMAGE_ENV)
     if wanted:
@@ -95,6 +104,8 @@ def main() -> int:
         root = Path(tmp)
         ws = scaffold(root, container)
         check_docker_absent(ws, root)
+        if shutil.which("docker"):
+            check_docker_unreachable(ws)
         reachable = shutil.which("docker") and subprocess.run(
             ["docker", "info"], capture_output=True).returncode == 0
         image = local_image() if reachable else None

@@ -190,6 +190,7 @@ container_status() {  # $1 = container name -> "Status  Ports" if running
 cmd_status() {
     # Without docker nothing can be known, and "no workspace is running" would be a lie.
     command -v docker >/dev/null || die "docker is not on PATH - cannot tell what is running"
+    docker info >/dev/null 2>&1 || die "docker is not reachable - cannot tell what is running"
     local n d c line any=0
     for n in $(ws_all); do
         d=$(ws_dir "$n")
