@@ -174,7 +174,11 @@ def guard(args: argparse.Namespace, container_id: str, gone: threading.Event, lo
 
 def status(args: argparse.Namespace, value: str) -> None:
     if args.status_file:
-        args.status_file.write_text(value + "\n")
+        try:
+            args.status_file.write_text(value + "\n")
+        except OSError:
+            pass  # Missing/stale evidence fails the shell's status check, not monitoring.
+
 
 
 def run_rank(args: argparse.Namespace, container_id: str, log: int) -> None:

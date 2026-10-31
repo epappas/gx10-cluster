@@ -544,8 +544,12 @@ def check_failed_startup_handshake(tmp: Path) -> None:
         assert done.returncode != 0 and "startup handshake failed" in done.stderr, done
         assert "memory guard on rank 0: supervisor ready" not in done.stdout, done
         assert not (tmp / "argv").exists(), "start.sh ran despite a failed startup inspection"
+        began = time.monotonic()
+        # Idle loop: at most 5 s backoff + 2 s inspection + 1 s scheduling margin.
+        assert wait_for(lambda: guards_of(name) == 0, 8), "idle worker supervisor exceeded 8 s exit bound"
         assert guards_of(name) == 0
-        measured.append("failed startup inspection: no ready acknowledgement, start fixture not executed")
+        elapsed = time.monotonic() - began
+        measured.append(f"failed startup inspection: no readiness or start fixture; idle worker exited in {elapsed:.2f} s (8 s bound)")
     finally:
         clean_up_rank(name)
 
