@@ -114,6 +114,8 @@ def check_ac1(corpus) -> None:
 
 def check_corpus(corpus) -> None:
     paths = {f.path for f in corpus.files}
+    assert "tests/check_agentic_replay.py" not in paths, "it quotes the probe answers"
+    assert "tests/check_prefill_ladder.py" in paths, "only that one test is excluded"
     assert not [p for p in paths if p.startswith("workspaces/bench/agentic-replay/")]
     assert all("\0" not in f.text for f in corpus.files)
     assert load_corpus(REPO, corpus.rev).digest == corpus.digest
@@ -347,6 +349,13 @@ def check_ac7() -> None:
     assert recall.score(combo, f"{combo.expected}.0") == 1
     assert recall.score(absent, "7712 CORAL, though not found elsewhere") == 0
     assert recall.score(absent, "There is no bittern depot in the audit notes.") == 1
+    number, word = single.expected.split("-")
+    assert recall.score(single, f"{number} {word}") == 1, "a space for the hyphen is the same code"
+    assert recall.score(single, f"{number}\u2011{word}") == 1, "U+2011 is the same code"
+    assert recall.score(single, f"It is not {single.expected}.") == 0, "a denial is no answer"
+    assert recall.score(single, f"I did not find it hard: the code is {single.expected}") == 1
+    assert recall.score(absent, f"{facts[0].label}: {facts[0].code}. NOT PRESENT") == 0
+    assert recall.score(absent, f"NOT PRESENT, but {number} {word} is recorded") == 0
     assert recall.make_facts(7, 1000, 3) == facts and recall.make_facts(8, 1000, 3) != facts
 
 
@@ -489,6 +498,37 @@ def check_sampling_pre_run() -> None:
         verdict, dead = modes.run_sampling_check(run, args, "m", 1, False)
         assert dead and verdict["temperature"] == "not shown"
         assert run.records == [] and Path(tmp, "sampling-check.json").exists()
+
+
+def check_sizes_and_arms(corpus) -> None:
+    assert token_worth(300000) == 975000
+    assert token_worth(300000) / 3.30 >= 295000, "the target must cover the production peak"
+    assert token_worth(300000) / 3.17 >= 295000
+    parser = cli_parser()
+    assert parser.parse_args(["replay", "--corpus-rev", "H"]).temperature == 0.0
+    assert parser.parse_args(["soak", "--corpus-rev", "H", "--duration", "1"]).temperature == 0.0
+    assert parser.parse_args(["task", "--corpus-rev", "H"]).temperature == 0.7
+    for mode in (["replay"], ["task"], ["soak", "--duration", "1"]):
+        args = parser.parse_args([*mode, "--corpus-rev", "H", "--no-seed"])
+        assert args.no_seed, mode
+    args = parser.parse_args(["replay", "--corpus-rev", "H", "--no-seed"])
+    args.mode, args.api_key = "replay", ""
+    workload = modes.base_workload(args, corpus, [1], False)
+    assert workload["no_seed"] is True and workload["seed_sent"] is False
+    planned = next(replay_requests(spec(), corpus, "m", 1, 0, False))
+    assert "seed" not in json.loads(planned.body), "--no-seed must drop it from every body"
+    with_seed = next(replay_requests(spec(), corpus, "m", 1, 0, True))
+    assert json.loads(with_seed.body)["seed"] == 1
+    with tempfile.TemporaryDirectory() as tmp:
+        url = f"http://127.0.0.1:{free_port()}/v1"
+        done = subprocess.run(
+            [sys.executable, "-B", str(CLI), "replay", "--corpus-rev", "HEAD", "--base-url", url,
+             "--model", "m", "--no-seed", "--no-sampling-check", "--target-tokens", "1000",
+             "--step-tokens", "1000", "--probe-tokens", "", "--results-root", tmp],
+            capture_output=True, text=True, timeout=60)
+        assert done.returncode != 0, done.stdout
+        rows = (next(Path(tmp).iterdir()) / "requests.jsonl").read_text().splitlines()
+        assert [json.loads(x)["kind"] for x in rows] == ["step"], "--no-seed sends no seed probe"
 
 
 def check_task_columns() -> None:
@@ -728,6 +768,8 @@ def check_parser() -> None:
     assert burst.decode_tps is None, "a burst has no decode rate"
     assert Reply(first=10.0, last=11.0, completion_tokens=75).decode_tps == 75.0
     assert Reply(finish_reason="length").budget_stop and not Reply(finish_reason="stop").budget_stop
+    assert Reply(content=" \n ", finish_reason="length").budget_stop, "whitespace is no content"
+    assert not Reply(content="partial", finish_reason="length").budget_stop
 
 
 def docker_ready() -> str | None:
@@ -1083,6 +1125,7 @@ def main() -> int:
     check_budgets_and_decode()
     check_compare_prints_everything()
     check_sampling_pre_run()
+    check_sizes_and_arms(corpus)
     check_compare_covers_the_workload()
     check_probe_score_labels()
     check_soak_salts(corpus)

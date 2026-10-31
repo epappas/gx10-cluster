@@ -22,6 +22,8 @@ LOOSE_CODE = re.compile(r"\b\d{4}[- ][A-Z]{3,}\b")
 LIST_MARKER = re.compile(r"^\s*\d+[.)]\s+", re.M)
 DEPOT_COUNT = re.compile(r"\b\d+\s+depots?\b", re.I)
 WHOLE_DECIMAL = re.compile(r"\b(\d+)\.0+\b")
+HYPHENS = str.maketrans({"\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-"})
+NEGATED = re.compile(r"\b(?:not|isn't|is not|never|neither)\b[^.\n]{0,16}$", re.I)
 NUMBER = re.compile(r"(?<![\w-])\d+(?![\w-])")
 ABSENT_PHRASES = (
     "not present", "not mentioned", "not recorded", "not found", "no record",
@@ -90,15 +92,26 @@ def probes_at(size_bytes: int, facts: tuple[Fact, ...]) -> list[Probe]:
     return out
 
 
+def _normal(reply: str) -> str:
+    """One spelling of a code: `8355 CORAL` and a non-breaking hyphen are the same answer."""
+    text = reply.strip().translate(HYPHENS)
+    return LOOSE_CODE.sub(lambda m: m.group().replace(" ", "-"), text)
+
+
+def _denied(text: str, code: str) -> bool:
+    at = text.upper().find(code.upper())
+    return at >= 0 and bool(NEGATED.search(text[:at]))
+
+
 def score(probe: Probe, reply: str) -> int:
     """1 or 0 on the visible reply. An empty reply at a length stop is decided by the caller."""
-    text = reply.strip()
+    text = _normal(reply)
     if probe.kind == "absent":
         return _score_absent(text)
     if probe.kind == "combo":
         return _score_combo(probe, text)
     found = {c.upper() for c in CODE.findall(text)}
-    return int(found == {probe.expected.upper()})
+    return int(found == {probe.expected.upper()} and not _denied(text, probe.expected))
 
 
 def _score_absent(text: str) -> int:

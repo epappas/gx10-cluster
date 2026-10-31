@@ -75,7 +75,7 @@ def base_workload(args: argparse.Namespace, corpus: Corpus, seeds: list[int], se
         "sampling": sampling_of(args).as_body(), "seed_sent": sent,
         "tools_sha": sha256_of(TOOLS), "system_sha": sha256_of(SYSTEM_PROMPT),
         "piece_bytes": PIECE_BYTES, "code_sha": code_digest(),
-        "sampling_check": args.sampling_check,
+        "sampling_check": args.sampling_check, "no_seed": args.no_seed,
     }
 
 
@@ -178,13 +178,16 @@ def run_sampling_check(
 
 
 def pre_run(run: Run, args: argparse.Namespace, model: str, seed: int) -> PreRun:
-    probe = probe_seed(run, args, model, seed)
-    if probe.dead:
-        return PreRun(False, None, probe.error)
+    sent = False
+    if not args.no_seed:  # one arm refusing seed means both drop it
+        probe = probe_seed(run, args, model, seed)
+        if probe.dead:
+            return PreRun(False, None, probe.error)
+        sent = probe.ok
     if not args.sampling_check:
-        return PreRun(probe.ok, None)
-    verdict, dead = run_sampling_check(run, args, model, seed, probe.ok)
-    return PreRun(probe.ok, verdict, dead)
+        return PreRun(sent, None)
+    verdict, dead = run_sampling_check(run, args, model, seed, sent)
+    return PreRun(sent, verdict, dead)
 
 
 def replay_summary(

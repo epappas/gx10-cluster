@@ -50,8 +50,13 @@ says `no guard log`, never `no kills`.
 - The corpus is read from git objects at `--corpus-rev`, tracked text files only.
 - There is no per-model branch. No thinking parameter is sent. Assistant messages
   go back as received, under the field that arrived.
-- Sizes are bytes, because tokenizers differ. One "token's worth" is 3 bytes, measured
-  on this corpus at 2.9 on DeepSeek. Read `usage.prompt_tokens` for the real count.
+- Sizes are bytes, because tokenizers differ. One "token's worth" is 3.25 bytes, from a
+  measured 3.17 to 3.30 **on DeepSeek only**. The 300k target is 975,000 bytes, which is
+  295,454 tokens even at 3.30, so it covers the 295k production peak. GLM is unmeasured.
+  Read `usage.prompt_tokens` for the real count.
+- `replay` and `soak` default to temperature 0, `task` to 0.7, because repeats at 0 would
+  measure nothing. If either arm refuses `seed`, pass `--no-seed` to both. Both settings
+  are recorded and `compare` refuses a mismatch.
 
 ## Reading a soak
 

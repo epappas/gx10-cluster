@@ -8,12 +8,13 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 # A stdlib tool cannot count tokens and tokenizers differ, so sizes are bytes.
-# 3 is measured on this corpus: 80,000 bytes were 27,473 DeepSeek prompt tokens.
-BYTES_PER_TOKEN_WORTH = 3
+# Measured on DeepSeek only, at 3.17 to 3.30 bytes a token. At 3.25 the 300k target is
+# 975,000 bytes, which is 295,454 tokens even at 3.30, so it covers the 295k production peak.
+BYTES_PER_TOKEN_WORTH = 3.25
 
 
 def token_worth(tokens: int) -> int:
-    return tokens * BYTES_PER_TOKEN_WORTH
+    return int(tokens * BYTES_PER_TOKEN_WORTH)
 
 
 def derive_hex(seed: int, *labels: object) -> str:

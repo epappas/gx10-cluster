@@ -84,7 +84,7 @@ class Reply:
     @property
     def budget_stop(self) -> bool:
         """A length stop with empty content ran out of budget. It is not a wrong answer."""
-        return self.finish_reason == "length" and not self.content
+        return self.finish_reason == "length" and not (self.content or "").strip()
 
     def assistant_message(self) -> dict[str, Any]:
         """The reply exactly as received, under the fields that arrived."""

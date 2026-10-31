@@ -16,6 +16,7 @@ from pathlib import Path
 from .core import derive_hex
 
 EXCLUDED_PREFIX = "workspaces/bench/agentic-replay/"
+EXCLUDED_PATHS = {"tests/check_agentic_replay.py"}  # it quotes the probes and their answers
 BLOB_MODES = {"100644", "100755"}
 
 
@@ -62,7 +63,8 @@ def _tracked_blobs(repo: Path, rev: str) -> list[tuple[str, str]]:
             continue
         meta, path = entry.decode().split("\t", 1)
         mode, kind, oid = meta.split()
-        if kind == "blob" and mode in BLOB_MODES and not path.startswith(EXCLUDED_PREFIX):
+        excluded = path.startswith(EXCLUDED_PREFIX) or path in EXCLUDED_PATHS
+        if kind == "blob" and mode in BLOB_MODES and not excluded:
             blobs.append((path, oid))
     return sorted(blobs)
 
