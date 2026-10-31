@@ -529,7 +529,6 @@ an agent and a server coexist. They are three genuinely different tools:
 
 | | Shape | Sandbox | Reach for it when |
 |---|---|---|---|
-| [`agentic-replay`](bench/agentic-replay/README.md) | Which model holds up on **long agentic coding**? Same tool conversations, recall probes, a prompt-cache soak and hidden-test coding tasks, on any server |
 | [`deepseek-harness`](agent/deepseek-harness/README.md) | Web UI on `:3080` | The container | You want a browser |
 | [`pi-harness`](agent/pi-harness/README.md) | **TUI**, and `-p`/JSON/RPC | The container | You want it in a **pipe** |
 | [`exo-harness`](agent/exo-harness/README.md) | REPL, host-side, long-running | **Exo starts its own** | You want it to **rewrite itself** |

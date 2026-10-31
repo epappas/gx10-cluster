@@ -149,6 +149,6 @@ docker pull python@sha256:94d3426f1def7db4a106a232ac121bfd975393e5dfd40a619b955f
 | `task refused: containment not proven` | A probe failed | Fix it. There is no bypass |
 | `refused: different workloads` | Seeds, corpus or sampling differ | Rerun with the same flags |
 | Exit 1, `stopped: server died` | The server went away | Partial results are kept. Check the guard log |
-| Exit 1, `request_errors` above 0 | The server refused requests | Each is in `requests.jsonl`. A soak with any error is not clean |
+| Exit 1, `request_errors` above 0 | The server refused requests | Each is in `requests.jsonl`. A soak with any error cannot end on the no-death wording |
 | `refused: --probe-tokens` | A probe size is past `--target-tokens` | Lower the probes. A small run must stay small |
 | Error text in a stream with status 200 | Server-side refusal | Recorded as `error`. `top_k=0` came back this way on TensorFold |
