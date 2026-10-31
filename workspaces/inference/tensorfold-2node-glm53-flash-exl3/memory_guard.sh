@@ -11,8 +11,10 @@ guard_run() {  # $1 = ssh target, empty for this node; $2 = POSIX snippet
         sh -c "$2"
         return
     fi
+    local quoted=${2//\'/\'\\\'\'}
+    # The login shell only parses this quoted exec; sh interprets the snippet.
     # shellcheck disable=SC2086
-    timeout 20 ssh -o BatchMode=yes -o ConnectTimeout=5 $GUARD_SSH_ARGS "$1" "$2"
+    timeout 20 ssh -o BatchMode=yes -o ConnectTimeout=5 $GUARD_SSH_ARGS "$1" "exec sh -c '$quoted'"
 }
 
 guard_paths() {

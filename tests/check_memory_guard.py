@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import signal
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -390,13 +391,19 @@ def start_sshd(tmp: Path) -> subprocess.Popen[bytes] | None:
     shutil.copy(tmp / "client_key.pub", tmp / "authorized_keys")
     (tmp / "worker-home").mkdir()
     port = free_port()
-    (tmp / "sshd_config").write_text(SSHD_CONFIG.format(port=port, tmp=tmp))
+    zsh = shutil.which("zsh")
+    forced = f'ForceCommand {shlex.quote(zsh)} -f -c "$SSH_ORIGINAL_COMMAND"\n' if zsh else ""
+    (tmp / "sshd_config").write_text(SSHD_CONFIG.format(port=port, tmp=tmp) + forced)
     user = run("id", "-un").stdout.strip()
     (tmp / "ssh_config").write_text(SSH_CONFIG.format(port=port, tmp=tmp, user=user))
     process = subprocess.Popen([sshd, "-D", "-e", "-f", str(tmp / "sshd_config")],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     probe = ("ssh", "-F", str(tmp / "ssh_config"), "-o", "BatchMode=yes", "loopback-node", "true")
     if wait_for(lambda: run(*probe).returncode == 0, 5):
+        if zsh:
+            measured.append(f"loopback SSH executes the original command through actual {zsh} before explicit POSIX sh")
+        else:
+            not_proven.append("explicit zsh SSH regression: zsh absent; actual account login shell used")
         return process
     process.kill()
     process.wait()
