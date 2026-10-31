@@ -79,7 +79,9 @@ def execute(verdict: CallVerdict, scratch: Path) -> str:
     result = sandbox.run_sandboxed(scratch, sandbox.VISIBLE_TESTS)
     if result.sandbox_error:
         raise SandboxFailure(result.sandbox_error)
-    return result.output + ("\n[run_tests timed out]\n" if result.timed_out else "")
+    note = "\n[run_tests timed out]\n" if result.timed_out else ""
+    note = "\n[run_tests killed: memory limit]\n" if result.killed_early else note
+    return result.output + note
 
 
 @dataclass
@@ -179,13 +181,31 @@ def score_through(session: Session, fixture: Fixture, upto: int) -> dict[int, st
     """Hidden tests for task N and reruns of 1 to N-1, each in a fresh container."""
     scores: dict[int, str] = {}
     for task in fixture.tasks[:upto]:
-        result = sandbox.run_hidden(session.scratch, fixture.root / "hidden",
-                                    fixture.allowlist, task["hidden"])
+        try:
+            result = sandbox.run_hidden(session.scratch, fixture.root / "hidden",
+                                        fixture.allowlist, task["hidden"])
+        except Exception as exc:  # scoring must never take the run and its results down
+            raise SandboxFailure(f"hidden run failed: {type(exc).__name__}: {exc}") from exc
         if result.sandbox_error:
             raise SandboxFailure(result.sandbox_error)
         passed = sandbox.hidden_passed(result, task["expected_tests"])
         scores[task["id"]] = "pass" if passed else "fail"
     return scores
+
+
+def scored_attempt(session: Session, fixture: Fixture, number: int, attempt: dict[str, Any]) -> None:
+    """Results are written whether scoring worked or not."""
+    results = session.results
+    task = fixture.tasks[number - 1]
+    try:
+        scores = score_through(session, fixture, number)
+    except SandboxFailure:
+        results.append({**attempt, "status": "sandbox_error"})
+        session.run.write_json(f"tasks-{session.seed}.json", results)
+        raise
+    attempt.update(status=scores[task["id"]], hidden_after=scores)
+    results.append(attempt)
+    session.run.write_json(f"tasks-{session.seed}.json", results)
 
 
 def _run_tasks(session: Session, fixture: Fixture, tasks: list[dict[str, Any]]) -> None:
@@ -197,10 +217,7 @@ def _run_tasks(session: Session, fixture: Fixture, tasks: list[dict[str, Any]]) 
             session.run.write_json(f"tasks-{session.seed}.json", results)
             session.stopped = session.stopped or "no reply"
             return
-        scores = score_through(session, fixture, number)
-        attempt.update(status=scores[task["id"]], hidden_after=scores)
-        results.append(attempt)
-        session.run.write_json(f"tasks-{session.seed}.json", results)
+        scored_attempt(session, fixture, number, attempt)
         if session.stopped:
             return
 

@@ -17,6 +17,7 @@ MAX_WRITE_BYTES = 256 * 1024
 MAX_LIST_ENTRIES = 1000
 MAX_GREP_LINES = 200
 MAX_GREP_FILE_BYTES = 1024 * 1024
+MAX_PATH_DEPTH = 32  # deeper trees reach RecursionError in glob and makedirs
 
 
 class ToolError(Exception):
@@ -84,6 +85,8 @@ def read_file(root: Path, path: str, offset: int = 0) -> str:
 def write_file(root: Path, path: str, content: str) -> str:
     _refuse_links(root, path)
     resolved = _resolve(root, path)
+    if len(Path(path).parts) > MAX_PATH_DEPTH:
+        raise ToolError(f"path deeper than {MAX_PATH_DEPTH} components")
     data = content.encode()
     if len(data) > MAX_WRITE_BYTES:
         raise ToolError(f"content over the {MAX_WRITE_BYTES} byte limit")

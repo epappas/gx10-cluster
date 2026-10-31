@@ -82,14 +82,13 @@ Model code runs only in a container, and only on devbox.
   scoring only. A pass needs the exact test count and a bare `OK`.
 - Containment probes run at every start, and `task` refuses if any fails.
 
-**Known limit:** the pass check reads the output stream, and model code runs in that
-same stream. Code written to forge `Ran N tests` and `OK` would pass. The check stops
-accidents such as `sys.exit` at import, not deliberate cheating. Read the scratch copy
-in the run directory if a score looks wrong.
+**Won't fix:** a model that patches unittest in-process can forge a pass. Accidental
+forging is implausible, and closing it means rewriting all hidden tests.
 
-**Known limit:** if the whole tool dies in the gap between `docker create` and
-`docker start`, one `Created` container stays behind. It has no process in it, and
-the next `task` start removes it once it is an hour old.
+A detached host `sleep N; docker rm -f` starts just after `docker create`, so a SIGKILLed
+tool leaves nothing running or created, once N has passed. SIGTERM stops the container at
+once. The only gap is the moment between `create` returning and that process starting. An
+early rc 137 is labelled a memory kill, not a timeout.
 
 Pull the image once, because `task` never pulls:
 

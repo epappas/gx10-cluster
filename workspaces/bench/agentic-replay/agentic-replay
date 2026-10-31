@@ -23,6 +23,7 @@ from agentic_replay.compare import run_compare
 from agentic_replay.corpus import CorpusError
 from agentic_replay.modes import run_replay, run_soak
 from agentic_replay.results import DEFAULT_ROOT
+from agentic_replay.sandbox import install_sigterm
 from agentic_replay.task_mode import run_task
 
 DEFAULT_SEEDS = "1009,2003,3001,4001,5003"
@@ -95,6 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    install_sigterm()
     args = build_parser().parse_args()
     if args.mode == "compare":
         return run_compare(args.left, args.right)

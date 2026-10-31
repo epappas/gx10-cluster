@@ -426,6 +426,62 @@ def check_task_bounds() -> None:
         assert all(row["status_at_end"] == "missing" for row in table)
 
 
+def deep_tree(root: Path, depth: int) -> None:
+    """Built one level at a time, since makedirs itself recurses."""
+    fd = os.open(root, os.O_RDONLY)
+    for _ in range(depth):
+        os.mkdir("d", dir_fd=fd)
+        inner = os.open("d", os.O_RDONLY, dir_fd=fd)
+        os.close(fd)
+        fd = inner
+    os.close(fd)
+
+
+def remove_deep_tree(root: Path, depth: int) -> None:
+    """Bottom up with held descriptors: rmtree recurses on 3.12."""
+    fds = [os.open(root, os.O_RDONLY)]
+    for _ in range(depth - 1):
+        fds.append(os.open("d", os.O_RDONLY, dir_fd=fds[-1]))
+    for fd in reversed(fds):
+        os.rmdir("d", dir_fd=fd)
+        os.close(fd)
+
+
+def check_deep_tree_keeps_results() -> None:
+    """A real over-deep tree through the real run_hidden: no fake failure, no request sent."""
+    depth = 1100
+    fixture = task_mode.load_fixture()
+    with tempfile.TemporaryDirectory() as tmp:
+        scratch, run_dir = Path(tmp, "s"), Path(tmp, "r")
+        run_dir.mkdir()
+        task_mode.prepare_scratch(scratch)
+        too_deep = "/".join(["d"] * (fstools.MAX_PATH_DEPTH + 1)) + "/f"
+        try:
+            fstools.write_file(scratch, too_deep, "x")
+        except fstools.ToolError as exc:
+            assert "deeper" in str(exc)
+        else:
+            raise AssertionError("the depth cap did not apply")
+        assert "wrote" in fstools.write_file(scratch, "/".join(["e"] * 20) + "/f", "x")
+        run = Run(run_dir, "http://127.0.0.1:1/v1", "")
+        session = task_mode.Session(argparse.Namespace(), run, "m", 1, None, scratch, "s", [], 0,
+                                    time.monotonic() + 60)
+        deep_tree(scratch / "ledger", depth)
+        try:
+            session.results.clear()
+            attempt = {"id": 1, "title": "t", "answered": 1}
+            try:
+                task_mode.scored_attempt(session, fixture, 1, attempt)
+            except task_mode.SandboxFailure as exc:
+                assert "RecursionError" in str(exc), exc
+            else:
+                raise AssertionError("an unexpected scoring failure must be a sandbox error")
+            saved = json.loads((run_dir / "tasks-1.json").read_text())
+            assert saved[0]["status"] == "sandbox_error", "the partial result was lost"
+        finally:
+            remove_deep_tree(scratch / "ledger", depth)
+
+
 def check_compare_covers_the_workload() -> None:
     assert len(modes.code_digest()) == 64
     source = (TOOL_DIR / "agentic_replay" / "modes.py").read_text()
@@ -533,6 +589,37 @@ def check_sweep() -> None:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
 
 
+def check_tool_sigkilled_early() -> None:
+    """Killed before the container ever starts: the detached reaper still removes it."""
+    with tempfile.TemporaryDirectory() as tmp:
+        Path(tmp, "probe.py").write_text(sandbox.SLEEP_PROBE)
+        code = KILLED_TOOL.format(tool=str(TOOL_DIR), scratch=tmp)
+        tool = subprocess.Popen([sys.executable, "-B", "-c", code], stdout=subprocess.PIPE,
+                                text=True, start_new_session=True)
+        assert tool.stdout is not None
+        name = tool.stdout.readline().strip()
+        os.killpg(tool.pid, signal.SIGKILL)
+        tool.wait()
+        bound = 8 + sandbox.TERM_GRACE_S + sandbox.HOST_GRACE_S + sandbox.GONE_WAIT_S + 15
+        assert wait_for(lambda: not sandbox._exists(name), bound), "the reaper left a container"
+
+
+def check_tool_sigterm() -> None:
+    """SIGTERM must stop the container now, well before the reaper's delay."""
+    with tempfile.TemporaryDirectory() as tmp:
+        Path(tmp, "probe.py").write_text(sandbox.SLEEP_PROBE)
+        code = "import sys\nsys.path.insert(0, " + repr(str(TOOL_DIR)) + ")\n" \
+            "from agentic_replay import sandbox\nsandbox.install_sigterm()\n" + \
+            KILLED_TOOL.format(tool=str(TOOL_DIR), scratch=tmp).replace("seconds=8", "seconds=300")
+        tool = subprocess.Popen([sys.executable, "-B", "-c", code], stdout=subprocess.PIPE, text=True)
+        assert tool.stdout is not None
+        name = tool.stdout.readline().strip()
+        assert wait_for(lambda: is_running(name), 30), "the container never started"
+        tool.terminate()
+        assert tool.wait(30) == 143, "the tool must exit through its handler"
+        assert not sandbox._exists(name), "SIGTERM left the container behind"
+
+
 def check_exists_fails_closed() -> None:
     saved = os.environ.get("DOCKER_HOST")
     os.environ["DOCKER_HOST"] = "unix:///nonexistent/docker.sock"
@@ -570,6 +657,51 @@ def check_tool_killed() -> None:
         assert wait_for(lambda: not sandbox._exists(name), 30), "container outlived the killed tool"
 
 
+def check_hidden_passed_logic() -> None:
+    """Pure logic on hand-written streams, so this half also runs where docker cannot."""
+    def result(text: str, rc: int = 0) -> sandbox.RunResult:
+        return sandbox.RunResult(text, rc, False, False, None, "c")
+    good = "...\n------\nRan 3 tests in 0.001s\n\nOK\n"
+    assert sandbox.hidden_passed(result(good), 3)
+    assert sandbox.hidden_passed(result(good + "stray print at exit\n"), 3)
+    assert sandbox.hidden_passed(result("stray at import\n" + good), 3)
+    assert not sandbox.hidden_passed(result(good), 4), "the count must match"
+    assert not sandbox.hidden_passed(result("OK\n"), 3), "OK with nothing run is no pass"
+    assert not sandbox.hidden_passed(result("OK\nRan 3 tests in 0.001s\n"), 3)
+    assert not sandbox.hidden_passed(result(good.replace("OK", "OK (skipped=1)")), 3)
+    assert not sandbox.hidden_passed(result(good, 1), 3)
+    assert "python -u " in sandbox.hidden_command("test_task1.py")
+    argv = sandbox.docker_argv("n", Path("/s"), "true", sandbox.Limits())
+    assert argv[argv.index("--ulimit") + 1] == "core=0"
+
+
+STRAY_PRINTS = """
+print("stray print at import")
+import atexit
+atexit.register(print, "stray print at exit")
+_stray_percent_of = percent_of
+def percent_of(*args, **kwargs):
+    print("stray print in a function")
+    return _stray_percent_of(*args, **kwargs)
+"""
+
+
+def check_stray_prints_in_sandbox() -> None:
+    """The reference with prints at import, in a function and at exit must still pass."""
+    fixture = task_mode.load_fixture()
+    task = fixture.tasks[0]
+    with tempfile.TemporaryDirectory() as tmp:
+        scratch = Path(tmp, "s")
+        task_mode.prepare_scratch(scratch)
+        apply_reference(scratch)
+        with (scratch / "ledger" / "money.py").open("a") as money:
+            money.write(STRAY_PRINTS)
+        result = sandbox.run_hidden(scratch, fixture.root / "hidden", fixture.allowlist, task["hidden"])
+        assert "stray print in a function" in result.output, result.output[-400:]
+        assert result.output.rstrip().endswith("stray print at exit"), result.output[-200:]
+        assert sandbox.hidden_passed(result, task["expected_tests"]), result.output[-400:]
+
+
 def check_reference_in_sandbox() -> None:
     fixture = task_mode.load_fixture()
     with tempfile.TemporaryDirectory() as tmp:
@@ -595,6 +727,9 @@ def check_ac4() -> str:
     check_sweep()
     check_exists_fails_closed()
     check_tool_killed()
+    check_tool_sigkilled_early()
+    check_tool_sigterm()
+    check_stray_prints_in_sandbox()
     check_reference_in_sandbox()
     return "AC4 containment held on live docker"
 
@@ -730,6 +865,8 @@ def main() -> int:
     check_ac6()
     check_ac7()
     check_sampling_verdict()
+    check_hidden_passed_logic()
+    check_deep_tree_keeps_results()
     check_failures_are_reported()
     check_task_bounds()
     check_compare_covers_the_workload()

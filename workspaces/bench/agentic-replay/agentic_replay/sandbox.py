@@ -13,9 +13,11 @@ import os
 import re
 import select
 import shutil
+import signal
 import socket
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -36,7 +38,8 @@ STALE_AFTER_S = 3600.0
 CREATE_TIMEOUT_S = 60
 GONE_WAIT_S = 15
 LATE_START_WATCH_S = 3
-VISIBLE_TESTS = "python -m unittest discover -s tests"
+# -u: block-buffered stdout lands after unittest's own lines and hides the result.
+VISIBLE_TESTS = "python -u -m unittest discover -s tests"
 HIDDEN_NAME = re.compile(r"^test_task\d+\.py$")
 
 
@@ -61,6 +64,7 @@ class RunResult:
     timed_out: bool
     sandbox_error: str | None
     container: str
+    killed_early: bool = False  # rc 137 before the time limit: the memory limit, not time
 
 
 def docker_argv(name: str, scratch: Path, inner: str, limits: Limits) -> list[str]:
@@ -73,6 +77,7 @@ def docker_argv(name: str, scratch: Path, inner: str, limits: Limits) -> list[st
         "--network", "none", "--read-only", "--tmpfs", "/work",
         "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
         "--pids-limit", str(limits.pids), "--memory", limits.memory, "--cpus", limits.cpus,
+        "--ulimit", "core=0",
         "--user", f"{os.getuid()}:{os.getgid()}",
         "--mount", f"type=bind,src={scratch},dst=/scratch,readonly",
         IMAGE, "sh", "-c", inner,
@@ -146,7 +151,7 @@ def _stop_and_confirm(name: str) -> bool:
 
 
 def _finish(raw: bytes, marker: str, rc: int | None, over: bool, late: bool, name: str,
-            gone: bool, limit: int) -> RunResult:
+            gone: bool, limit: int, killed_early: bool = False) -> RunResult:
     text = raw.decode("utf-8", "replace")
     head = marker + "\n"
     if not gone:
@@ -156,8 +161,8 @@ def _finish(raw: bytes, marker: str, rc: int | None, over: bool, late: bool, nam
     body = text[len(head):]
     if over:
         body += f"\n[output truncated at {limit} bytes, container killed]\n"
-    timed_out = late or rc in (124, 137) and not over
-    return RunResult(body, rc, over, timed_out, None, name)
+    timed_out = late or rc == 124 or (rc == 137 and not over and not killed_early)
+    return RunResult(body, rc, over, timed_out, None, name, killed_early)
 
 
 def _end_client(proc: subprocess.Popen[bytes], force: bool) -> int:
@@ -169,6 +174,30 @@ def _end_client(proc: subprocess.Popen[bytes], force: bool) -> int:
     except subprocess.TimeoutExpired:
         proc.kill()
         return proc.wait(timeout=30)
+
+
+def start_reaper(name: str, delay_s: int) -> subprocess.Popen[bytes]:
+    """Detached, so it outlives a SIGKILLed tool and nothing is left running or created."""
+    return subprocess.Popen(
+        ["sh", "-c", f"sleep {delay_s}; docker rm -f {name}"], stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def stop_reaper(reaper: subprocess.Popen[bytes]) -> None:
+    try:
+        os.killpg(reaper.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    reaper.wait(timeout=10)
+
+
+def _exit_on_sigterm(_signum: int, _frame: object) -> None:
+    sys.exit(143)
+
+
+def install_sigterm() -> None:
+    """SIGTERM unwinds through run_sandboxed's finally, which stops the container."""
+    signal.signal(signal.SIGTERM, _exit_on_sigterm)
 
 
 def run_sandboxed(
@@ -184,6 +213,8 @@ def run_sandboxed(
     if created.returncode != 0:
         detail = created.stderr.decode("utf-8", "replace")[:300]
         return RunResult("", None, False, False, f"create failed: {detail}", name)
+    reaper = start_reaper(name, limits.seconds + TERM_GRACE_S + HOST_GRACE_S + GONE_WAIT_S)
+    started = time.monotonic()
     proc = subprocess.Popen(["docker", "start", "-a", name], stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if on_spawn:
@@ -198,21 +229,28 @@ def run_sandboxed(
         proc.stdout.close()
         rc = _end_client(proc, force=over or late)
         gone = _stop_and_confirm(name)
-    return _finish(raw, marker, rc, over, late, name, gone, limits.cap_bytes)
+        stop_reaper(reaper)
+    early = rc == 137 and not over and time.monotonic() - started < limits.seconds
+    return _finish(raw, marker, rc, over, late, name, gone, limits.cap_bytes, early)
 
 
 def hidden_command(module: str) -> str:
     assert HIDDEN_NAME.match(module), module
-    return f"python -m unittest discover -s hidden -p {module} -t ."
+    return f"python -u -m unittest discover -s hidden -p {module} -t ."
 
 
 def hidden_passed(result: RunResult, expected_tests: int) -> bool:
-    """Needs the exact count and a bare OK: sys.exit at import gives rc 0 with nothing run."""
+    """Needs the exact count and a bare OK: sys.exit at import gives rc 0 with nothing run.
+
+    OK is looked for after the last count line, not on the last line, because a correct
+    solution may print something at exit.
+    """
     if result.sandbox_error or result.truncated or result.timed_out or result.returncode != 0:
         return False
-    ran = re.search(r"^Ran (\d+) tests? in ", result.output, re.M)
-    lines = result.output.strip().splitlines()
-    return bool(ran and int(ran.group(1)) == expected_tests and lines[-1] == "OK")
+    ran = list(re.finditer(r"^Ran (\d+) tests? in .*$", result.output, re.M))
+    if not ran or int(ran[-1].group(1)) != expected_tests:
+        return False
+    return "OK" in result.output[ran[-1].end():].splitlines()
 
 
 def copy_allowlisted(scratch: Path, dest: Path, patterns: list[str]) -> list[str]:
@@ -286,6 +324,7 @@ SIGTERM_PROBE = ("import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_
                  "time.sleep(600)\n")
 FLOOD_PROBE = "while True:\n    print('y' * 1024, flush=True)\n"
 EXIT_PROBE = "import sys\nsys.exit(0)\n"
+MEMORY_PROBE = "held = []\nwhile True:\n    held.append(bytearray(8 * 1024 * 1024))\n"
 
 
 def _probe_dir(tests: dict[str, str]) -> tempfile.TemporaryDirectory[str]:
@@ -362,6 +401,13 @@ def _kill_client_after(delay: float) -> ProbeResult:
     return ProbeResult(name, not left, f"{holder[0].container} present={left}")
 
 
+def _memory_kill() -> ProbeResult:
+    with _probe_dir({"probe.py": MEMORY_PROBE}) as tmp:
+        result = run_sandboxed(Path(tmp), "python probe.py", Limits(memory="64m"))
+    ok = result.killed_early and not result.timed_out and result.returncode == 137
+    return ProbeResult("memory_kill_labelled", ok, f"rc={result.returncode} early={result.killed_early}")
+
+
 def containment_probes() -> list[ProbeResult]:
     """Real containers. `task` refuses to start unless every one holds."""
     return [
@@ -371,6 +417,7 @@ def containment_probes() -> list[ProbeResult]:
         _stopped("sleep_stopped", SLEEP_PROBE),
         _stopped("sigterm_ignored_stopped", SIGTERM_PROBE),
         _flood(),
+        _memory_kill(),
         _sys_exit(),
         _symlink(),
         _kill_client_after(0.2),
