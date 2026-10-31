@@ -62,6 +62,15 @@ MSG
     fi
 fi
 
+# The kit's prepare.sh needs the HOST `hf` CLI; roles/ml keeps it in the ML
+# venv, not the system python (docs/decisions.md#ml-lockfile). The DeepSeek
+# recipe's first boot died on exactly this. Do not pip into the system env for it.
+command -v hf >/dev/null 2>&1 || export PATH="${ML_VENV:-$HOME/venvs/ml}/bin:$HOME/.local/bin:$PATH"
+command -v hf >/dev/null 2>&1 || {
+    echo "no 'hf' CLI even with the ML venv on PATH - roles/ml puts it there: make apply TAGS=ml" >&2
+    exit 1
+}
+
 kit_fetch || exit 1
 cd "$KIT_DIR" || exit 1
 
