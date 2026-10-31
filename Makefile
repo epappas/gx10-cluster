@@ -52,7 +52,7 @@ help:  ## Show this help
 # --- Checks that run anywhere (and in CI) ----------------------------------
 
 .PHONY: check
-check: lint syntax smoke render handlers optional-tags workspaces detectors quant-ab checkpoint-config spec-accept indexer-workspace prefill-ladder ws-status storage docs lockfile shellcheck  ## Every offline check (what CI runs)
+check: lint syntax smoke render handlers optional-tags workspaces detectors quant-ab checkpoint-config spec-accept indexer-workspace prefill-ladder agentic-replay ws-status storage docs lockfile shellcheck  ## Every offline check (what CI runs)
 
 .PHONY: deps
 deps:  ## Install the pinned collections
@@ -163,6 +163,13 @@ indexer-workspace:  ## The indexer right-sizing bound and its capping rewrite st
 .PHONY: prefill-ladder
 prefill-ladder:  ## The prefill ladder proves a cold rung cold, and a clean run stays clean
 	@python3 tests/check_prefill_ladder.py
+
+# Workload determinism, the scorers and the file tools run anywhere. The sandbox
+# and sampler sections run for real where docker on devbox and sshd exist, and
+# print NOT PROVEN where they do not. Neither case is a skip counted as a pass.
+.PHONY: agentic-replay
+agentic-replay:  ## Same workload for both models, and model output stays contained
+	@python3 tests/check_agentic_replay.py
 
 .PHONY: ws-status
 ws-status:  ## ws status sees docker-run workspaces, and says so when docker is absent

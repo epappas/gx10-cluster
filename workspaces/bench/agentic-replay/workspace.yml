@@ -1,0 +1,27 @@
+name: agentic-replay
+kind: bench
+engine: any
+provenance: unverified
+summary: Same agentic workload on two models - long tool conversations, recall, cache soak and hidden-test coding tasks
+
+# UNVERIFIED - no full run on this cluster has been recorded. See README,
+# "What has and has not been run".
+#
+# Standard library only, and no model-specific code: request bodies are a
+# function of seed, corpus revision and repo files, apart from `model`.
+# docker is required by `task` alone, on devbox alone, so it is not listed here:
+# replay and soak run from any host that reaches the API.
+requires: {}
+
+images:
+  # Pinned by digest and pre-pulled. `task` never pulls.
+  - python@sha256:94d3426f1def7db4a106a232ac121bfd975393e5dfd40a619b955fae45fe7913
+
+endpoints:
+  - "reads http://127.0.0.1:8888/v1 by default - set BASE_URL or --base-url"
+  - "writes ~/.local/state/gx10-bench/agentic-replay/<label>-<utc>/"
+
+sources:
+  - https://github.com/epappas/gx10-cluster/issues/19
+  - workspaces/bench/quant-quality-ab/quant-ab
+  - workspaces/bench/vllm-prefill-ladder/prefill-ladder
