@@ -60,7 +60,8 @@ this file can make; the default is upstream's (dflash2) and the switch is one
 - The cabled pair (both RoCE rails — this cluster's link matches the kit's
   "address both twins… two rails" requirement exactly, and its rendezvous
   auto-detects them), ssh between them, docker on both.
-- **Head disk ~210 GB**: checkpoint ~176 GB + image ~25 GB. The worker stores
+- **Head disk**: `ws check` asks 179 GB for the two downloads (checkpoint 175.7 GB,
+  DFlash2 2.3 GB). The kit's own gate adds 5 GB and 35 GB for the image. The worker stores
   NO weights by default: `WORKER_WEIGHTS=nfs` makes rank 1 read the head's HF
   cache over the cable (poseidon's 125 GB free cannot hold the tree, and the
   kit's `copy` default asks it to — that is the one place this workspace
