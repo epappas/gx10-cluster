@@ -1,0 +1,12 @@
+START_UTC=2026-10-31T22:58:56.975004+00:00
+REAL_HF=/home/epappas/.local/share/uv/tools/talos/bin/hf; version=1.27.0; HELPER_ONLY=False
+preflight: glm53-flash-tf absent, python:3-alpine cached
+wrapper argv=['/home/epappas/workspace/spacejar/gx10-cluster/.claude/worktrees/agent-a3562b4c1a6e7cf93/workspaces/inference/tensorfold-2node-glm53-flash-exl3/up.sh']; priority nice=19
+PASS callable=check_up_and_down_over_ssh(tmp), actual up.sh/down.sh, fixture is NOT GLM
+loopback SSH executes the original command through actual /usr/bin/zsh before explicit POSIX sh
+startup/load fixture: both container IDs armed before return on both node paths; down stops both
+cleanup: throwaway gx10-guard-test-01e02077daaa absent; replacement IDs=['dd9140781b24d79c83244b41ba28ed5c97865710e50b4623bc95e1ff92d5518a', 'aea78b7e30f4c0f2b88d151405ffb3b8991c3e3a872b291e8bdb17fb435897f6']; guard processes=0
+cleanup: private loopback sshd pid=3863040 exited rc=-9
+cleanup: no live process command line contains the private fixture directory
+END_UTC=2026-10-31T22:59:36.619641+00:00
+elapsed_s=39.64; driver_exit_code=0
