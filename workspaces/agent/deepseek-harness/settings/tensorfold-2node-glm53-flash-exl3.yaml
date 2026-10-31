@@ -1,0 +1,41 @@
+# dsh settings for `tensorfold-2node-glm53-flash-exl3` - port 8902, served as
+# `GLM-5.3-Flash-EXL3`.
+#
+# In THIS file the URL is the LOOPBACK one, valid when the harness runs on the
+# same node as the server. It is the recipe: `use.sh` and `up.sh` rewrite this
+# one line to the endpoint of the node the harness actually runs on, and leave
+# everything else (the env-named key, the id, agent-default-model) as written -
+# so a deployed copy carries the node's address here, not this one.
+#
+# On gb10-homer the endpoint is the head's nordlynx address, NOT 127.0.0.1:
+# odysseus's ufw allows the mesh interface wholesale and allows :8902 from the
+# LAN to nobody, so the mesh is the path that needs no firewall change. See
+# README, "Reaching the server".
+
+llm-pi-ai:
+  providers:
+    gx10:
+      # dsh reads the key from the NAMED ENVIRONMENT VARIABLE, not from this
+      # file. compose.yml sets LOCAL_API_KEY; a local server ignores the value
+      # but the client library refuses to send a request without one.
+      apiKeyEnv: LOCAL_API_KEY
+      api: openai-completions
+      baseURL: http://127.0.0.1:8902/v1
+      models:
+        # The SERVED name - what tensorfold's --name set, NOT the HF repo id.
+        # `curl -s localhost:8902/v1/models` prints exactly this.
+        # UNVERIFIED until booted: taken from the kit's SERVED_NAME at the pinned
+        # commit (scripts/config.sh:91), since nothing is serving on 8902 yet.
+        - id: GLM-5.3-Flash-EXL3
+
+# WITHOUT THIS BLOCK NOTHING ABOVE IS USED. dsh boots with
+# @deepseek-ai/dsh-agent-default-model configured for provider
+# `deepseek-official` / model `deepseek-flash` - DeepSeek's HOSTED API. Defining
+# a provider does not select one, so the harness asks for DEEPSEEK_API_KEY and
+# never touches the cluster. Verified: `--profile headless` fails outright with
+# MISSING_CREDENTIAL until these two lines exist.
+agent-default-model:
+  provider: gx10
+  model: GLM-5.3-Flash-EXL3
+ui-onboarding:
+  welcomeNoticeVersion: 2026-08-13.1

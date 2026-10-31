@@ -180,15 +180,31 @@ logs to a FILE, and its up.sh printed the path when it started. Common ones:
   ~/.local/state/gx10-bench/       vllm-bench-serve"
 }
 
+# A workspace started with `docker run` has no compose project to ask, so the
+# manifest's `container:` names it. Anchored: a bare filter is a substring match,
+# and ws-vllm-2node would also find ws-vllm-2node-extra.
+container_status() {  # $1 = container name -> "Status  Ports" if running
+    docker ps --filter "name=^$1\$" --format '{{.Status}}  {{.Ports}}' 2>/dev/null
+}
+
 cmd_status() {
-    local n d any=0
+    # Without docker nothing can be known, and "no workspace is running" would be a lie.
+    command -v docker >/dev/null || die "docker is not on PATH - cannot tell what is running"
+    docker info >/dev/null 2>&1 || die "docker is not reachable - cannot tell what is running"
+    local n d c line any=0
     for n in $(ws_all); do
         d=$(ws_dir "$n")
-        [[ -f "$d/compose.yml" ]] || continue
-        if [[ -n $(compose "$d" ps -q 2>/dev/null) ]]; then
+        if [[ -f "$d/compose.yml" ]]; then
+            [[ -n $(compose "$d" ps -q 2>/dev/null) ]] || continue
             any=1; printf '%s%s%s\n' "$c_bold" "$n" "$c_off"
             compose "$d" ps --format '  {{.Service}}  {{.Status}}  {{.Ports}}' 2>/dev/null
+            continue
         fi
+        c=$(ws_field "$d/workspace.yml" container)
+        [[ -n $c ]] || continue
+        line=$(container_status "$c")
+        [[ -n $line ]] || continue
+        any=1; printf '%s%s%s\n  %s  %s\n' "$c_bold" "$n" "$c_off" "$c" "$line"
     done
     (( any )) || printf '%sno workspace is running%s\n' "$c_dim" "$c_off"
 }
