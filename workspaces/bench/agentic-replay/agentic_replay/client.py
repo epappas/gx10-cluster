@@ -53,6 +53,11 @@ class Reply:
         return self.completion_tokens / span if span >= MIN_DECODE_SPAN_S else None
 
     @property
+    def ok(self) -> bool:
+        """TensorFold reports some refusals as an error chunk inside a status 200 stream."""
+        return self.status == 200 and not self.error
+
+    @property
     def budget_stop(self) -> bool:
         """A length stop with empty content ran out of budget. It is not a wrong answer."""
         return self.finish_reason == "length" and not self.content
@@ -128,7 +133,10 @@ def parse_stream(lines: Iterable[bytes], reply: Reply, clock: Callable[[], float
         except json.JSONDecodeError:
             reply.error = f"unparseable chunk: {data[:200]}"
             continue
-        _apply_chunk(reply, chunk, clock())
+        try:
+            _apply_chunk(reply, chunk, clock())
+        except (AttributeError, TypeError, KeyError) as exc:
+            reply.error = f"malformed chunk: {type(exc).__name__}: {data[:200]}"
     return False
 
 

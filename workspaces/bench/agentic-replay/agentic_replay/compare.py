@@ -28,6 +28,7 @@ class Result:
     manifest: dict[str, Any]
     summary: dict[str, Any]
     snapshot: dict[str, Any]
+    snapshot_end: dict[str, Any]
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -39,7 +40,8 @@ def load_result(path: Path) -> Result:
     if not manifest.get("workload"):
         raise CompareRefused(f"{path}: no manifest, the run never started its workload")
     return Result(path, manifest, _load_json(path / "summary.json"),
-                  _load_json(path / "snapshot-start.json"))
+                  _load_json(path / "snapshot-start.json"),
+                  _load_json(path / "snapshot-end.json"))
 
 
 def refuse_mismatch(a: Result, b: Result) -> None:
@@ -63,7 +65,8 @@ def window_sizes(snapshot: Any) -> str | None:
     def walk(node: Any) -> None:
         if isinstance(node, dict):
             for key, value in node.items():
-                if WINDOW_KEY.search(key) and isinstance(value, (int, float)):
+                numeric = isinstance(value, (int, float)) and not isinstance(value, bool)
+                if WINDOW_KEY.search(key) and numeric:
                     found.append(f"{key}={value}")
                 walk(value)
         elif isinstance(node, list):
@@ -82,10 +85,11 @@ def _by_key(summary: dict[str, Any]) -> dict[tuple[Any, ...], dict[str, Any]]:
 
 def _step_rows(a: Result, b: Result) -> Iterator[Row]:
     left, right = _by_key(a.summary), _by_key(b.summary)
-    for key in sorted(set(left) | set(right), key=str):
+    for key in sorted(set(left) | set(right), key=lambda k: tuple(x or 0 for x in k)):
         name = "seed {} conv {} step {}".format(*key)
         one, two = left.get(key, {}), right.get(key, {})
-        for field in ("prompt_tokens", "cached_tokens", "ttft_s", "decode_tps", "finish_reason"):
+        for field in ("prompt_tokens", "cached_tokens", "ttft_s", "decode_tps", "finish_reason",
+                      "error"):
             yield f"{name} {field}", one.get(field), two.get(field)
 
 
@@ -149,6 +153,8 @@ def rows(a: Result, b: Result) -> list[Row]:
     head: list[Row] = [
         ("model", a.manifest.get("model"), b.manifest.get("model")),
         ("window", window_sizes(a.snapshot), window_sizes(b.snapshot)),
+        ("window at end", window_sizes(a.snapshot_end), window_sizes(b.snapshot_end)),
+        ("request errors", a.summary.get("request_errors"), b.summary.get("request_errors")),
         ("stopped", _stopped(a), _stopped(b)),
         ("corpus_reused", a.summary.get("corpus_reused"), b.summary.get("corpus_reused")),
         ("soak clean", a.summary.get("clean"), b.summary.get("clean")),

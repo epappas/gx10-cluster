@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import threading
 import time
 from collections.abc import Iterator
@@ -20,6 +21,20 @@ from .workload import (PIECE_BYTES, SYSTEM_PROMPT, Planned, ReplaySpec, Scripted
                        opening, replay_requests, salt_for, seed_probe_body, soak_requests)
 
 REPO = Path(__file__).resolve().parents[4]
+# These kinds exist to find out what a server refuses, so a refusal is their result.
+TOLERATED_ERRORS = {"seed_probe", "response_format", "sampling"}
+
+
+def code_digest() -> str:
+    """Prompts and salts live in the code, so a run names the code it ran."""
+    digest = hashlib.sha256()
+    for path in sorted(Path(__file__).parent.glob("*.py")):
+        digest.update(path.name.encode() + b"\0" + path.read_bytes())
+    return digest.hexdigest()
+
+
+def request_errors(records: list[dict[str, Any]]) -> int:
+    return sum(1 for r in records if r.get("error") and r.get("kind") not in TOLERATED_ERRORS)
 
 
 def open_run(args: argparse.Namespace) -> Run:
@@ -54,12 +69,14 @@ def base_workload(args: argparse.Namespace, corpus: Corpus, seeds: list[int], se
         "mode": args.mode, "seeds": seeds, "corpus_rev": corpus.rev, "corpus_hash": corpus.digest,
         "sampling": sampling_of(args).as_body(), "seed_sent": sent,
         "tools_sha": sha256_of(TOOLS), "system_sha": sha256_of(SYSTEM_PROMPT),
-        "piece_bytes": PIECE_BYTES,
+        "piece_bytes": PIECE_BYTES, "code_sha": code_digest(),
     }
 
 
 def probe_score(probe: Probe, reply: Reply) -> int | str:
     """A reply with no answer in it is neither right nor wrong."""
+    if reply.error or reply.dead:
+        return "error"
     if reply.budget_stop:
         return "budget"
     if reply.tool_calls and not (reply.content or "").strip():
@@ -84,7 +101,7 @@ def annotate(planned: Planned, seed: int, reply: Reply) -> dict[str, Any]:
         record["score"] = probe_score(probe, reply)
     if planned.kind == "response_format":
         answered = "refused" if reply.status else "no answer"
-        record["response_format"] = "served" if reply.status == 200 else answered
+        record["response_format"] = "served" if reply.ok else answered
     return record
 
 
@@ -136,6 +153,7 @@ def replay_summary(run: Run, corpus_reused: bool, stopped: str | None) -> dict[s
     probes = [r for r in records if r["kind"] == "probe"]
     return {
         "stopped": stopped, "corpus_reused": corpus_reused,
+        "request_errors": request_errors(records),
         "requests": request_rows(records), "memory": memory,
         "recall": [{"size_bytes": r["target_bytes"], **r["probe"], "score": r["score"]}
                    for r in probes],
@@ -149,6 +167,10 @@ def corpus_was_reused(corpus: Corpus, size_bytes: int) -> bool:
 
 
 def run_replay(args: argparse.Namespace) -> int:
+    above = [t for t in args.probe_tokens if t > args.target_tokens]
+    if above:
+        print(f"refused: --probe-tokens {above} grow past --target-tokens {args.target_tokens}")
+        return 2
     run = open_run(args)
     snapshot = run.snapshot("start")
     model = discover_model(args, snapshot)
@@ -159,21 +181,22 @@ def run_replay(args: argparse.Namespace) -> int:
     probe = probe_seed(run, args, model, seeds[0])
     if probe.dead:
         return fail(run, f"server unreachable: {probe.error}")
-    sent = probe.status == 200
+    sent = probe.ok
     spec = replay_spec(args)
     run.write_json("manifest.json", {
         "model": model, "base_url": args.base_url,
         "workload": {**base_workload(args, corpus, seeds, sent), "target_bytes": spec.target_bytes,
                      "step_bytes": spec.step_bytes, "probe_bytes": list(spec.probe_bytes),
                      "fact_count": spec.fact_count, "conversations": args.conversations,
-                     "interleave": spec.interleave}})
+                     "interleave": spec.interleave, "response_format": spec.response_format,
+                     "sampling_check": spec.sampling_check}})
     alive = _replay_all(run, args, spec, corpus, model, seeds, sent)
     summary = replay_summary(run, corpus_was_reused(corpus, spec.target_bytes),
                              None if alive else "server died")
     run.snapshot("end")
     run.close(summary)
     print(f"results: {run.path}")
-    return 0 if alive else 1
+    return 0 if alive and not summary["request_errors"] else 1
 
 
 def _replay_all(
@@ -225,7 +248,7 @@ def run_soak(args: argparse.Namespace) -> int:
     probe = probe_seed(run, args, model, seed)
     if probe.dead:
         return fail(run, f"server unreachable: {probe.error}")
-    sent = probe.status == 200
+    sent = probe.ok
     spec = SoakSpec(token_worth(args.short_tokens), token_worth(args.long_tokens),
                     args.long_every, sampling_of(args))
     run.write_json("manifest.json", {"model": model, "base_url": args.base_url, "workload": {
@@ -236,15 +259,22 @@ def run_soak(args: argparse.Namespace) -> int:
     lock, dead = threading.Lock(), threading.Event()
     deadline = time.monotonic() + args.duration
     with ThreadPoolExecutor(args.streams) as pool:
-        for _ in range(args.streams):
-            pool.submit(_soak_worker, run, args, requests, lock, deadline, seed, dead)
+        workers = [pool.submit(_soak_worker, run, args, requests, lock, deadline, seed, dead)
+                   for _ in range(args.streams)]
+    crashed = [repr(w.exception()) for w in workers if w.exception()]
+    return _finish_soak(run, dead.is_set(), crashed)
+
+
+def _finish_soak(run: Run, died: bool, crashed: list[str]) -> int:
     memory = run.memory_summary()
     run.snapshot("end")
-    run.close({"stopped": "server died" if dead.is_set() else None, "memory": memory,
-               "per_minute": per_minute(run.records), "requests": request_rows(run.records),
-               "clean": not dead.is_set()})
+    errors = request_errors(run.records)
+    clean = not died and not crashed and not errors
+    stopped = "server died" if died else (f"worker failed: {crashed[0]}" if crashed else None)
+    run.close({"stopped": stopped, "memory": memory, "per_minute": per_minute(run.records),
+               "requests": request_rows(run.records), "request_errors": errors, "clean": clean})
     print(f"results: {run.path}")
-    return 1 if dead.is_set() else 0
+    return 0 if clean else 1
 
 
 def task_prefix(corpus: Corpus, seed: int, brief: str, prefix_bytes: int) -> tuple[ScriptedHistory, str]:

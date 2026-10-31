@@ -18,10 +18,15 @@ WORDS = ("CORAL", "INDIGO", "SAFFRON", "UMBER", "COBALT", "OCHRE", "SIENNA", "VI
 DEPTHS = (0.02, 0.10, 0.25, 0.45, 0.70, 0.95)
 
 CODE = re.compile(r"\b\d{4}-[A-Za-z]+\b")
+LOOSE_CODE = re.compile(r"\b\d{4}[- ][A-Z]{3,}\b")
+LIST_MARKER = re.compile(r"^\s*\d+[.)]\s+", re.M)
+DEPOT_COUNT = re.compile(r"\b\d+\s+depots?\b", re.I)
+WHOLE_DECIMAL = re.compile(r"\b(\d+)\.0+\b")
 NUMBER = re.compile(r"(?<![\w-])\d+(?![\w-])")
 ABSENT_PHRASES = (
     "not present", "not mentioned", "not recorded", "not found", "no record",
     "does not appear", "is not listed", "no such depot", "no information",
+    f"no {ABSENT_LABEL}", "no access code",
 )
 
 
@@ -98,13 +103,14 @@ def score(probe: Probe, reply: str) -> int:
 
 def _score_absent(text: str) -> int:
     lower = text.lower()
-    if CODE.search(text):
+    if CODE.search(text) or LOOSE_CODE.search(text):
         return 0
     return int(any(p in lower for p in ABSENT_PHRASES))
 
 
 def _score_combo(probe: Probe, text: str) -> int:
-    found = set(NUMBER.findall(text))
+    plain = DEPOT_COUNT.sub("", LIST_MARKER.sub("", WHOLE_DECIMAL.sub(r"\1", text)))
+    found = set(NUMBER.findall(plain))
     if probe.expected not in found:
         return 0
     return int(found <= {probe.expected, *probe.allowed})

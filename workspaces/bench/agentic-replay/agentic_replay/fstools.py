@@ -23,6 +23,14 @@ class ToolError(Exception):
     """Goes back to the model as a tool result."""
 
 
+def cap_text(text: str, limit: int) -> str:
+    """One bound on what any tool returns, with a marker when it cut."""
+    data = text.encode("utf-8", "replace")
+    if len(data) <= limit:
+        return text
+    return data[:limit].decode("utf-8", "ignore") + f"\n[truncated at {limit} bytes]\n"
+
+
 def _resolve(root: Path, path: str) -> str:
     if not isinstance(path, str) or not path or "\0" in path:
         raise ToolError("invalid path")
@@ -98,7 +106,9 @@ def list_dir(root: Path, path: str) -> str:
         raise ToolError("not a directory")
     with os.scandir(resolved) as entries:
         names = sorted(e.name + ("/" if e.is_dir(follow_symlinks=False) else "") for e in entries)
-    return "\n".join(names[:MAX_LIST_ENTRIES])
+    extra = len(names) - MAX_LIST_ENTRIES
+    marker = [f"[truncated: {extra} more entries]"] if extra > 0 else []
+    return "\n".join(names[:MAX_LIST_ENTRIES] + marker)
 
 
 def _lstat(path: str) -> os.stat_result:

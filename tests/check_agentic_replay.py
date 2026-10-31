@@ -17,6 +17,7 @@ import sys
 
 sys.dont_write_bytecode = True
 
+import argparse
 import json
 import os
 import shutil
@@ -36,6 +37,7 @@ from agentic_replay import (compare, fstools, modes, recall, sampler, sandbox,  
 from agentic_replay.client import Reply, parse_stream  # noqa: E402
 from agentic_replay.core import Sampling, render_body, token_worth  # noqa: E402
 from agentic_replay.corpus import CorpusError, iter_pieces, load_corpus  # noqa: E402
+from agentic_replay.results import Run  # noqa: E402
 from agentic_replay.workload import (ReplaySpec, SoakSpec, replay_requests,  # noqa: E402
                                      soak_requests)
 
@@ -142,6 +144,16 @@ def check_ac2() -> None:
         verdict = tooldefs.check_call(call, tools)
         assert not verdict.valid and verdict.reason == reason, (reason, verdict)
     assert not tooldefs.check_call(tool_call("read_file", '{"path":"a","offset":true}'), tools).valid
+    hostile = {"unparseable_arguments": [
+        '{"path":"a","offset":' + "9" * 5000 + "}", "[" * 200000]}
+    for reason, payloads in hostile.items():
+        for payload in payloads:
+            assert tooldefs.check_call(tool_call("read_file", payload), tools).reason == reason
+    assert tooldefs.check_call(tool_call("run_tests", ""), tools).valid, "empty means no arguments"
+    assert tooldefs.check_call(tool_call("read_file", ""), tools).reason == "truncated_json"
+    started = time.monotonic()
+    assert not tooldefs.syntax_in_content("<" + " " * 160000 + "x")
+    assert time.monotonic() - started < 1, "the syntax scan must stay linear on model content"
     leaked = tooldefs.check_reply([], '<tool_call>{"name":"read_file"}</tool_call>', tools)
     assert [v.reason for v in leaked] == ["syntax_in_content"]
     assert tooldefs.check_reply([], "Done, all tests pass.", tools) == []
@@ -218,6 +230,7 @@ def assert_hostile_arguments_stay_tool_errors(scratch: Path) -> None:
         ("write_file", {"path": "lone.txt", "content": "\ud83d"}),
         ("read_file", {"path": "\ud83d"}),
         ("read_file", {"path": "x" * 5000}),
+        ("write_file", {"path": "/".join(["d"] * 1100) + "/f", "content": "x"}),
     ]
     for name, arguments in calls:
         result = task_mode.execute(verdict(True, "ok", name, arguments), scratch)
@@ -252,6 +265,12 @@ def check_ac5() -> None:
         assert "wrote" in fstools.write_file(scratch, "pkg/new/b.txt", "hello")
         assert (scratch / "pkg/new/b.txt").read_text() == "hello"
         assert_hostile_arguments_stay_tool_errors(scratch)
+        for n in range(fstools.MAX_LIST_ENTRIES + 5):
+            (scratch / "pkg" / f"n{n}").touch()
+        assert "[truncated: 7 more entries]" in fstools.list_dir(scratch, "pkg")
+        for n in range(fstools.MAX_LIST_ENTRIES + 5):
+            (scratch / "pkg" / f"n{n}").unlink()
+        assert "[truncated at 10 bytes]" in fstools.cap_text("y" * 50, 10)
         whole = fstools.grep(scratch, "secret", ".")
         assert "outside" not in whole and whole.count("\n") == 0, whole
         try:
@@ -317,6 +336,11 @@ def check_ac7() -> None:
     assert recall.score(combo, f"{combo.allowed[0]} + {combo.allowed[1]} = {combo.expected}") == 1
     assert recall.score(combo, f"{combo.expected} or 1") == 0
     assert recall.score(combo, "1") == 0
+    assert recall.score(combo, f"The 2 depots hold {combo.expected} crates in total.") == 1
+    assert recall.score(combo, f"1. first depot\n2. second depot\nTotal {combo.expected}") == 1
+    assert recall.score(combo, f"{combo.expected}.0") == 1
+    assert recall.score(absent, "7712 CORAL, though not found elsewhere") == 0
+    assert recall.score(absent, "There is no bittern depot in the audit notes.") == 1
     assert recall.make_facts(7, 1000, 3) == facts and recall.make_facts(8, 1000, 3) != facts
 
 
@@ -348,6 +372,73 @@ def check_probe_score_labels() -> None:
     assert modes.probe_score(probe, called) == "tool_call"
     assert modes.probe_score(probe, Reply(content="NOT PRESENT", finish_reason="stop")) == 1
     assert compare._recall_cell([1, 0, "tool_call", "budget"]) == "1/2 budget 1 tool_call 1"
+
+
+def check_failures_are_reported() -> None:
+    """Hand-built replies and records: pure reporting logic, no server involved."""
+    probe = recall.probes_at(1000, recall.make_facts(7, 1000, 1))[-1]
+    assert modes.probe_score(probe, Reply(status=500, error="boom")) == "error"
+    assert modes.probe_score(probe, Reply(error="reset", dead=True)) == "error"
+    assert compare._recall_cell(["error", 1]) == "1/1 error 1"
+    assert not Reply(status=200, error="refused inside the stream").ok
+    assert Reply(status=200).ok and not Reply(status=400).ok
+    planned = next(p for p in replay_requests(spec(), load_corpus(REPO, "HEAD"), "m", 11, 0, True)
+                   if p.kind == "response_format")
+    refused = modes.annotate(planned, 11, Reply(status=200, error="no"))
+    assert refused["response_format"] == "refused", "an error chunk at 200 is not served"
+    records = [{"kind": "seed_probe", "error": "x"}, {"kind": "sampling", "error": "x"},
+               {"kind": "step", "error": None}]
+    assert modes.request_errors(records) == 0, "probes exist to be refused"
+    assert modes.request_errors([*records, {"kind": "short", "error": "HTTP 500"}]) == 1
+    with tempfile.TemporaryDirectory() as tmp:
+        run = Run(Path(tmp), "http://127.0.0.1:1/v1", "")
+        run.add_request({"kind": "short", "error": "HTTP 500", "started": 1.0, "ended": 2.0})
+        assert modes._finish_soak(run, False, []) == 1, "every request failed and it exited 0"
+        summary = json.loads(Path(tmp, "summary.json").read_text())
+        assert summary["clean"] is False and summary["request_errors"] == 1
+
+
+def check_task_bounds() -> None:
+    """Real code on a real scratch. The Reply is hand-built and no request is sent."""
+    fixture = task_mode.load_fixture()
+    with tempfile.TemporaryDirectory() as tmp:
+        scratch, run_dir = Path(tmp, "s"), Path(tmp, "r")
+        run_dir.mkdir()
+        task_mode.prepare_scratch(scratch)
+        run = Run(run_dir, "http://127.0.0.1:1/v1", "")
+        args = argparse.Namespace(max_turns=5)
+        session = task_mode.Session(args, run, "m", 1, None, scratch, "s", [], 0,
+                                    time.monotonic() + 60)
+        calls = [tool_call("read_file", '{"path":"ledger/money.py"}') for _ in range(400)]
+        tally = {"repeated": 0, "invalid": 0, "refused": 0}
+        task_mode._answer_calls(session, Reply(tool_calls=calls), set(), tally)
+        assert len(session.messages) == 400, "every call needs an answer"
+        assert tally["refused"] >= 400 - task_mode.MAX_CALLS_PER_REPLY
+        size = len(json.dumps(session.messages))
+        assert size < task_mode.MAX_RESULT_BYTES_PER_REPLY + 400 * 200, size
+        session.messages.clear()
+        session.deadline = time.monotonic() - 1
+        session.results.clear()
+        task_mode._run_tasks(session, fixture, fixture.tasks)
+        table = task_mode.task_table(fixture, session.results)
+        assert session.stopped == "hard timeout"
+        assert [row["status"] for row in table] == ["missing"] * len(fixture.tasks)
+        assert all(row["status_at_end"] == "missing" for row in table)
+
+
+def check_compare_covers_the_workload() -> None:
+    assert len(modes.code_digest()) == 64
+    source = (TOOL_DIR / "agentic_replay" / "modes.py").read_text()
+    for key in ('"response_format": spec.response_format', '"sampling_check": spec.sampling_check',
+                '"code_sha": code_digest()'):
+        assert key in source, key
+    with tempfile.TemporaryDirectory() as tmp:
+        done = subprocess.run(
+            [sys.executable, "-B", str(CLI), "replay", "--corpus-rev", "HEAD",
+             "--target-tokens", "20000", "--results-root", tmp],
+            capture_output=True, text=True, timeout=30)
+        assert done.returncode == 2 and "grow past" in done.stdout, done.stdout
+        assert not list(Path(tmp).iterdir()), "a refused run must touch nothing"
 
 
 def check_soak_salts(corpus) -> None:
@@ -393,6 +484,10 @@ def check_parser() -> None:
     assert json.loads(reply.tool_calls[0]["function"]["arguments"]) == {"path": "a"}
     assert (reply.prompt_tokens, reply.cached_tokens, reply.completion_tokens) == (9, 3, 4)
     assert reply.first == 1.0 + 1 and reply.decode_tps is not None
+    broken = Reply()
+    parse_stream([b'data: [1, 2]\n', b'data: {"choices":[{"delta":{"tool_calls":'
+                  b'[{"index":null}]}}]}\n', b"data: [DONE]\n"], broken, lambda: 1.0)
+    assert broken.error and "malformed chunk" in broken.error
     message = reply.assistant_message()
     assert message["reasoning_content"] == "think" and message["tool_calls"] == reply.tool_calls
     assert parsed(SAMPLE_B).cached_tokens is None, "absent must stay absent, not 0"
@@ -425,6 +520,40 @@ sandbox.run_sandboxed(Path({scratch!r}), "python probe.py", sandbox.Limits(secon
 """
 
 
+def check_sweep() -> None:
+    """A created container is what a killed tool leaves. Young ones are left alone."""
+    name = f"agentic-replay-sweeptest-{os.getpid()}"
+    subprocess.run(["docker", "create", "--name", name, sandbox.IMAGE, "true"],
+                   check=True, capture_output=True)
+    try:
+        assert name not in sandbox.sweep_stale(), "a fresh container must survive the sweep"
+        assert name in sandbox.sweep_stale(max_age_s=0), "a stale container must go"
+        assert not sandbox._exists(name)
+    finally:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+
+
+def check_exists_fails_closed() -> None:
+    saved = os.environ.get("DOCKER_HOST")
+    os.environ["DOCKER_HOST"] = "unix:///nonexistent/docker.sock"
+    try:
+        sandbox._exists("anything")
+    except subprocess.CalledProcessError:
+        return
+    finally:
+        os.environ.pop("DOCKER_HOST")
+        if saved:
+            os.environ["DOCKER_HOST"] = saved
+    raise AssertionError("an unreachable daemon read as a container that has gone")
+
+
+def is_running(name: str) -> bool:
+    """Running, not merely created: a created container has nothing to outlive the tool."""
+    done = subprocess.run(["docker", "ps", "-q", "--filter", f"name=^{name}$", "--filter",
+                           "status=running"], capture_output=True, text=True, timeout=30, check=True)
+    return bool(done.stdout.strip())
+
+
 def check_tool_killed() -> None:
     """The tool itself dies: the container's own `timeout` must still end it."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -435,7 +564,7 @@ def check_tool_killed() -> None:
         assert tool.stdout is not None
         name = tool.stdout.readline().strip()
         assert name, "the run never started"
-        assert wait_for(lambda: sandbox._exists(name), 30), "the container never started"
+        assert wait_for(lambda: is_running(name), 30), "the container never started"
         os.killpg(tool.pid, signal.SIGKILL)
         tool.wait()
         assert wait_for(lambda: not sandbox._exists(name), 30), "container outlived the killed tool"
@@ -463,6 +592,8 @@ def check_ac4() -> str:
         return "AC4 NOT PROVEN"
     failed = [p for p in sandbox.containment_probes() if not p.ok]
     assert not failed, failed
+    check_sweep()
+    check_exists_fails_closed()
     check_tool_killed()
     check_reference_in_sandbox()
     return "AC4 containment held on live docker"
@@ -599,6 +730,9 @@ def main() -> int:
     check_ac6()
     check_ac7()
     check_sampling_verdict()
+    check_failures_are_reported()
+    check_task_bounds()
+    check_compare_covers_the_workload()
     check_probe_score_labels()
     check_soak_salts(corpus)
     check_closed_port()

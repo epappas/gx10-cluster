@@ -58,6 +58,8 @@ says `no guard log`, never `no kills`.
 - **`not_cold`** on a first step means the salt did not defeat the cache.
 - **`budget`**: a length stop with empty content. **`tool_call`**: a recall probe
   answered with a tool call. Neither is a wrong answer, and neither is in the fraction.
+- **`error`** in a recall row: the probe failed, so it is counted beside the fraction.
+  A task with no reply at all is `missing`, not `fail`.
 - **`missing`** is never 0. A reply delivered in one burst has no decode rate, and its
   decode time sits inside `ttft_s`. Tool-call replies did this on the DeepSeek server.
 - **A short `--max-turns` scores the budget, not the model.**
@@ -84,6 +86,10 @@ Model code runs only in a container, and only on devbox.
 same stream. Code written to forge `Ran N tests` and `OK` would pass. The check stops
 accidents such as `sys.exit` at import, not deliberate cheating. Read the scratch copy
 in the run directory if a score looks wrong.
+
+**Known limit:** if the whole tool dies in the gap between `docker create` and
+`docker start`, one `Created` container stays behind. It has no process in it, and
+the next `task` start removes it once it is an hour old.
 
 Pull the image once, because `task` never pulls:
 
@@ -114,4 +120,6 @@ docker pull python@sha256:94d3426f1def7db4a106a232ac121bfd975393e5dfd40a619b955f
 | `task refused: containment not proven` | A probe failed | Fix it. There is no bypass |
 | `refused: different workloads` | Seeds, corpus or sampling differ | Rerun with the same flags |
 | Exit 1, `stopped: server died` | The server went away | Partial results are kept. Check the guard log |
+| Exit 1, `request_errors` above 0 | The server refused requests | Each is in `requests.jsonl`. A soak with any error is not clean |
+| `refused: --probe-tokens` | A probe size is past `--target-tokens` | Lower the probes. A small run must stay small |
 | Error text in a stream with status 200 | Server-side refusal | Recorded as `error`. `top_k=0` came back this way on TensorFold |

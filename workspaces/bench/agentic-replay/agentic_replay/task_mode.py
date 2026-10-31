@@ -28,6 +28,9 @@ from .workload import Planned
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "ledger"
 NUDGE = "Continue with the task. Call tools through the API, not in plain text."
+# --max-turns and the request size mean nothing unless one reply is bounded too.
+MAX_CALLS_PER_REPLY = 16
+MAX_RESULT_BYTES_PER_REPLY = 128 * 1024
 
 
 class SandboxFailure(Exception):
@@ -71,12 +74,12 @@ def execute(verdict: CallVerdict, scratch: Path) -> str:
             return fstools.list_dir(scratch, args["path"])
         if verdict.name == "grep":
             return fstools.grep(scratch, args["pattern"], args.get("path", "."))
-    except (fstools.ToolError, OSError, ValueError, OverflowError) as exc:
+    except (fstools.ToolError, OSError, ValueError, OverflowError, RecursionError) as exc:
         return f"tool error: {exc}"
     result = sandbox.run_sandboxed(scratch, sandbox.VISIBLE_TESTS)
     if result.sandbox_error:
         raise SandboxFailure(result.sandbox_error)
-    return result.output
+    return result.output + ("\n[run_tests timed out]\n" if result.timed_out else "")
 
 
 @dataclass
@@ -96,17 +99,34 @@ class Session:
     results: list[dict[str, Any]] = field(default_factory=list)
 
 
+def _refusal(session: Session, index: int, spent: int) -> str | None:
+    if index >= MAX_CALLS_PER_REPLY:
+        return "too many calls in one reply"
+    if spent >= MAX_RESULT_BYTES_PER_REPLY:
+        return "too much tool output in one reply"
+    if time.monotonic() >= session.deadline:
+        return "hard timeout"
+    return None
+
+
 def _answer_calls(session: Session, reply: Reply, seen: set[str], tally: dict[str, int]) -> None:
-    for call in reply.tool_calls:
+    """Every call gets an answer, because the next request must pair them all."""
+    spent = 0
+    for index, call in enumerate(reply.tool_calls):
         verdict = check_call(call, TOOLS)
         key = canonical_bytes([verdict.name, call.get("function", {}).get("arguments")]).decode()
         tally["repeated"] += 1 if key in seen else 0
         seen.add(key)
-        if verdict.valid:
-            content = execute(verdict, session.scratch)
+        refusal = _refusal(session, index, spent)
+        if refusal:
+            tally["refused"] += 1
+            content = f"tool error: {refusal}"
+        elif verdict.valid:
+            content = fstools.cap_text(execute(verdict, session.scratch), sandbox.OUTPUT_CAP)
         else:
             tally["invalid"] += 1
             content = f"tool error: invalid call ({verdict.reason})"
+        spent += len(content.encode("utf-8", "replace"))
         session.messages.append(
             {"role": "tool", "tool_call_id": call.get("id"), "content": content})
 
@@ -126,7 +146,7 @@ def _turn(session: Session, task_id: int) -> Reply:
 def _attempt(session: Session, task: dict[str, Any]) -> dict[str, Any]:
     """Limited by turns, not wall time, so speed does not contaminate quality."""
     started = time.monotonic()
-    tally = {"turns": 0, "invalid": 0, "repeated": 0}
+    tally = {"turns": 0, "answered": 0, "invalid": 0, "repeated": 0, "refused": 0}
     seen: set[str] = set()
     prompt_tokens: int | None = None
     session.messages.append({"role": "user", "content": task["prompt"]})
@@ -141,6 +161,7 @@ def _attempt(session: Session, task: dict[str, Any]) -> dict[str, Any]:
             late = time.monotonic() >= session.deadline
             session.stopped = "hard timeout" if late else f"server error: {reply.error}"
             break
+        tally["answered"] += 1
         session.messages.append(reply.assistant_message())
         if reply.tool_calls:
             _answer_calls(session, reply, seen, tally)
@@ -171,6 +192,11 @@ def _run_tasks(session: Session, fixture: Fixture, tasks: list[dict[str, Any]]) 
     results = session.results
     for number, task in enumerate(tasks, 1):
         attempt = _attempt(session, task)
+        if not attempt["answered"]:  # the model never replied, so nothing was attempted
+            results.append({**attempt, "status": "missing"})
+            session.run.write_json(f"tasks-{session.seed}.json", results)
+            session.stopped = session.stopped or "no reply"
+            return
         scores = score_through(session, fixture, number)
         attempt.update(status=scores[task["id"]], hidden_after=scores)
         results.append(attempt)
@@ -182,7 +208,8 @@ def _run_tasks(session: Session, fixture: Fixture, tasks: list[dict[str, Any]]) 
 def task_table(fixture: Fixture, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Unattempted tasks are missing, not failed."""
     done = {r["id"]: r for r in results}
-    last = results[-1]["hidden_after"] if results else {}
+    scored = [r["hidden_after"] for r in results if "hidden_after" in r]
+    last = scored[-1] if scored else {}
     table = []
     for task in fixture.tasks:
         row = done.get(task["id"], {"id": task["id"], "title": task["title"], "status": "missing"})
@@ -203,7 +230,7 @@ def _one_repeat(
     tasks = fixture.tasks[:args.task_limit] if args.task_limit else fixture.tasks
     try:
         _run_tasks(session, fixture, tasks)
-    except (SandboxFailure, subprocess.TimeoutExpired) as exc:
+    except (SandboxFailure, subprocess.SubprocessError) as exc:
         session.stopped = f"sandbox error: {exc}"
     return {"seed": seed, "stopped": session.stopped, "prefix_bytes": history.grown,
             "tasks": task_table(fixture, session.results)}
@@ -236,13 +263,17 @@ def run_task(args: argparse.Namespace) -> int:
     probe = probe_seed(run, args, model, seeds[0])
     if probe.dead:
         return fail(run, f"server unreachable: {probe.error}")
-    sent = probe.status == 200
+    sent = probe.ok
     run.write_json("manifest.json", {"model": model, "base_url": args.base_url, "workload": {
         **base_workload(args, corpus, seeds, sent), "fixture_sha": fixture_digest(),
         "prefix_bytes": token_worth(args.prefix_tokens), "max_turns": args.max_turns,
         "task_limit": args.task_limit, "hard_timeout_s": args.hard_timeout}})
     deadline = time.monotonic() + args.hard_timeout
-    repeats = [_one_repeat(args, run, fixture, corpus, model, s, sent, deadline) for s in seeds]
+    repeats: list[dict[str, Any]] = []
+    for seed in seeds:
+        repeats.append(_one_repeat(args, run, fixture, corpus, model, seed, sent, deadline))
+        if repeats[-1]["stopped"]:  # unrun repeats stay absent, so compare prints missing
+            break
     memory = run.memory_summary()
     run.snapshot("end")
     stopped = next((r["stopped"] for r in repeats if r["stopped"]), None)

@@ -22,6 +22,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import fstools
@@ -31,6 +32,7 @@ ALLOWED_HOST = "devbox"
 OUTPUT_CAP = 64 * 1024
 TERM_GRACE_S = 2
 HOST_GRACE_S = 15
+STALE_AFTER_S = 3600.0
 CREATE_TIMEOUT_S = 60
 GONE_WAIT_S = 15
 LATE_START_WATCH_S = 3
@@ -109,7 +111,27 @@ def _docker_quiet(*args: str) -> str:
 
 
 def _exists(name: str) -> bool:
-    return bool(_docker_quiet("ps", "-aq", "--filter", f"name=^{name}$"))
+    """Fails closed: an unreachable daemon must not read as a container that has gone."""
+    done = subprocess.run(["docker", "ps", "-aq", "--filter", f"name=^{name}$"],
+                          capture_output=True, timeout=30, check=True)
+    return bool(done.stdout.strip())
+
+
+def sweep_stale(max_age_s: float = STALE_AFTER_S) -> list[str]:
+    """Removes what a killed tool left: a created container, or one whose timeout was stopped."""
+    done = subprocess.run(
+        ["docker", "ps", "-a", "--filter", "name=^agentic-replay-",
+         "--format", "{{.Names}}\t{{.CreatedAt}}"],
+        capture_output=True, text=True, timeout=30, check=True)
+    now = datetime.now(timezone.utc)
+    removed: list[str] = []
+    for line in done.stdout.splitlines():
+        name, created = line.split("\t", 1)
+        stamp = datetime.strptime(" ".join(created.split()[:3]), "%Y-%m-%d %H:%M:%S %z")
+        if (now - stamp).total_seconds() >= max_age_s:
+            _docker_quiet("rm", "-f", name)
+            removed.append(name)
+    return removed
 
 
 def _stop_and_confirm(name: str) -> bool:
@@ -197,7 +219,7 @@ def copy_allowlisted(scratch: Path, dest: Path, patterns: list[str]) -> list[str
     """Regular files only, read through the same checks as the file tools."""
     copied: list[str] = []
     for pattern in patterns:
-        for found in sorted(glob.glob(str(scratch / pattern))):
+        for found in sorted(glob.glob(str(scratch / pattern), recursive=True)):
             relative = os.path.relpath(found, scratch)
             if os.path.islink(found) or not stat.S_ISREG(os.lstat(found).st_mode):
                 continue
@@ -230,6 +252,7 @@ def require_host() -> None:
     done = subprocess.run(["docker", "image", "inspect", IMAGE], capture_output=True)
     if done.returncode != 0:
         raise SandboxRefused(f"image not pulled: docker pull {IMAGE}")
+    sweep_stale()
 
 
 @dataclass(frozen=True)

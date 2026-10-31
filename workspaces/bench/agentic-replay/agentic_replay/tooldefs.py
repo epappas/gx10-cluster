@@ -38,8 +38,9 @@ TOOLS: list[dict[str, Any]] = [
 
 # Tool syntax leaked into plain text. A list of shapes, not a per-model branch.
 CONTENT_SYNTAX = re.compile(
-    r"<\s*/?\s*tool_call|<\s*function\s*=|<\|\s*tool|<｜[^｜]*tool|<\s*\|?\s*DSML"
-    r"|\[TOOL_CALLS\]|\"tool_calls\"\s*:|\"arguments\"\s*:\s*[\"{]",
+    r"<\s{0,8}/?\s{0,8}tool_call|<\s{0,8}function\s{0,8}=|<\|\s{0,8}tool|<｜[^｜]{0,64}tool"
+    r"|<\s{0,8}\|?\s{0,8}DSML|\[TOOL_CALLS\]|\"tool_calls\"\s{0,8}:"
+    r"|\"arguments\"\s{0,8}:\s{0,8}[\"{]",
 )
 
 
@@ -67,13 +68,18 @@ def check_call(call: dict[str, Any], tools: list[dict[str, Any]]) -> CallVerdict
     schemas = _schemas(tools)
     if name not in schemas:
         return CallVerdict(False, "unknown_tool", name)
+    schema = schemas[name]
+    raw = function.get("arguments") or ""
+    if not raw.strip() and not schema["required"]:
+        return CallVerdict(True, "ok", name, {})
     try:
-        args = json.loads(function.get("arguments") or "")
+        args = json.loads(raw)
     except json.JSONDecodeError:
         return CallVerdict(False, "truncated_json", name)
+    except (ValueError, RecursionError):
+        return CallVerdict(False, "unparseable_arguments", name)
     if not isinstance(args, dict):
         return CallVerdict(False, "arguments_not_object", name)
-    schema = schemas[name]
     for key in schema["required"]:
         if key not in args:
             return CallVerdict(False, "missing_argument", name)
