@@ -111,19 +111,25 @@ its README says exhaustion tends to freeze the machine. This repo-owned
 `ws up` arms both startup supervisors **before** calling `start.sh`, without
 changing its arguments or exported environment. It refuses to call `start.sh`
 if either handshake fails. The handshake requires a successful, bounded Docker
-inspection and an explicit `supervisor started` log record, not merely a live
-Python PID. While preparation/loading/retries run, each supervisor discovers
+inspection, an explicit `supervisor started` log record and acknowledgement of
+any current container ID, not merely a live Python PID. A successor is acknowledged
+before recorded predecessor PIDs are retired; a failed successor leaves them alone. While preparation/loading/retries run, each supervisor discovers
 the named container and re-arms for each replacement ID. The startup wait is
 bounded to six hours; an already active guard continues beyond that limit.
-When `start.sh` returns, `ws up` ends startup discovery and checks both ranks'
-current IDs against the guard status. A failing `start.sh` keeps its exit code;
-a guard failure makes an otherwise successful start fail explicitly.
+When `start.sh` returns, `ws up` acknowledges both ranks' current IDs before
+ending discovery; an idle supervisor makes a final Docker inspection before
+exiting. An unconfirmed handoff leaves discovery armed and reports failure.
+A failing `start.sh` keeps its exit code; a guard failure makes an otherwise
+successful start fail explicitly.
 
-On interruption, `ws up` signals `start.sh`, ends startup discovery, reports the
-guard state, and exits 130/143. Existing guarded containers are not silently
-left without a monitor. `ws down` stops the guards after the ranks. A steady
-state guard exits when its container stops or is replaced. Per-launch ready,
-status and startup files live under the cache, but never lock out a restart.
+On interruption, `ws up` signals the dedicated local launch process group
+(TERM, then KILL after up to two seconds), reports guard state and exits 130/143.
+Local termination cannot prove cancellation of accepted remote or daemon-side
+launches, so discovery stays armed within its existing six-hour startup bound.
+A late container can therefore still be discovered; there is no claim that
+killing an SSH/Docker client cancels its remote work. `ws down` stops the guards
+after the ranks. Per-launch ready, status and startup files live under the cache,
+but never lock out a restart.
 
 **Use `ws up <name> restart`, not the kit's `./start.sh restart`.** A manual
 kit restart bypasses startup supervision: old guards exit with the old IDs and

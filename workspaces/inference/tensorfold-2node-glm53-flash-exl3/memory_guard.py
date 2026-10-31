@@ -205,12 +205,28 @@ def supervising(args: argparse.Namespace, deadline: float) -> bool:
 def supervise(args: argparse.Namespace, log: int, current: str | None) -> None:
     deadline = time.monotonic() + STARTUP_MAX_S
     delay = SAMPLE_S
+    final_checked = False
     while True:
         if current:
             run_rank(args, current, log)
         status(args, "waiting")
         if not supervising(args, deadline):
-            log_line(log, "startup supervision finished; no active guarded container")
+            if final_checked or args.startup_file is None:
+                log_line(log, "startup supervision finished; no active guarded container")
+                return
+            # A replacement may have appeared between the shell's ack and disarm.
+            try:
+                current = running_id(args.container)
+            except DockerUnavailable as exc:
+                log_line(log, f"final handoff unconfirmed; discovery retained: {exc}")
+                if args.startup_file:
+                    args.startup_file.touch()
+                time.sleep(RETRY_MAX_S)
+                continue
+            final_checked = True
+            if current:
+                continue
+            log_line(log, "startup supervision finished after final inspection")
             return
         time.sleep(delay)
         try:

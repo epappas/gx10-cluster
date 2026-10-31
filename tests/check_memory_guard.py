@@ -79,6 +79,15 @@ set -eu
 printf '%s\\n' "$@" > "$FIXTURE_OUT/argv"
 env > "$FIXTURE_OUT/env"
 [ "${DRY_RUN:-0}" != 1 ] || exit 0
+if [ -n "${FIXTURE_DELAYED_SCRIPT:-}" ]; then
+    docker create --name "$CONTAINER_NAME" --network none "$FIXTURE_IMAGE" sleep 300 >/dev/null
+    ssh -F "$FIXTURE_SSH_CONFIG" loopback-node "setsid sh '$FIXTURE_DELAYED_SCRIPT' '$FIXTURE_OUT' '$CONTAINER_NAME' </dev/null >'$FIXTURE_OUT/remote-launch.log' 2>&1 & echo \\$!" > "$FIXTURE_OUT/remote-launch.pid"
+    sleep 60 &
+    printf '%s\\n' "$!" > "$FIXTURE_OUT/launch-child.pid"
+    touch "$FIXTURE_OUT/launch-inflight"
+    wait
+    exit 0
+fi
 if [ -z "${FIXTURE_NO_CONTAINER:-}" ]; then
     rounds=1
     [ -z "${FIXTURE_REPLACE:-}" ] || rounds=2
@@ -526,6 +535,7 @@ def check_startup_interrupted(tmp: Path) -> None:
         stdout, stderr = process.communicate(timeout=30)
         assert process.returncode == 143, (stdout, stderr)
         assert "startup interrupted" in stderr and "guarding container id=" in stdout, (stdout, stderr)
+        assert "cancellation unconfirmed; discovery retained" in stderr, stderr
         assert guards_of(name) == 2 and is_running(name)
         measured.append("startup interruption: exit 143, current IDs still guarded and reported")
     finally:
@@ -545,7 +555,7 @@ def check_failed_startup_handshake(tmp: Path) -> None:
         assert "memory guard on rank 0: supervisor ready" not in done.stdout, done
         assert not (tmp / "argv").exists(), "start.sh ran despite a failed startup inspection"
         began = time.monotonic()
-        # Idle loop: at most 5 s backoff + 2 s inspection + 1 s scheduling margin.
+        # Healthy worker: 0.2 s poll + 2 s inspect + 2 s final inspect, below 8 s.
         assert wait_for(lambda: guards_of(name) == 0, 8), "idle worker supervisor exceeded 8 s exit bound"
         assert guards_of(name) == 0
         elapsed = time.monotonic() - began
@@ -631,6 +641,131 @@ def check_failed_kill_recovery(tmp: Path) -> None:
         not_proven.append("failed kill/recovery: live host memory did not allow a valid dip")
 
 
+def helper_process(env: dict[str, str], command: str) -> subprocess.Popen[str]:
+    code = 'source "$1"; ' + command
+    return subprocess.Popen(["bash", "-c", code, "helper-test", str(WORKSPACE / "memory_guard.sh")],
+                            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+def test_guard_session(tmp: Path, name: str, env: dict[str, str]) -> Path:
+    process = helper_process(env, 'guard_start "" rank0; rc=$?; printf "%s" "$GUARD_SESSION" > "$FIXTURE_OUT/session"; exit "$rc"')
+    stdout, stderr = process.communicate(timeout=20)
+    assert process.returncode == 0, (stdout, stderr)
+    session = (tmp / "session").read_text()
+    return tmp / "head-home/.cache/tensorfold-glm53" / f"guard-{name}-{session}"
+
+
+def check_failed_successor_retains_previous(tmp: Path) -> None:
+    name = container_name()
+    env = script_env(tmp, name, f"-F {tmp / 'ssh_config'}", "loopback-node")
+    cache = tmp / "head-home/.cache/tensorfold-glm53"
+    cache.mkdir(parents=True, exist_ok=True)
+    cached_guard = cache / "memory_guard.py"
+    shutil.copy(GUARD, cached_guard)
+    prior_run = cache / f"guard-{name}-prior"
+    prior_run.mkdir()
+    log = tmp / "prior-protection.log"
+    start_container(name)
+    prior = subprocess.Popen([sys.executable, str(cached_guard), "--container", name, "--log", str(log),
+                              "--soft-gib", str(mem_available_gib() * 2 + 1), "--sustain-s", "8",
+                              "--ready-file", str(prior_run / "ready"),
+                              "--status-file", str(prior_run / "status")],
+                             env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        assert wait_for(lambda: "started: container" in text(log), 8)
+        process = helper_process({**env, "DOCKER_HOST": "unix:///nonexistent/successor.sock"},
+                                 'guard_start "" rank0')
+        stdout, stderr = process.communicate(timeout=15)
+        assert process.returncode != 0 and "previous guards not retired" in stderr, (stdout, stderr)
+        assert prior.poll() is None, "failed successor terminated the prior guard"
+        assert (prior_run / "ready").read_text() == str(prior.pid)
+        assert wait_for(lambda: not is_running(name), 15), "previous guard no longer enforced its floor"
+        assert prior.wait(8) == 0 and f"killed container {name}" in text(log), text(log)
+        measured.append("failed successor inspection retained prior PID; prior guard still killed its real container")
+    finally:
+        stop_guard(prior)
+        clean_up_rank(name)
+
+
+def check_replacement_during_handoff(tmp: Path) -> None:
+    name, log = container_name(), tmp / "head-home/.cache/tensorfold-glm53/logs/memguard.log"
+    env = script_env(tmp, name, f"-F {tmp / 'ssh_config'}", "loopback-node")
+    start_container(name)
+    session = test_guard_session(tmp, name, env)
+    pid = int((session / "ready").read_text())
+    process: subprocess.Popen[str] | None = None
+    try:
+        os.kill(pid, signal.SIGSTOP)
+        remove_container(name)
+        start_container(name)
+        current = run("docker", "inspect", "-f", "{{.Id}}", name).stdout.strip()
+        command = 'GUARD_SESSION=$(cat "$FIXTURE_OUT/session"); guard_finish "" rank0'
+        process = helper_process(env, command)
+        time.sleep(0.4)
+        assert process.poll() is None and (session / "startup").exists(), "disarmed before current-ID ack"
+        os.kill(pid, signal.SIGCONT)
+        stdout, stderr = process.communicate(timeout=20)
+        assert process.returncode == 0 and f"id={current}" in stdout, (stdout, stderr)
+        assert f"id={current}," in text(log) and not (session / "startup").exists(), text(log)
+        measured.append("handoff replacement: discovery remained armed until replacement ID acknowledged")
+    finally:
+        try:
+            os.kill(pid, signal.SIGCONT)
+        except ProcessLookupError:
+            pass
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.communicate()
+        clean_up_rank(name)
+
+
+DELAYED_LAUNCH = """#!/bin/sh
+set -eu
+i=0
+while [ ! -f "$1/release-late" ]; do
+    i=$((i + 1)); [ "$i" -lt 300 ] || exit 91
+    sleep 0.1
+done
+docker start "$2" > "$1/late-started"
+"""
+
+
+def check_interrupted_inflight_launch(tmp: Path) -> None:
+    name = container_name()
+    for marker in ("release-late", "late-started", "launch-inflight"):
+        (tmp / marker).unlink(missing_ok=True)
+    delayed = tmp / "delayed-launch.sh"
+    delayed.write_text(DELAYED_LAUNCH)
+    env = script_env(tmp, name, f"-F {tmp / 'ssh_config'}", "loopback-node")
+    env.update(FIXTURE_DELAYED_SCRIPT=str(delayed), FIXTURE_SSH_CONFIG=str(tmp / "ssh_config"))
+    process = subprocess.Popen(script_argv("up.sh", ()), env=env,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        assert wait_for((tmp / "launch-inflight").exists, 45), "delayed real launch not accepted"
+        assert not is_running(name)
+        process.send_signal(signal.SIGTERM)
+        stdout, stderr = process.communicate(timeout=30)
+        assert process.returncode == 143 and "cancellation unconfirmed; discovery retained" in stderr, (stdout, stderr)
+        child = (tmp / "launch-child.pid").read_text().strip()
+        state = run("ps", "-o", "stat=", "-p", child).stdout.strip()
+        assert not state or state.startswith("Z"), "live launch descendant escaped local group termination"
+        assert len(list((tmp / "head-home/.cache/tensorfold-glm53").glob(f"guard-{name}-*/startup"))) == 1
+        (tmp / "release-late").touch()
+        assert wait_for((tmp / "late-started").exists, 10), "accepted remote Docker launch did not complete"
+        current = run("docker", "inspect", "-f", "{{.Id}}", name).stdout.strip()
+        for node in ("head-home", "worker-home"):
+            log = tmp / node / ".cache/tensorfold-glm53/logs/memguard.log"
+            assert wait_for(lambda: f"id={current}," in text(log), 8), text(log)
+        assert is_running(name) and guards_of(name) == 2
+        measured.append("interrupted in-flight launch: local child quiesced; real late remote container armed on both paths")
+    finally:
+        (tmp / "release-late").touch()
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
+        clean_up_rank(name)
+
+
 def check_wiring(tmp: Path) -> None:
     global REAL_HF, HELPER_ONLY
     REAL_HF = find_real_hf()
@@ -654,6 +789,9 @@ def check_wiring(tmp: Path) -> None:
         check_up_and_down_over_ssh(tmp)
         check_startup_interrupted(tmp)
         check_failed_startup_handshake(tmp)
+        check_failed_successor_retains_previous(tmp)
+        check_replacement_during_handoff(tmp)
+        check_interrupted_inflight_launch(tmp)
     finally:
         sshd.kill()
         sshd.wait()
