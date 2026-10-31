@@ -78,8 +78,13 @@ def build_parser() -> argparse.ArgumentParser:
     common(soak, 256)
     soak.add_argument("--duration", type=float, required=True, help="seconds")
     soak.add_argument("--short-tokens", type=int, default=2000)
-    soak.add_argument("--long-tokens", type=int, default=150000)
-    soak.add_argument("--long-every", type=int, default=20)
+    # Mean 3,450 tokens a state, against 9,400 at 150000 every 20, and longs are 43% of
+    # prefilled tokens, not 80%. The 68-78 kept states at the kills fall in the first
+    # cycle of 40, so reaching them takes requests. Whether a server keeps them, the
+    # requests cannot show: read the saved /metrics text.
+    soak.add_argument("--long-tokens", type=int, default=60000)
+    soak.add_argument("--long-every", type=int, default=40)
+    soak.add_argument("--metrics-every", type=float, default=60.0, help="seconds, 0 turns it off")
     soak.add_argument("--streams", type=int, default=4)
 
     task = sub.add_parser("task")

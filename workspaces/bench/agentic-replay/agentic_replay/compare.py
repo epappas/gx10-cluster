@@ -135,6 +135,18 @@ def _memory_rows(a: Result, b: Result) -> Iterator[Row]:
         one, two = left.get(node) or {}, right.get(node) or {}
         yield f"memory {node} low_kib", one.get("low_kib"), two.get("low_kib")
         yield f"memory {node} guard", one.get("guard"), two.get("guard")
+        yield f"memory {node} sampler errors", _errors(one), _errors(two)
+
+
+def _errors(row: dict[str, Any]) -> str | None:
+    """An empty list prints `none`, so it cannot be mistaken for a run with no sampler."""
+    if "errors" not in row:
+        return None
+    return "; ".join(row["errors"]) or "none"
+
+
+def _metrics(result: Result) -> int | None:
+    return (result.summary.get("metrics") or {}).get("saved")
 
 
 def _stopped(result: Result) -> str | None:
@@ -157,7 +169,8 @@ def rows(a: Result, b: Result) -> list[Row]:
         ("request errors", a.summary.get("request_errors"), b.summary.get("request_errors")),
         ("stopped", _stopped(a), _stopped(b)),
         ("corpus_reused", a.summary.get("corpus_reused"), b.summary.get("corpus_reused")),
-        ("soak clean", a.summary.get("clean"), b.summary.get("clean")),
+        ("soak verdict", a.summary.get("verdict"), b.summary.get("verdict")),
+        ("metrics saved", _metrics(a), _metrics(b)),
         ("requests", _count(a), _count(b)),
         ("response_format", a.summary.get("response_format"), b.summary.get("response_format")),
     ]

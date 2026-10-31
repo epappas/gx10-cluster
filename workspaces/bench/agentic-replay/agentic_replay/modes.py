@@ -15,7 +15,8 @@ from .client import Reply, post_chat
 from .core import Sampling, sha256_of, token_worth
 from .corpus import Corpus, load_corpus
 from .recall import Probe, score
-from .results import Run, new_run_dir, per_minute, reply_record, request_rows
+from .results import MetricsSaver, Run, new_run_dir, per_minute, reply_record, request_rows
+from .sampler import guard_unread
 from .tooldefs import TOOLS, check_reply
 from .workload import (PIECE_BYTES, SYSTEM_PROMPT, Planned, ReplaySpec, ScriptedHistory, SoakSpec,
                        opening, replay_requests, salt_for, seed_probe_body, soak_requests)
@@ -23,6 +24,8 @@ from .workload import (PIECE_BYTES, SYSTEM_PROMPT, Planned, ReplaySpec, Scripted
 REPO = Path(__file__).resolve().parents[4]
 # These kinds exist to find out what a server refuses, so a refusal is their result.
 TOLERATED_ERRORS = {"seed_probe", "response_format", "sampling"}
+# Staying up is what a request can show. Whether the cache reached the kill zone is not.
+NO_DEATH = "no death in window; cache fill not shown by this tool"
 
 
 def code_digest() -> str:
@@ -256,25 +259,40 @@ def run_soak(args: argparse.Namespace) -> int:
         "long_bytes": spec.long_bytes, "long_every": spec.long_every, "streams": args.streams,
         "duration_s": args.duration}})
     requests = soak_requests(spec, corpus, model, seed, sent)
+    metrics = MetricsSaver(run, args.metrics_every)
+    metrics.start()
     lock, dead = threading.Lock(), threading.Event()
     deadline = time.monotonic() + args.duration
     with ThreadPoolExecutor(args.streams) as pool:
         workers = [pool.submit(_soak_worker, run, args, requests, lock, deadline, seed, dead)
                    for _ in range(args.streams)]
     crashed = [repr(w.exception()) for w in workers if w.exception()]
-    return _finish_soak(run, dead.is_set(), crashed)
+    return _finish_soak(run, dead.is_set(), crashed, metrics.stop())
 
 
-def _finish_soak(run: Run, died: bool, crashed: list[str]) -> int:
+def soak_verdict(died: bool, crashed: list[str], errors: int, memory: dict[str, Any]) -> str:
+    """The only wording a soak may end on. Anything short of it says what went wrong."""
+    if died:
+        return "server died"
+    if crashed:
+        return f"worker failed: {crashed[0]}"
+    if errors:
+        return f"{errors} request errors"
+    unread = guard_unread(memory)
+    return f"guard not read on {', '.join(unread)}" if unread else NO_DEATH
+
+
+def _finish_soak(run: Run, died: bool, crashed: list[str], metrics: dict[str, Any]) -> int:
     memory = run.memory_summary()
     run.snapshot("end")
     errors = request_errors(run.records)
-    clean = not died and not crashed and not errors
+    verdict = soak_verdict(died, crashed, errors, memory)
     stopped = "server died" if died else (f"worker failed: {crashed[0]}" if crashed else None)
     run.close({"stopped": stopped, "memory": memory, "per_minute": per_minute(run.records),
-               "requests": request_rows(run.records), "request_errors": errors, "clean": clean})
+               "requests": request_rows(run.records), "request_errors": errors,
+               "verdict": verdict, "metrics": metrics})
     print(f"results: {run.path}")
-    return 0 if clean else 1
+    return 0 if verdict == NO_DEATH else 1
 
 
 def task_prefix(corpus: Corpus, seed: int, brief: str, prefix_bytes: int) -> tuple[ScriptedHistory, str]:

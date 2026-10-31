@@ -168,6 +168,18 @@ def post_chat(base_url: str, api_key: str, body: bytes, timeout: float) -> Reply
     return reply
 
 
+def fetch_text(url: str, api_key: str, timeout: float = 10.0) -> tuple[int | None, str]:
+    """Raw text, kept as it came. Metric names are never parsed, so none are assumed."""
+    request = urllib.request.Request(url, headers=_headers(api_key))
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status, response.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        return exc.code, ""
+    except (urllib.error.URLError, HTTPException, OSError) as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+
+
 def fetch_json(url: str, api_key: str, timeout: float = 10.0) -> dict[str, Any]:
     """A snapshot. A failure is returned as data, so the run keeps it."""
     request = urllib.request.Request(url, headers=_headers(api_key))

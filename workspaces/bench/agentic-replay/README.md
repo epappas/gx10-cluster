@@ -53,6 +53,21 @@ says `no guard log`, never `no kills`.
 - Sizes are bytes, because tokenizers differ. One "token's worth" is 3 bytes, measured
   on this corpus at 2.9 on DeepSeek. Read `usage.prompt_tokens` for the real count.
 
+## Reading a soak
+
+A soak ends on one wording at best: `no death in window; cache fill not shown by this
+tool`. That is all requests can show. It does not mean the kill zone was reached, so a
+soak that stays up proves nothing about the failure it was built to reproduce. Raw
+`/metrics` text is saved every `--metrics-every` seconds if the server exposes it, under
+`metrics/` in the run directory. Read cache fill there.
+
+The defaults are 60,000 tokens' worth every 40 requests. Mean size is 3,450 tokens a
+state, against 9,400 at 150,000 every 20, and long requests are 43% of prefilled tokens
+rather than 80%. The 68-78 kept states at the kills fall within the first 40 requests.
+
+`guard not read` means the log was unreadable or ssh failed. It blocks that wording,
+because an empty kill list would claim there were no kills.
+
 ## Reading the numbers
 
 - **`not_cold`** on a first step means the salt did not defeat the cache.

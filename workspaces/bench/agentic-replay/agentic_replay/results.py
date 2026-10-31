@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .client import Reply, fetch_json
+from .client import Reply, fetch_json, fetch_text
 from .sampler import Sampler, Window, low_in_window, summarise_memory
 
 DEFAULT_ROOT = Path.home() / ".local/state/gx10-bench/agentic-replay"
@@ -94,6 +94,45 @@ class Run:
         self.write_json("summary.json", summary)
         self._requests.close()
         self._memory.close()
+
+
+class MetricsSaver:
+    """Saves raw /metrics text every few seconds, if the server exposes it."""
+
+    def __init__(self, run: Run, every_s: float):
+        self._run = run
+        self._every_s = every_s
+        self._stopping = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self.saved = 0
+        self.last_status: int | None = None
+
+    def tick(self) -> bool:
+        """False when the server does not expose it, so asking again is pointless."""
+        root = self._run.base_url.rstrip("/").removesuffix("/v1")
+        status, text = fetch_text(f"{root}/metrics", self._run.api_key)
+        self.last_status = status
+        if status != 200:
+            return False
+        folder = self._run.path / "metrics"
+        folder.mkdir(exist_ok=True)
+        (folder / f"metrics-{self.saved:05d}.txt").write_text(text)
+        self.saved += 1
+        return True
+
+    def _loop(self) -> None:
+        while self.tick() and not self._stopping.wait(self._every_s):
+            pass
+
+    def start(self) -> None:
+        if self._every_s > 0:
+            self._thread.start()
+
+    def stop(self) -> dict[str, Any]:
+        self._stopping.set()
+        if self._thread.is_alive():
+            self._thread.join(15)
+        return {"saved": self.saved, "last_status": self.last_status}
 
 
 def request_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:

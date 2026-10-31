@@ -18,13 +18,19 @@ import sys
 sys.dont_write_bytecode = True
 
 import argparse
+import functools
+import http.server
+import importlib.machinery
+import importlib.util
 import json
 import os
 import shutil
 import signal
 import socket
+import socketserver
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -393,9 +399,11 @@ def check_failures_are_reported() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         run = Run(Path(tmp), "http://127.0.0.1:1/v1", "")
         run.add_request({"kind": "short", "error": "HTTP 500", "started": 1.0, "ended": 2.0})
-        assert modes._finish_soak(run, False, []) == 1, "every request failed and it exited 0"
+        metrics = {"saved": 0, "last_status": None}
+        assert modes._finish_soak(run, False, [], metrics) == 1, "every request failed, exit 0"
         summary = json.loads(Path(tmp, "summary.json").read_text())
-        assert summary["clean"] is False and summary["request_errors"] == 1
+        assert summary["verdict"] == "1 request errors" and summary["request_errors"] == 1
+        assert "clean" not in summary
 
 
 def check_task_bounds() -> None:
@@ -495,6 +503,76 @@ def check_compare_covers_the_workload() -> None:
             capture_output=True, text=True, timeout=30)
         assert done.returncode == 2 and "grow past" in done.stdout, done.stdout
         assert not list(Path(tmp).iterdir()), "a refused run must touch nothing"
+
+
+def cli_parser() -> argparse.ArgumentParser:
+    loader = importlib.machinery.SourceFileLoader("agentic_replay_cli", str(CLI))
+    spec_ = importlib.util.spec_from_loader("agentic_replay_cli", loader)
+    module = importlib.util.module_from_spec(spec_)
+    loader.exec_module(module)
+    return module.build_parser()
+
+
+def check_soak_defaults(corpus) -> None:
+    """Item: the first 78 requests are 78 kept states, and longs no longer dominate."""
+    args = cli_parser().parse_args(["soak", "--corpus-rev", "HEAD", "--duration", "1"])
+    assert (args.long_tokens, args.long_every) == (60000, 40)
+    short = args.short_tokens
+    mean = ((args.long_every - 1) * short + args.long_tokens) / args.long_every
+    assert mean == 3450, mean
+    assert args.long_tokens / (args.long_tokens + (args.long_every - 1) * short) < 0.44
+    soak = SoakSpec(token_worth(100), token_worth(200), args.long_every, SAMPLING)
+    stream = soak_requests(soak, corpus, "m", 3, False)
+    first = [next(stream) for _ in range(78)]
+    assert len({p.salt for p in first}) == 78
+    assert sum(p.kind == "long" for p in first) == 1
+
+
+def check_soak_wording() -> None:
+    read = {"n": {"guard": {"kill_lines": []}}}
+    unread = {"n": {"guard": sampler.GUARD_NOT_READ}}
+    assert modes.soak_verdict(False, [], 0, read) == modes.NO_DEATH
+    assert "cache fill not shown" in modes.NO_DEATH and "clean" not in modes.NO_DEATH
+    assert modes.soak_verdict(True, [], 0, read) == "server died"
+    assert modes.soak_verdict(False, ["boom"], 0, read) == "worker failed: boom"
+    assert modes.soak_verdict(False, [], 2, read) == "2 request errors"
+    assert modes.soak_verdict(False, [], 0, unread) == "guard not read on n"
+    assert sampler.guard_reading("/l", [1], ["ssh ended rc=255"], []) == sampler.GUARD_NOT_READ
+    assert sampler.guard_reading("/l", [], [], []) == sampler.GUARD_NOT_READ, "no data read"
+    assert sampler.guard_reading("/l", [1], [], []) == {"kill_lines": []}
+    assert sampler.guard_reading(None, [], [], []) == "no guard log"
+    partial = sampler.summarise_memory(
+        [{"node": "n", "t": 1.0, "available_kib": 5},
+         {"node": "n", "t": 2.0, "guard_line": "killed container", "kill": True},
+         {"node": "n", "t": 3.0, "error": "ssh ended rc=255"}], ["n"], "/l")
+    assert partial["n"]["guard"] == sampler.GUARD_NOT_READ
+    assert partial["n"]["kill_lines"] == ["killed container"], "a kill seen must not be lost"
+
+
+class FileOnly(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, *_args: object) -> None:
+        pass
+
+
+def check_metrics_saved() -> None:
+    """A plain file server serving a text file: it tests saving, and answers no chat request."""
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as www:
+        Path(www, "metrics").write_text("any_metric_name 1\n")
+        handler = functools.partial(FileOnly, directory=www)
+        with socketserver.TCPServer(("127.0.0.1", 0), handler) as server:
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            port = server.server_address[1]
+            run = Run(Path(tmp), f"http://127.0.0.1:{port}/v1", "")
+            saver = modes.MetricsSaver(run, 0.05)
+            saver.start()
+            assert wait_for(lambda: saver.saved >= 2, 5), "metrics were not saved"
+            result = saver.stop()
+            server.shutdown()
+        assert result["saved"] >= 2 and result["last_status"] == 200
+        assert Path(tmp, "metrics", "metrics-00000.txt").read_text() == "any_metric_name 1\n"
+        closed = Run(Path(tmp), f"http://127.0.0.1:{free_port()}/v1", "")
+        absent = modes.MetricsSaver(closed, 0.05)
+        assert absent.tick() is False and absent.saved == 0, "no /metrics must save nothing"
 
 
 def check_soak_salts(corpus) -> None:
@@ -821,6 +899,38 @@ def exercise_sampler(tmp: str, config: str) -> None:
             os.killpg(client.pid, signal.SIGKILL)
 
 
+def check_failed_ssh_reads_as_not_read() -> None:
+    """A real ssh client against a closed port. No sshd is needed for it to fail."""
+    if not shutil.which("ssh"):
+        not_proven.append("failed ssh case: no ssh client")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        config = Path(tmp, "ssh_config")
+        config.write_text(f"Host dead-node\n  HostName 127.0.0.1\n  Port {free_port()}\n")
+        config.chmod(0o600)
+        samples: list[dict] = []
+        sampling = sampler.Sampler(["dead-node"], "/var/log/guard.log", str(config), samples.append)
+        assert wait_for(lambda: samples, 15), "the failure was not reported"
+        sampling.stop()
+    summary = sampler.summarise_memory(samples, ["dead-node"], "/var/log/guard.log")
+    assert summary["dead-node"]["guard"] == sampler.GUARD_NOT_READ, summary
+    assert "ssh ended" in summary["dead-node"]["errors"][0]
+    assert modes.soak_verdict(False, [], 0, summary) == "guard not read on dead-node"
+    row = compare._errors(summary["dead-node"])
+    assert row and "ssh ended" in row
+
+
+def exercise_unreadable_log(tmp: str, config: str) -> None:
+    samples: list[dict] = []
+    missing = f"{tmp}/no-such-guard.log"
+    sampling = sampler.Sampler(["loopback-node"], missing, config, samples.append)
+    assert wait_for(lambda: any("error" in s for s in samples), 15), "unreadable log not reported"
+    sampling.stop()
+    summary = sampler.summarise_memory(samples, ["loopback-node"], missing)
+    assert summary["loopback-node"]["guard"] == sampler.GUARD_NOT_READ, summary
+    assert "guard log unreadable" in " ".join(summary["loopback-node"]["errors"])
+
+
 def check_ac8() -> str:
     if not shutil.which("ssh") or not shutil.which("ssh-keygen") or not (
             shutil.which("sshd") or Path("/usr/sbin/sshd").exists()):
@@ -834,6 +944,7 @@ def check_ac8() -> str:
                                                 subprocess.getoutput("id -un"), tmp=tmp))
             config.chmod(0o600)
             exercise_sampler(tmp, str(config))
+            exercise_unreadable_log(tmp, str(config))
         finally:
             process.terminate()
             process.wait(10)
@@ -872,6 +983,10 @@ def main() -> int:
     check_compare_covers_the_workload()
     check_probe_score_labels()
     check_soak_salts(corpus)
+    check_soak_defaults(corpus)
+    check_soak_wording()
+    check_metrics_saved()
+    check_failed_ssh_reads_as_not_read()
     check_closed_port()
     check_parser()
     check_sampler_logic()

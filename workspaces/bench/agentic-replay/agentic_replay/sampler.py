@@ -18,6 +18,7 @@ from typing import Any
 
 PERIOD_S = "0.2"
 KILL_LINE = re.compile(r"\bkilled\b", re.I)
+GUARD_NOT_READ = "guard not read"
 SSH_OPTIONS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=10")
 
 Sink = Callable[[dict[str, Any]], None]
@@ -32,7 +33,7 @@ def remote_script(guard_log: str | None) -> str:
         f"[ -r {log} ] || {{ echo 'E guard log unreadable'; exit 3; }}; "
         f"seen=$(wc -c < {log}); "
         f"while :; do {memory}; "
-        f"size=$(wc -c < {log}); "
+        f"size=$(wc -c < {log}) || {{ echo 'E guard log unreadable'; exit 3; }}; "
         f"[ \"$size\" -lt \"$seen\" ] && seen=0; "
         f"if [ \"$size\" -gt \"$seen\" ]; then "
         f"tail -c +$((seen + 1)) {log} | head -c $((size - seen)) | sed 's/^/G /' || exit 1; "
@@ -95,6 +96,19 @@ class Window:
     ended: float
 
 
+def guard_reading(guard_log: str | None, values: list[int], errors: list[str],
+                  kills: list[str]) -> Any:
+    """An unread log is `guard not read`. An empty kill list would claim there were none."""
+    if guard_log is None:
+        return "no guard log"
+    return GUARD_NOT_READ if errors or not values else {"kill_lines": kills}
+
+
+def guard_unread(memory: dict[str, Any]) -> list[str]:
+    return [node for node, row in memory.items()
+            if isinstance(row, dict) and row.get("guard") == GUARD_NOT_READ]
+
+
 def summarise_memory(
     samples: list[dict[str, Any]], nodes: list[str], guard_log: str | None,
 ) -> dict[str, Any]:
@@ -104,12 +118,14 @@ def summarise_memory(
         mine = [s for s in samples if s.get("node") == node]
         values = [s["available_kib"] for s in mine if "available_kib" in s]
         kills = [s["guard_line"] for s in mine if s.get("kill")]
+        errors = [s["error"] for s in mine if "error" in s]
         out[node] = {
             "samples": len(values),
             "low_kib": min(values) if values else None,
             "median_interval_s": _median_interval(mine),
-            "errors": [s["error"] for s in mine if "error" in s],
-            "guard": "no guard log" if guard_log is None else {"kill_lines": kills},
+            "errors": errors,
+            "kill_lines": kills,
+            "guard": guard_reading(guard_log, values, errors, kills),
         }
     return out
 
