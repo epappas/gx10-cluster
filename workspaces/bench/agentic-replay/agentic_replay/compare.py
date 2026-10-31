@@ -83,14 +83,21 @@ def _by_key(summary: dict[str, Any]) -> dict[tuple[Any, ...], dict[str, Any]]:
             if r.get("kind") in ("step", "turn")}
 
 
+def _decode(row: dict[str, Any]) -> Any:
+    """Smoothed streaming and bursts bias this number, so it never prints unmarked."""
+    rate, note = row.get("decode_tps"), row.get("decode_note")
+    return f"{show(rate)} not meaningful: {note}" if note else rate
+
+
 def _step_rows(a: Result, b: Result) -> Iterator[Row]:
     left, right = _by_key(a.summary), _by_key(b.summary)
     for key in sorted(set(left) | set(right), key=lambda k: tuple(x or 0 for x in k)):
         name = "seed {} conv {} step {}".format(*key)
         one, two = left.get(key, {}), right.get(key, {})
-        for field in ("prompt_tokens", "cached_tokens", "ttft_s", "decode_tps", "finish_reason",
-                      "error"):
+        for field in ("prompt_tokens", "cached_tokens", "completion_tokens", "total_s", "ttft_s",
+                      "burst", "finish_reason", "error"):
             yield f"{name} {field}", one.get(field), two.get(field)
+        yield f"{name} decode_tps", _decode(one), _decode(two)
 
 
 def _recall_cells(summary: dict[str, Any]) -> dict[tuple[Any, ...], str]:
@@ -102,11 +109,16 @@ def _recall_cells(summary: dict[str, Any]) -> dict[tuple[Any, ...], str]:
 
 
 def _recall_cell(scores: list[Any]) -> str:
-    """Right out of answered. Replies with no answer are counted beside it, never as 0."""
+    """Budget stays in the first denominator, or a run of them reads as a survivor fraction.
+
+    The answered reading is printed beside it. Errors and tool calls are counted apart.
+    """
     answered = [s for s in scores if isinstance(s, int)]
+    budget = scores.count("budget")
     unanswered = sorted({s for s in scores if not isinstance(s, int)})
     notes = "".join(f" {name} {scores.count(name)}" for name in unanswered)
-    return f"{sum(answered)}/{len(answered)}{notes}"
+    right = sum(answered)
+    return f"{right}/{len(answered) + budget}; answered {right}/{len(answered)};{notes}".rstrip(" ;")
 
 
 def _recall_rows(a: Result, b: Result) -> Iterator[Row]:
@@ -136,6 +148,29 @@ def _memory_rows(a: Result, b: Result) -> Iterator[Row]:
         yield f"memory {node} low_kib", one.get("low_kib"), two.get("low_kib")
         yield f"memory {node} guard", one.get("guard"), two.get("guard")
         yield f"memory {node} sampler errors", _errors(one), _errors(two)
+
+
+def _minute_rows(a: Result, b: Result) -> Iterator[Row]:
+    left = {r["minute"]: r for r in a.summary.get("per_minute") or []}
+    right = {r["minute"]: r for r in b.summary.get("per_minute") or []}
+    for minute in sorted({*left, *right}):
+        one, two = left.get(minute, {}), right.get(minute, {})
+        for field in ("requests", "errors", "ttft_p50_s", "total_p50_s"):
+            yield f"soak minute {minute} {field}", one.get(field), two.get(field)
+
+
+def _not_cold(result: Result) -> str | None:
+    """Unknown when no server reported cached tokens, not zero."""
+    rows_ = [r["not_cold"] for r in result.summary.get("requests") or []
+             if r.get("not_cold") is not None]
+    return f"{sum(rows_)}/{len(rows_)}" if rows_ else None
+
+
+def _sampling(result: Result) -> str | None:
+    check = result.summary.get("sampling_check")
+    if not check:
+        return None
+    return ", ".join(f"{k} {check[k]}" for k in ("temperature", "top_k", "top_p"))
 
 
 def _errors(row: dict[str, Any]) -> str | None:
@@ -171,10 +206,13 @@ def rows(a: Result, b: Result) -> list[Row]:
         ("corpus_reused", a.summary.get("corpus_reused"), b.summary.get("corpus_reused")),
         ("soak verdict", a.summary.get("verdict"), b.summary.get("verdict")),
         ("metrics saved", _metrics(a), _metrics(b)),
+        ("not_cold first steps", _not_cold(a), _not_cold(b)),
+        ("sampling_check", _sampling(a), _sampling(b)),
         ("requests", _count(a), _count(b)),
         ("response_format", a.summary.get("response_format"), b.summary.get("response_format")),
     ]
-    return [*head, *_step_rows(a, b), *_recall_rows(a, b), *_task_rows(a, b), *_memory_rows(a, b)]
+    return [*head, *_step_rows(a, b), *_recall_rows(a, b), *_task_rows(a, b),
+            *_minute_rows(a, b), *_memory_rows(a, b)]
 
 
 def render(a: Result, b: Result) -> str:

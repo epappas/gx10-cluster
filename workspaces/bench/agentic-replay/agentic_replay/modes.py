@@ -8,6 +8,7 @@ import threading
 import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -19,11 +20,12 @@ from .results import MetricsSaver, Run, new_run_dir, per_minute, reply_record, r
 from .sampler import guard_unread
 from .tooldefs import TOOLS, check_reply
 from .workload import (PIECE_BYTES, SYSTEM_PROMPT, Planned, ReplaySpec, ScriptedHistory, SoakSpec,
-                       opening, replay_requests, salt_for, seed_probe_body, soak_requests)
+                       opening, replay_requests, salt_for, sampling_bodies, seed_probe_body,
+                       soak_requests)
 
 REPO = Path(__file__).resolve().parents[4]
 # These kinds exist to find out what a server refuses, so a refusal is their result.
-TOLERATED_ERRORS = {"seed_probe", "response_format", "sampling"}
+TOLERATED_ERRORS = {"seed_probe", "response_format"}
 # Staying up is what a request can show. Whether the cache reached the kill zone is not.
 NO_DEATH = "no death in window; cache fill not shown by this tool"
 
@@ -73,6 +75,7 @@ def base_workload(args: argparse.Namespace, corpus: Corpus, seeds: list[int], se
         "sampling": sampling_of(args).as_body(), "seed_sent": sent,
         "tools_sha": sha256_of(TOOLS), "system_sha": sha256_of(SYSTEM_PROMPT),
         "piece_bytes": PIECE_BYTES, "code_sha": code_digest(),
+        "sampling_check": args.sampling_check,
     }
 
 
@@ -91,7 +94,7 @@ def annotate(planned: Planned, seed: int, reply: Reply) -> dict[str, Any]:
     verdicts = check_reply(reply.tool_calls, reply.content, TOOLS)
     record: dict[str, Any] = {
         "kind": planned.kind, "seed": seed, "conv": planned.conv, "step": planned.step,
-        "target_bytes": planned.target_bytes, "salt": planned.salt, "variant": planned.variant,
+        "target_bytes": planned.target_bytes, "salt": planned.salt,
         "request_bytes": len(planned.body), "tool_valid": [v.valid for v in verdicts],
         "tool_reasons": [v.reason for v in verdicts], **reply_record(reply),
     }
@@ -124,7 +127,7 @@ def replay_spec(args: argparse.Namespace) -> ReplaySpec:
     return ReplaySpec(
         token_worth(args.target_tokens), token_worth(args.step_tokens),
         tuple(token_worth(t) for t in args.probe_tokens), args.fact_count, sampling_of(args),
-        args.interleave, args.response_format, args.sampling_check)
+        args.interleave, args.response_format)
 
 
 def sampling_verdict(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -150,7 +153,43 @@ def sampling_verdict(records: list[dict[str, Any]]) -> dict[str, Any]:
             "top_p": narrowed("hot_top_p_tiny"), **base}
 
 
-def replay_summary(run: Run, corpus_reused: bool, stopped: str | None) -> dict[str, Any]:
+@dataclass(frozen=True)
+class PreRun:
+    sent: bool
+    sampling: dict[str, Any] | None
+    dead: str | None = None
+
+
+def run_sampling_check(
+    run: Run, args: argparse.Namespace, model: str, seed: int, sent: bool,
+) -> tuple[dict[str, Any], str | None]:
+    """One step before the run. Recorded in its own file and kept out of the results."""
+    records: list[dict[str, Any]] = []
+    dead = None
+    for name, body in sampling_bodies(model, sampling_of(args), seed, seed if sent else None):
+        reply = post_chat(args.base_url, args.api_key, body, args.request_timeout)
+        records.append({"variant": name, **reply_record(reply)})
+        if reply.dead:
+            dead = reply.error
+            break
+    verdict = sampling_verdict(records)
+    run.write_json("sampling-check.json", {"verdict": verdict, "records": records})
+    return verdict, dead
+
+
+def pre_run(run: Run, args: argparse.Namespace, model: str, seed: int) -> PreRun:
+    probe = probe_seed(run, args, model, seed)
+    if probe.dead:
+        return PreRun(False, None, probe.error)
+    if not args.sampling_check:
+        return PreRun(probe.ok, None)
+    verdict, dead = run_sampling_check(run, args, model, seed, probe.ok)
+    return PreRun(probe.ok, verdict, dead)
+
+
+def replay_summary(
+    run: Run, corpus_reused: bool, stopped: str | None, sampling: dict[str, Any] | None,
+) -> dict[str, Any]:
     memory = run.memory_summary()
     records = run.records
     probes = [r for r in records if r["kind"] == "probe"]
@@ -161,7 +200,7 @@ def replay_summary(run: Run, corpus_reused: bool, stopped: str | None) -> dict[s
         "recall": [{"size_bytes": r["target_bytes"], **r["probe"], "score": r["score"]}
                    for r in probes],
         "response_format": [r["response_format"] for r in records if "response_format" in r],
-        "sampling_check": sampling_verdict(records) if any(r.get("variant") for r in records) else None,
+        "sampling_check": sampling,
     }
 
 
@@ -181,21 +220,20 @@ def run_replay(args: argparse.Namespace) -> int:
     if model is None:
         return fail(run, f"no model: {snapshot['models'].get('error')}")
     corpus = load_corpus(REPO, args.corpus_rev)
-    probe = probe_seed(run, args, model, seeds[0])
-    if probe.dead:
-        return fail(run, f"server unreachable: {probe.error}")
-    sent = probe.ok
+    pre = pre_run(run, args, model, seeds[0])
+    if pre.dead:
+        return fail(run, f"server unreachable: {pre.dead}")
+    sent = pre.sent
     spec = replay_spec(args)
     run.write_json("manifest.json", {
         "model": model, "base_url": args.base_url,
         "workload": {**base_workload(args, corpus, seeds, sent), "target_bytes": spec.target_bytes,
                      "step_bytes": spec.step_bytes, "probe_bytes": list(spec.probe_bytes),
                      "fact_count": spec.fact_count, "conversations": args.conversations,
-                     "interleave": spec.interleave, "response_format": spec.response_format,
-                     "sampling_check": spec.sampling_check}})
+                     "interleave": spec.interleave, "response_format": spec.response_format}})
     alive = _replay_all(run, args, spec, corpus, model, seeds, sent)
     summary = replay_summary(run, corpus_was_reused(corpus, spec.target_bytes),
-                             None if alive else "server died")
+                             None if alive else "server died", pre.sampling)
     run.snapshot("end")
     run.close(summary)
     print(f"results: {run.path}")
@@ -248,10 +286,10 @@ def run_soak(args: argparse.Namespace) -> int:
     if model is None:
         return fail(run, f"no model: {snapshot['models'].get('error')}")
     corpus = load_corpus(REPO, args.corpus_rev)
-    probe = probe_seed(run, args, model, seed)
-    if probe.dead:
-        return fail(run, f"server unreachable: {probe.error}")
-    sent = probe.ok
+    pre = pre_run(run, args, model, seed)
+    if pre.dead:
+        return fail(run, f"server unreachable: {pre.dead}")
+    sent = pre.sent
     spec = SoakSpec(token_worth(args.short_tokens), token_worth(args.long_tokens),
                     args.long_every, sampling_of(args))
     run.write_json("manifest.json", {"model": model, "base_url": args.base_url, "workload": {
@@ -267,7 +305,7 @@ def run_soak(args: argparse.Namespace) -> int:
         workers = [pool.submit(_soak_worker, run, args, requests, lock, deadline, seed, dead)
                    for _ in range(args.streams)]
     crashed = [repr(w.exception()) for w in workers if w.exception()]
-    return _finish_soak(run, dead.is_set(), crashed, metrics.stop())
+    return _finish_soak(run, dead.is_set(), crashed, metrics.stop(), pre.sampling)
 
 
 def soak_verdict(died: bool, crashed: list[str], errors: int, memory: dict[str, Any]) -> str:
@@ -282,7 +320,8 @@ def soak_verdict(died: bool, crashed: list[str], errors: int, memory: dict[str, 
     return f"guard not read on {', '.join(unread)}" if unread else NO_DEATH
 
 
-def _finish_soak(run: Run, died: bool, crashed: list[str], metrics: dict[str, Any]) -> int:
+def _finish_soak(run: Run, died: bool, crashed: list[str], metrics: dict[str, Any],
+                 sampling: dict[str, Any] | None = None) -> int:
     memory = run.memory_summary()
     run.snapshot("end")
     errors = request_errors(run.records)
@@ -290,7 +329,7 @@ def _finish_soak(run: Run, died: bool, crashed: list[str], metrics: dict[str, An
     stopped = "server died" if died else (f"worker failed: {crashed[0]}" if crashed else None)
     run.close({"stopped": stopped, "memory": memory, "per_minute": per_minute(run.records),
                "requests": request_rows(run.records), "request_errors": errors,
-               "verdict": verdict, "metrics": metrics})
+               "verdict": verdict, "metrics": metrics, "sampling_check": sampling})
     print(f"results: {run.path}")
     return 0 if verdict == NO_DEATH else 1
 

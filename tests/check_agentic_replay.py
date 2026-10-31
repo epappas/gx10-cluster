@@ -80,7 +80,7 @@ def parsed(lines: list[bytes]) -> Reply:
 def spec() -> ReplaySpec:
     size = token_worth(4000)
     return ReplaySpec(size * 3, size, (size * 2,), 3, SAMPLING, interleave=True,
-                      response_format=True, sampling_check=True)
+                      response_format=True)
 
 
 def bodies(corpus, model: str, seed: int) -> list[bytes]:
@@ -377,7 +377,9 @@ def check_probe_score_labels() -> None:
     called = Reply(tool_calls=[tool_call("grep", '{"pattern":"x"}')], finish_reason="tool_calls")
     assert modes.probe_score(probe, called) == "tool_call"
     assert modes.probe_score(probe, Reply(content="NOT PRESENT", finish_reason="stop")) == 1
-    assert compare._recall_cell([1, 0, "tool_call", "budget"]) == "1/2 budget 1 tool_call 1"
+    assert compare._recall_cell([1, 0, "tool_call", "budget"]) == \
+        "1/3; answered 1/2; budget 1 tool_call 1", "budget stays in the denominator"
+    assert compare._recall_cell([1, 1]) == "2/2; answered 2/2"
 
 
 def check_failures_are_reported() -> None:
@@ -385,15 +387,14 @@ def check_failures_are_reported() -> None:
     probe = recall.probes_at(1000, recall.make_facts(7, 1000, 1))[-1]
     assert modes.probe_score(probe, Reply(status=500, error="boom")) == "error"
     assert modes.probe_score(probe, Reply(error="reset", dead=True)) == "error"
-    assert compare._recall_cell(["error", 1]) == "1/1 error 1"
+    assert compare._recall_cell(["error", 1]) == "1/1; answered 1/1; error 1"
     assert not Reply(status=200, error="refused inside the stream").ok
     assert Reply(status=200).ok and not Reply(status=400).ok
     planned = next(p for p in replay_requests(spec(), load_corpus(REPO, "HEAD"), "m", 11, 0, True)
                    if p.kind == "response_format")
     refused = modes.annotate(planned, 11, Reply(status=200, error="no"))
     assert refused["response_format"] == "refused", "an error chunk at 200 is not served"
-    records = [{"kind": "seed_probe", "error": "x"}, {"kind": "sampling", "error": "x"},
-               {"kind": "step", "error": None}]
+    records = [{"kind": "seed_probe", "error": "x"}, {"kind": "step", "error": None}]
     assert modes.request_errors(records) == 0, "probes exist to be refused"
     assert modes.request_errors([*records, {"kind": "short", "error": "HTTP 500"}]) == 1
     with tempfile.TemporaryDirectory() as tmp:
@@ -425,6 +426,69 @@ def check_cut_calls(session: task_mode.Session) -> None:
     assert task_mode.task_status("fail", "server error: reset") == "aborted"
     assert task_mode.task_status("pass", "server error: reset") == "pass"
     assert task_mode.task_status("fail", None) == "fail"
+
+
+def check_budgets_and_decode() -> None:
+    parser = cli_parser()
+    assert parser.parse_args(["replay", "--corpus-rev", "H"]).max_tokens == 8192
+    assert parser.parse_args(["task", "--corpus-rev", "H"]).max_tokens == 32768
+    many = Reply(first=1.0, last=3.0, completion_tokens=200, output_deltas=100)
+    assert (many.burst, many.decode_note, many.decode_tps) == (False, None, 100.0)
+    lumps = Reply(first=1.0, last=3.0, completion_tokens=200, output_deltas=3)
+    assert lumps.burst and lumps.decode_note == "burst", "200 tokens in 3 deltas is a burst"
+    tiny = Reply(first=1.0, last=1.5, completion_tokens=10, output_deltas=5)
+    assert not tiny.burst and tiny.decode_note == "short"
+    assert Reply(started=1.0, ended=4.0).total_s == 3.0 and Reply().total_s is None
+    assert Reply().burst is None, "no output is not a burst, it is unknown"
+    assert parsed(SAMPLE_A).output_deltas == 3, "a role chunk is not output"
+    assert compare._decode({"decode_tps": 96.66, "decode_note": "short"}) == \
+        "96.66 not meaningful: short"
+    assert compare._decode({"decode_tps": 96.66}) == 96.66
+
+
+def check_compare_prints_everything() -> None:
+    minute = {"minute": 0, "requests": 7, "errors": 1, "ttft_p50_s": 1.5, "total_p50_s": 9.5}
+    row = {"kind": "step", "seed": 1, "conv": 0, "step": 1, "not_cold": True, "burst": True,
+           "completion_tokens": 75, "total_s": 2.5, "decode_tps": 90.0, "decode_note": "burst"}
+    check = {"temperature": "honoured", "top_k": "not shown", "top_p": "not shown"}
+    with tempfile.TemporaryDirectory() as tmp:
+        path = write_run(Path(tmp), "a", 1, "same")
+        summary = json.loads((path / "summary.json").read_text())
+        summary.update(per_minute=[minute], requests=[row], sampling_check=check)
+        (path / "summary.json").write_text(json.dumps(summary))
+        result = compare.load_result(path)
+        table = compare.render(result, result)
+    for expected in ("not_cold first steps", "1/1", "temperature honoured, top_k not shown",
+                     "soak minute 0 requests", "soak minute 0 ttft_p50_s", "soak minute 0 total_p50_s",
+                     "completion_tokens", "total_s", "burst", "90.00 not meaningful: burst"):
+        assert expected in table, (expected, table)
+    samples = [{"started": 0.0, "ttft_s": 1.0, "total_s": 3.0, "error": None},
+               {"started": 10.0, "ttft_s": 3.0, "total_s": 5.0, "error": "x"},
+               {"started": 70.0, "ttft_s": None, "total_s": None, "error": "y"}]
+    from agentic_replay.results import per_minute
+    assert per_minute(samples) == [
+        {"minute": 0, "requests": 2, "errors": 1, "ttft_p50_s": 2.0, "total_p50_s": 4.0},
+        {"minute": 1, "requests": 1, "errors": 1, "ttft_p50_s": None, "total_p50_s": None}]
+
+
+def check_sampling_pre_run() -> None:
+    """A real attempt against a closed port: recorded in its file, absent from the results."""
+    args = cli_parser().parse_args(["replay", "--corpus-rev", "H"])
+    assert args.sampling_check is True, "on by default"
+    assert not cli_parser().parse_args(
+        ["replay", "--corpus-rev", "H", "--no-sampling-check"]).sampling_check
+    bodies = modes.sampling_bodies("m", SAMPLING, 1, None)
+    assert [name for name, _ in bodies] == ["greedy", "hot", "hot_top_k_1", "hot_top_p_tiny"]
+    assert all(json.loads(body)["top_k"] != 0 for _, body in bodies)
+    planned = {p.kind for p in replay_requests(spec(), load_corpus(REPO, "HEAD"), "m", 1, 0, True)}
+    assert "sampling" not in planned, "the check is a pre-run step, not part of the workload"
+    with tempfile.TemporaryDirectory() as tmp:
+        url = f"http://127.0.0.1:{free_port()}/v1"
+        args.base_url, args.api_key, args.request_timeout = url, "", 5.0
+        run = Run(Path(tmp), url, "")
+        verdict, dead = modes.run_sampling_check(run, args, "m", 1, False)
+        assert dead and verdict["temperature"] == "not shown"
+        assert run.records == [] and Path(tmp, "sampling-check.json").exists()
 
 
 def check_task_columns() -> None:
@@ -528,7 +592,7 @@ def check_deep_tree_keeps_results() -> None:
 def check_compare_covers_the_workload() -> None:
     assert len(modes.code_digest()) == 64
     source = (TOOL_DIR / "agentic_replay" / "modes.py").read_text()
-    for key in ('"response_format": spec.response_format', '"sampling_check": spec.sampling_check',
+    for key in ('"response_format": spec.response_format', '"sampling_check": args.sampling_check',
                 '"code_sha": code_digest()'):
         assert key in source, key
     with tempfile.TemporaryDirectory() as tmp:
@@ -1016,6 +1080,9 @@ def main() -> int:
     check_failures_are_reported()
     check_task_bounds()
     check_task_columns()
+    check_budgets_and_decode()
+    check_compare_prints_everything()
+    check_sampling_pre_run()
     check_compare_covers_the_workload()
     check_probe_score_labels()
     check_soak_salts(corpus)

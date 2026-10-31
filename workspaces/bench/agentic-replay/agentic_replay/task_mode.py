@@ -20,7 +20,7 @@ from . import fstools, sandbox
 from .client import Reply, post_chat
 from .core import canonical_bytes, render_body, token_worth
 from .corpus import Corpus, load_corpus
-from .modes import (REPO, annotate, base_workload, discover_model, fail, open_run, probe_seed,
+from .modes import (REPO, annotate, base_workload, discover_model, fail, open_run, pre_run,
                     sampling_of, task_prefix)
 from .results import Run, request_rows
 from .tooldefs import TOOLS, CallVerdict, check_call, syntax_in_content
@@ -295,10 +295,10 @@ def run_task(args: argparse.Namespace) -> int:
         return fail(run, f"no model: {snapshot['models'].get('error')}")
     corpus = load_corpus(REPO, args.corpus_rev)
     fixture = load_fixture()
-    probe = probe_seed(run, args, model, seeds[0])
-    if probe.dead:
-        return fail(run, f"server unreachable: {probe.error}")
-    sent = probe.ok
+    pre = pre_run(run, args, model, seeds[0])
+    if pre.dead:
+        return fail(run, f"server unreachable: {pre.dead}")
+    sent = pre.sent
     run.write_json("manifest.json", {"model": model, "base_url": args.base_url, "workload": {
         **base_workload(args, corpus, seeds, sent), "fixture_sha": fixture_digest(),
         "prefix_bytes": token_worth(args.prefix_tokens), "max_turns": args.max_turns,
@@ -313,6 +313,7 @@ def run_task(args: argparse.Namespace) -> int:
     run.snapshot("end")
     stopped = next((r["stopped"] for r in repeats if r["stopped"]), None)
     run.close({"stopped": stopped, "memory": memory, "repeats": repeats,
+               "sampling_check": pre.sampling,
                "requests": request_rows(run.records)})
     print(f"results: {run.path}")
     return 1 if stopped else 0

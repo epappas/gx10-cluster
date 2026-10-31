@@ -16,6 +16,8 @@ from typing import Any
 
 ERROR_BODY_LIMIT = 2048
 MIN_DECODE_SPAN_S = 0.05
+MIN_DECODE_TOKENS = 32
+BURST_TOKENS_PER_DELTA = 16
 KNOWN_DELTA_FIELDS = {"role", "content", "tool_calls", "function_call"}
 
 
@@ -35,6 +37,28 @@ class Reply:
     cached_tokens: int | None = None
     completion_tokens: int | None = None
     finish_reason: str | None = None
+    output_deltas: int = 0
+
+    @property
+    def total_s(self) -> float | None:
+        return self.ended - self.started if self.ended else None
+
+    @property
+    def burst(self) -> bool | None:
+        """Output that arrived in lumps: the span says little, and ttft_s holds decode time."""
+        if self.first is None or self.last is None:
+            return None
+        if self.last - self.first < MIN_DECODE_SPAN_S:
+            return True
+        return (self.completion_tokens or 0) / max(self.output_deltas, 1) > BURST_TOKENS_PER_DELTA
+
+    @property
+    def decode_note(self) -> str | None:
+        """Why decode_tps should not be read, if it should not."""
+        if self.burst:
+            return "burst"
+        tokens = self.completion_tokens
+        return "short" if tokens is not None and tokens < MIN_DECODE_TOKENS else None
 
     @property
     def ttft_s(self) -> float | None:
@@ -99,6 +123,7 @@ def _apply_delta(reply: Reply, delta: dict[str, Any], now: float) -> None:
     if text or fragments or delta.get("tool_calls"):
         reply.first = now if reply.first is None else reply.first
         reply.last = now
+        reply.output_deltas += 1
 
 
 def _apply_usage(reply: Reply, usage: dict[str, Any]) -> None:

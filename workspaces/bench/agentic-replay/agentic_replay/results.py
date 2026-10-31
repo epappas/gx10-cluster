@@ -7,6 +7,7 @@ everything measured so far on disk.
 from __future__ import annotations
 
 import json
+import statistics
 import threading
 import time
 from dataclasses import dataclass, field
@@ -30,7 +31,9 @@ def reply_record(reply: Reply) -> dict[str, Any]:
     return {
         "status": reply.status, "error": reply.error, "dead": reply.dead,
         "started": reply.started, "ended": reply.ended,
-        "ttft_s": reply.ttft_s, "decode_tps": reply.decode_tps,
+        "ttft_s": reply.ttft_s, "decode_tps": reply.decode_tps, "total_s": reply.total_s,
+        "output_deltas": reply.output_deltas, "burst": reply.burst,
+        "decode_note": reply.decode_note,
         "content": reply.content, "reasoning": reply.reasoning,
         "tool_calls": reply.tool_calls, "prompt_tokens": reply.prompt_tokens,
         "cached_tokens": reply.cached_tokens, "completion_tokens": reply.completion_tokens,
@@ -136,21 +139,27 @@ class MetricsSaver:
 
 
 def request_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    keys = ("seed", "conv", "step", "kind", "target_bytes", "ttft_s", "decode_tps",
+    keys = ("seed", "conv", "step", "kind", "target_bytes", "ttft_s", "decode_tps", "total_s",
+            "burst", "decode_note",
             "prompt_tokens", "cached_tokens", "completion_tokens", "finish_reason",
             "budget", "error", "memory_low_kib", "not_cold")
     return [{k: r.get(k) for k in keys} for r in records]
 
 
-def per_minute(records: list[dict[str, Any]]) -> list[dict[str, int]]:
+def per_minute(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Requests and errors by minute since the first request."""
     if not records:
         return []
     start = min(r["started"] for r in records)
-    minutes: dict[int, dict[str, int]] = {}
+    minutes: dict[int, list[dict[str, Any]]] = {}
     for record in records:
-        minute = int((record["started"] - start) // 60)
-        row = minutes.setdefault(minute, {"minute": minute, "requests": 0, "errors": 0})
-        row["requests"] += 1
-        row["errors"] += 1 if record.get("error") else 0
-    return [minutes[m] for m in sorted(minutes)]
+        minutes.setdefault(int((record["started"] - start) // 60), []).append(record)
+    return [{"minute": m, "requests": len(minutes[m]),
+             "errors": sum(1 for r in minutes[m] if r.get("error")),
+             "ttft_p50_s": _median(minutes[m], "ttft_s"),
+             "total_p50_s": _median(minutes[m], "total_s")} for m in sorted(minutes)]
+
+
+def _median(records: list[dict[str, Any]], key: str) -> float | None:
+    values = [r[key] for r in records if r.get(key) is not None]
+    return statistics.median(values) if values else None

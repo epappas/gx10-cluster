@@ -78,8 +78,15 @@ because an empty kill list would claim there were no kills.
 - **`aborted`**: the server died during the task, and hidden tests did not pass. It is
   not a model failure. **`budget`** in a task row: a reply or tool call cut by a length
   stop, counted apart from `invalid`.
-- **`missing`** is never 0. A reply delivered in one burst has no decode rate, and its
-  decode time sits inside `ttft_s`. Tool-call replies did this on the DeepSeek server.
+- **`missing`** is never 0.
+- **`decode_tps` is biased by smoothed streaming and bursts.** A reply delivered in lumps
+  has its decode time inside `ttft_s`, and tool-call replies did this on the DeepSeek
+  server. So compare prints `completion_tokens`, `total_s` and a `burst` flag, and marks
+  the rate `not meaningful` on short or burst replies. Prefer tokens over `total_s`.
+- **Recall** reads `1/3; answered 1/2; budget 1`. Budget stops stay in the first
+  denominator, so a model that ran out of budget does not look more accurate.
+- **Sampling check:** a single step before the run, on by default, recorded in
+  `sampling-check.json` and kept out of the results. Four short requests.
 - **A short `--max-turns` scores the budget, not the model.**
 - **`window`** comes from any window-like key in the snapshots. The DeepSeek server
   exposes none, so it reads missing there.

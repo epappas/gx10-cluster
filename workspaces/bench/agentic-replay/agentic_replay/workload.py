@@ -49,7 +49,6 @@ class Planned:
     salt: str
     body: bytes
     probe: Probe | None = None
-    variant: str | None = None
 
 
 @dataclass
@@ -110,7 +109,6 @@ class ReplaySpec:
     sampling: Sampling
     interleave: bool = False
     response_format: bool = False
-    sampling_check: bool = False
 
     def stops(self) -> list[int]:
         steps = range(self.step_bytes, self.target_bytes + 1, self.step_bytes)
@@ -139,23 +137,23 @@ def seed_probe_body(model: str, sampling: Sampling, seed: int) -> bytes:
     return render_body(model, messages, sampling, seed)
 
 
-def _sampling_checks(
-    model: str, messages: list[dict[str, Any]], spec: ReplaySpec, seed: int | None,
-) -> Iterator[tuple[str, bytes]]:
+def sampling_bodies(
+    model: str, base: Sampling, seed: int, wire_seed: int | None,
+) -> list[tuple[str, bytes]]:
     """Three variants of one prompt, compared with its greedy reply to show values win.
 
     top_k stays set on the hot variants: top_k=0 came back as a server error on TensorFold.
     """
-    base = spec.sampling
     variants = {
         "greedy": Sampling(0.0, 1.0, base.top_k, SAMPLING_MAX_TOKENS),
         "hot": Sampling(HOT_TEMPERATURE, 1.0, base.top_k, SAMPLING_MAX_TOKENS),
         "hot_top_k_1": Sampling(HOT_TEMPERATURE, 1.0, 1, SAMPLING_MAX_TOKENS),
         "hot_top_p_tiny": Sampling(HOT_TEMPERATURE, TINY_TOP_P, base.top_k, SAMPLING_MAX_TOKENS),
     }
-    question = [*messages, {"role": "user", "content": SAMPLING_PROMPT}]
-    for name, sampling in variants.items():
-        yield name, render_body(model, question, sampling, seed, TOOLS)
+    question = [system_message(salt_for(seed, "sampling-check")),
+                {"role": "user", "content": SAMPLING_PROMPT}]
+    return [(name, render_body(model, question, sampling, wire_seed, TOOLS))
+            for name, sampling in variants.items()]
 
 
 def replay_requests(
@@ -166,15 +164,10 @@ def replay_requests(
     facts = make_facts(seed, spec.target_bytes, spec.fact_count)
     history = ScriptedHistory(corpus, seed, f"replay:{conv}", facts, opening(salt))
     wire_seed = seed if send_seed else None
-    sampling_due = spec.sampling_check
     for step, target in enumerate(spec.stops(), 1):
         history.grow_to(target)
         body = render_body(model, history.messages, spec.sampling, wire_seed, TOOLS)
         yield Planned("step", conv, step, target, salt, body)
-        if sampling_due:
-            sampling_due = False
-            for name, checked in _sampling_checks(model, history.messages, spec, wire_seed):
-                yield Planned("sampling", conv, step, target, salt, checked, variant=name)
         if target in spec.probe_bytes:
             yield from _probes(spec, model, history, facts, wire_seed, conv, step, target, salt)
         if spec.interleave:

@@ -56,6 +56,8 @@ def common(parser: argparse.ArgumentParser, max_tokens: int) -> None:
     parser.add_argument("--nodes", type=lambda s: s.split(","), default=[])
     parser.add_argument("--memguard-log", help="path on each node; differs per model")
     parser.add_argument("--ssh-config")
+    parser.add_argument("--no-sampling-check", dest="sampling_check", action="store_false",
+                        help="skip the check that request sampling values reach the sampler")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -64,7 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="mode", required=True)
 
     replay = sub.add_parser("replay")
-    common(replay, 1024)
+    common(replay, 8192)
     replay.add_argument("--target-tokens", type=int, default=300000)
     replay.add_argument("--step-tokens", type=int, default=25000)
     replay.add_argument("--probe-tokens", type=ints, default=ints(DEFAULT_PROBES))
@@ -72,7 +74,6 @@ def build_parser() -> argparse.ArgumentParser:
     replay.add_argument("--conversations", type=int, choices=(1, 2, 4), default=1)
     replay.add_argument("--interleave", action="store_true")
     replay.add_argument("--response-format", action="store_true")
-    replay.add_argument("--sampling-check", action="store_true")
 
     soak = sub.add_parser("soak")
     common(soak, 256)
@@ -88,7 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
     soak.add_argument("--streams", type=int, default=4)
 
     task = sub.add_parser("task")
-    common(task, 8192)
+    common(task, 32768)
     task.add_argument("--prefix-tokens", type=int, default=100000)
     task.add_argument("--max-turns", type=int, default=30, help="per task")
     task.add_argument("--task-limit", type=int, default=0, help="0 runs every task")
