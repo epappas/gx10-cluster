@@ -83,10 +83,6 @@ echo
 # it refuses loudly (argument pre-check against the image's capabilities)
 # BEFORE stopping a running server. DRY_RUN=1 passes straight through.
 #
-# Not exec: the memory guards start once start.sh returns, and also when it
-# failed, because some of its failures leave the ranks running. A start.sh
-# failure is reported first; a guard that did not start fails `ws up` otherwise.
-status=0 guards=0
-./start.sh "$@" || status=$?
-[[ ${DRY_RUN:-0} == 1 ]] || memory_guard_up || guards=$?
-exit $(( status ? status : guards ))
+# Arm both startup supervisors before preparation/loading. Arguments, environment
+# and a failing start.sh exit code are unchanged; interruption reports guard state.
+memory_guard_launch "$@"

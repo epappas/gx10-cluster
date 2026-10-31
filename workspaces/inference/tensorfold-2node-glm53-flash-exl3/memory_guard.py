@@ -26,9 +26,10 @@ HARD_GIB = 1.0
 SAMPLE_S = 0.2
 MAX_SAMPLE_S = 0.25
 WATCH_S = 1.0
-DOCKER_TIMEOUT_S = 10.0
-# Measured: 12 s for `docker kill` on a loaded daemon, so 10 s would cut off real kills.
-KILL_TIMEOUT_S = 30.0
+DOCKER_TIMEOUT_S = 2.0
+KILL_TIMEOUT_S = 2.0
+RETRY_MAX_S = 5.0
+STARTUP_MAX_S = 6 * 3600
 KIB_PER_GIB = 1024**2
 MEMINFO = Path("/proc/meminfo")
 # Not just "no such": a dead daemon says "connect: no such file or directory".
@@ -56,13 +57,14 @@ def gib(kib: float) -> str:
     return f"{kib / KIB_PER_GIB:.2f} GiB"
 
 
-def log_line(log: int, message: str) -> None:
+def log_line(log: int, message: str) -> bool:
     """Unbuffered, and never fatal: a full disk must not stop a kill."""
     stamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
     try:
         os.write(log, f"{stamp} {message}\n".encode())
+        return True
     except OSError:
-        pass
+        return False
 
 
 def docker(*args: str, timeout: float = DOCKER_TIMEOUT_S) -> subprocess.CompletedProcess[str]:
@@ -85,44 +87,43 @@ def running_id(name: str) -> str | None:
 
 
 def watch(name: str, container_id: str, gone: threading.Event, log: int) -> None:
-    """A thread, so a slow docker never delays a memory sample."""
-    unreachable = False
-    while not gone.wait(WATCH_S):
+    """Slow inspections cannot block the memory sampler."""
+    delay = SAMPLE_S
+    while not gone.wait(delay):
         try:
             current = running_id(name)
         except DockerUnavailable as exc:
-            if not unreachable:
-                log_line(log, f"docker unreachable, still guarding: {exc}")
-            unreachable = True
+            if delay == SAMPLE_S:
+                log_line(log, f"docker unavailable: protection unconfirmed: {exc}")
+            delay = min(RETRY_MAX_S, max(1.0, delay * 2))
             continue
-        unreachable = False
+        delay = SAMPLE_S
         if current != container_id:
             gone.set()
 
 
 def kill(name: str, container_id: str, why: str, retry: bool, log: int) -> bool:
-    """True when nothing is left to guard. By id: never a successor of that name."""
-    # Written first: a node that freezes during the kill still leaves the decision.
-    log_line(log, f"killing container {name}: {why}")
+    """Only a successful Docker reply confirms a kill, never a later disappearance."""
+    if not retry:
+        log_line(log, f"killing container {name} id={container_id}: {why}")
     began = time.monotonic()
     try:
         done = docker("kill", container_id, timeout=KILL_TIMEOUT_S)
     except DockerUnavailable as exc:
-        log_line(log, f"kill failed, will retry: {exc}")
+        if not retry:
+            log_line(log, f"kill unconfirmed, retrying with backoff: {exc}")
         return False
-    took = time.monotonic() - began
-    reason = done.stderr.strip()
     if done.returncode == 0:
-        log_line(log, f"killed container {name}: {why}; docker took {took:.1f} s")
+        took = time.monotonic() - began
+        log_line(log, f"killed container {name} id={container_id}: {why}; docker took {took:.1f} s")
         return True
-    if NO_CONTAINER not in reason.lower() and "not running" not in reason.lower():
-        log_line(log, f"kill failed, will retry: {reason}")
-        return False
-    if retry:
-        log_line(log, f"killed container {name}: {why}; an earlier kill got no reply in time")
-    else:
-        log_line(log, f"container {name} went by itself before the kill: {why}")
-    return True
+    reason = done.stderr.strip()
+    if NO_CONTAINER in reason.lower() or "not running" in reason.lower():
+        log_line(log, f"container {name} gone; kill unconfirmed: {why}")
+        return True
+    if not retry:
+        log_line(log, f"kill unconfirmed, retrying with backoff: {reason}")
+    return False
 
 
 def kill_reason(args: argparse.Namespace, dip: Dip, available_kib: int, now: float) -> str | None:
@@ -139,32 +140,85 @@ def kill_reason(args: argparse.Namespace, dip: Dip, available_kib: int, now: flo
 
 def guard(args: argparse.Namespace, container_id: str, gone: threading.Event, log: int) -> None:
     dip: Dip | None = None
-    unconfirmed: str | None = None
+    unconfirmed = False
+    retry_at = 0.0
+    retry_delay = 1.0
     while not gone.is_set():
         available = mem_available_kib()
         now = time.monotonic()
         if available >= args.soft_gib * KIB_PER_GIB:
             if dip:
-                log_line(log, f"recovered: no kill; lowest {gib(dip.lowest_kib)}, "
-                              f"lasted {now - dip.started:.1f} s")
-            dip = None
+                suffix = "; earlier kill unconfirmed" if unconfirmed else ""
+                log_line(log, f"recovered: no kill confirmed; lowest {gib(dip.lowest_kib)}, "
+                              f"lasted {now - dip.started:.1f} s{suffix}")
+            dip, unconfirmed, retry_at, retry_delay = None, False, 0.0, 1.0
         else:
             if dip is None:
                 dip = Dip(now, available)
                 log_line(log, f"dip: MemAvailable {gib(available)} under soft floor "
-                              f"{args.soft_gib:.2f} GiB")
+                              f"{args.soft_gib:.2f} GiB; lowest {gib(available)}")
             dip.lowest_kib = min(dip.lowest_kib, available)
             why = kill_reason(args, dip, available, now)
-            if why:
-                if kill(args.container, container_id, why, unconfirmed is not None, log):
+            if why and now >= retry_at:
+                if kill(args.container, container_id, why, unconfirmed, log):
                     return
-                unconfirmed = why
+                unconfirmed = True
+                retry_at = time.monotonic() + retry_delay
+                retry_delay = min(RETRY_MAX_S, retry_delay * 2)
         gone.wait(args.sample_s)
     if unconfirmed:
-        log_line(log, f"killed container {args.container}: {unconfirmed}; "
-                      "an earlier kill got no reply in time")
+        log_line(log, f"container {args.container} gone; kill unconfirmed")
     log_line(log, f"container {args.container} gone, guard exiting"
                   + (f"; open dip lowest {gib(dip.lowest_kib)}" if dip else ""))
+
+
+def status(args: argparse.Namespace, value: str) -> None:
+    if args.status_file:
+        args.status_file.write_text(value + "\n")
+
+
+def run_rank(args: argparse.Namespace, container_id: str, log: int) -> None:
+    # The id is captured before sampling; a kill can never hit a successor by name.
+    log_line(log, f"started: container {args.container} id={container_id}, "
+                  f"soft {args.soft_gib:.2f} GiB for {args.sustain_s:.1f} s, "
+                  f"hard {args.hard_gib:.2f} GiB, sample {args.sample_s:.2f} s")
+    status(args, f"guarding {container_id}")
+    gone = threading.Event()
+    watcher = threading.Thread(target=watch, args=(args.container, container_id, gone, log),
+                               daemon=True)
+    watcher.start()
+    try:
+        guard(args, container_id, gone, log)
+    finally:
+        gone.set()
+        watcher.join(DOCKER_TIMEOUT_S + 1)
+
+
+def supervising(args: argparse.Namespace, deadline: float) -> bool:
+    return bool(args.startup_file and args.startup_file.exists() and time.monotonic() < deadline)
+
+
+def supervise(args: argparse.Namespace, log: int, current: str | None) -> None:
+    deadline = time.monotonic() + STARTUP_MAX_S
+    delay = SAMPLE_S
+    while True:
+        if current:
+            run_rank(args, current, log)
+        status(args, "waiting")
+        if not supervising(args, deadline):
+            log_line(log, "startup supervision finished; no active guarded container")
+            return
+        time.sleep(delay)
+        try:
+            current = running_id(args.container)
+        except DockerUnavailable as exc:
+            if delay == SAMPLE_S:
+                log_line(log, f"docker unavailable: startup protection unconfirmed: {exc}")
+            status(args, "unavailable")
+            current = None
+            delay = min(RETRY_MAX_S, max(1.0, delay * 2))
+            continue
+        delay = SAMPLE_S
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -175,6 +229,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--sustain-s", type=float, default=SUSTAIN_S)
     parser.add_argument("--hard-gib", type=float, default=HARD_GIB)
     parser.add_argument("--sample-s", type=float, default=SAMPLE_S)
+    parser.add_argument("--startup-file", type=Path)
+    parser.add_argument("--ready-file", type=Path)
+    parser.add_argument("--status-file", type=Path)
     args = parser.parse_args(argv)
     if not 0 < args.hard_gib <= args.soft_gib:
         parser.error("floors must satisfy 0 < hard <= soft")
@@ -192,18 +249,21 @@ def main(argv: list[str]) -> int:
     except DockerUnavailable as exc:
         print(f"memory_guard: docker unavailable: {exc}", file=sys.stderr)
         return 2
-    if container_id is None:
+    if container_id is None and args.startup_file is None:
         print(f"memory_guard: no running container named {args.container}", file=sys.stderr)
         return 2
     args.log.parent.mkdir(parents=True, exist_ok=True)
     log = os.open(args.log, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
-    log_line(log, f"started: container {args.container}, soft {args.soft_gib:.2f} GiB for "
-                  f"{args.sustain_s:.1f} s, hard {args.hard_gib:.2f} GiB, "
-                  f"sample {args.sample_s:.2f} s, now {gib(mem_available_kib())}")
-    gone = threading.Event()
-    threading.Thread(target=watch, args=(args.container, container_id, gone, log),
-                     daemon=True).start()
-    guard(args, container_id, gone, log)
+    ready = log_line(log, f"supervisor started: container {args.container}, pid={os.getpid()}")
+    if args.ready_file:
+        if not ready:
+            return 2
+        args.ready_file.write_text(str(os.getpid()))
+    try:
+        supervise(args, log, container_id)
+    finally:
+        if args.ready_file:
+            args.ready_file.unlink(missing_ok=True)
     return 0
 
 

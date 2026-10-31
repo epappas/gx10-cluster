@@ -41,7 +41,8 @@ summary: GLM-5.3-Flash EXL3 on the pair with the TensorFold engine - upstream's 
 # runtime guard, and its README says exhaustion tends to freeze the machine.
 # memory_guard.py is this repo's own, on both ranks: under 2.5 GiB MemAvailable
 # for 4 s, or under 1 GiB at once, it kills that rank's container. `ws up`
-# starts it after start.sh returns, so the weight load itself is NOT covered.
+# arms startup supervisors before start.sh and re-arms replacement container IDs.
+# Discovery and kills depend on Docker; a hung daemon can prevent protection.
 # Tested on devbox docker only: never run on a GB10 or against a GLM boot.
 
 requires:
