@@ -52,7 +52,7 @@ help:  ## Show this help
 # --- Checks that run anywhere (and in CI) ----------------------------------
 
 .PHONY: check
-check: lint syntax smoke render handlers optional-tags workspaces detectors quant-ab checkpoint-config spec-accept indexer-workspace prefill-ladder storage docs lockfile shellcheck  ## Every offline check (what CI runs)
+check: lint syntax smoke render handlers optional-tags workspaces detectors quant-ab checkpoint-config spec-accept indexer-workspace prefill-ladder ws-status storage docs lockfile shellcheck  ## Every offline check (what CI runs)
 
 .PHONY: deps
 deps:  ## Install the pinned collections
@@ -163,6 +163,10 @@ indexer-workspace:  ## The indexer right-sizing bound and its capping rewrite st
 .PHONY: prefill-ladder
 prefill-ladder:  ## The prefill ladder proves a cold rung cold, and a clean run stays clean
 	@python3 tests/check_prefill_ladder.py
+
+.PHONY: ws-status
+ws-status:  ## ws status sees docker-run workspaces, and says so when docker is absent
+	@python3 tests/check_ws_status.py
 
 # The half of gx10-storage that can be wrong without looking wrong: if a
 # checkpoint stops classing as `weights` it lands in the reclaim plan, and
