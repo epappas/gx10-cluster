@@ -8,12 +8,16 @@
 #   ws up   tensorfold-2node-glm53-flash-exl3 restart    # after a .env change
 #   ws logs tensorfold-2node-glm53-flash-exl3 -f         # rank 0 (rank 1: ssh worker docker logs)
 #   ws down tensorfold-2node-glm53-flash-exl3
+# Restart through `ws up ... restart`, not the kit's ./start.sh restart: only
+# `ws up` starts the memory guards (README, "Memory guard").
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
 # shellcheck source=/dev/null
 [[ -f .env ]] && { set -a; . ./.env; set +a; }
 # shellcheck source-path=SCRIPTDIR source=../../lib/kit.sh
 source ../../lib/kit.sh
+# shellcheck source-path=SCRIPTDIR source=memory_guard.sh
+source ./memory_guard.sh
 
 KIT_URL=${KIT_URL:-https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold.git}
 KIT_SHA=3fd60dfc836fab0f1ed0fd4f0afaf2a1d62b2aab
@@ -78,4 +82,11 @@ echo
 # RoCE GID discovery, both ranks' launch, the smoke test - is the kit's, and
 # it refuses loudly (argument pre-check against the image's capabilities)
 # BEFORE stopping a running server. DRY_RUN=1 passes straight through.
-exec ./start.sh "$@"
+#
+# Not exec: the memory guards start once start.sh returns, and also when it
+# failed, because some of its failures leave the ranks running. A start.sh
+# failure is reported first; a guard that did not start fails `ws up` otherwise.
+status=0 guards=0
+./start.sh "$@" || status=$?
+[[ ${DRY_RUN:-0} == 1 ]] || memory_guard_up || guards=$?
+exit $(( status ? status : guards ))

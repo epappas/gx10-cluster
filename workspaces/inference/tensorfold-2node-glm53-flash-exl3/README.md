@@ -81,9 +81,9 @@ this file can make; the default is upstream's (dflash2) and the switch is one
 
 ```bash
 ws up   tensorfold-2node-glm53-flash-exl3
-ws up   tensorfold-2node-glm53-flash-exl3 restart   # after a .env change
+ws up   tensorfold-2node-glm53-flash-exl3 restart   # after a .env change; restarts the memory guards too
 ws logs tensorfold-2node-glm53-flash-exl3 -f        # rank 0; rank 1: ssh <peer> docker logs -f glm53-flash-tf
-ws down tensorfold-2node-glm53-flash-exl3           # both ranks, logs archived by the kit
+ws down tensorfold-2node-glm53-flash-exl3           # both ranks and their guards, logs archived by the kit
 ```
 
 First run: the kit's `prepare.sh` pulls the image by digest on both Sparks,
@@ -95,6 +95,65 @@ Then, pointed at 8902: `vllm-quality-gate` (the kit ships `tools/` checks
 too, incl. `toolcheck.py` and `end_of_turn.py`), `vllm-prefill-ladder
 --chunk-tokens 2048`, and `pi-harness`/`deepseek-harness` as clients —
 with one caveat below.
+
+## Memory guard
+
+The kit has a stall watchdog and a start-time reserve, but nothing that watches
+memory while serving, and its README says exhaustion tends to freeze the
+machine. These two nodes have no remote power control we can rely on, so this
+workspace adds its own guard, `memory_guard.py`, written here and not copied
+from any kit.
+
+It runs on each rank, samples `MemAvailable` from `/proc/meminfo` every 0.2 s,
+and kills that rank's container, with the same floors as the DeepSeek arm:
+
+| | floor | action |
+|---|---|---|
+| soft | under 2.5 GiB for 4 s | kill the container; a dip that recovers first is only logged |
+| hard | under 1 GiB | kill the container at once |
+
+- **Lifetime.** `ws up` starts it on both nodes after `start.sh` returns, and
+  also when `start.sh` failed, because some failures leave the ranks running.
+  `ws down` stops it. It exits by itself when the container stops or is
+  replaced, and it keeps no pid file or lock, so nothing blocks a restart.
+- **`ws up` fails if a rank is unguarded.** A guard that cannot start prints
+  `UNGUARDED` and `ws up` exits non-zero, with the server left running. Running
+  `ws up` again is safe: `start.sh` leaves a live server alone and the guards
+  are replaced.
+- **Log.** `~/.cache/tensorfold-glm53/logs/memguard.log` on each node, one line
+  per event, timestamped in UTC:
+
+  | line contains | means |
+  |---|---|
+  | `dip:` | fell under the soft floor |
+  | `recovered: no kill` | came back in time, with the lowest value and duration |
+  | `killing container` | the decision, written before docker is asked |
+  | `killed container` | docker killed it, with the lowest value |
+  | `kill failed, will retry` | docker refused or timed out; still guarding |
+  | `docker unreachable, still guarding` | docker gave no answer; that is not "gone" |
+
+  `docker kill` keeps the stopped container, so its log survives for the kit's
+  next start to archive. Only the rank under pressure is killed: its peer keeps
+  running until `ws down` or the next `ws up`, which restarts both.
+
+What it does **not** cover:
+
+- **The weight load.** The guards start after the server answers, so the 2-6
+  minute load, and each retry inside `start.sh`, is protected only by the kit's
+  start-time reserve.
+- **`./start.sh restart` run by hand from the kit directory.** The old guards
+  exit when their containers go, and nothing starts new ones, so the new server
+  runs **unguarded** until you run `ws up` once. `ws up <name> restart` restarts
+  the guards itself. The same applies to `FOREGROUND=1`, where `start.sh` only
+  returns once the server has ended.
+- **A slow docker.** The decision is the guard's, but the kill is docker's:
+  `docker kill` took from 0.5 s to 12 s on a busy devbox at load 39, and one
+  run points to a kill with no reply inside the guard's 30 s timeout, finished
+  by its retry. A starving node could be slower still, so a kill can land well
+  after the floor's time, and that margin is unmeasured on a GB10.
+
+Tested for real on devbox docker with throwaway containers
+(`make memory-guard`). **It has never run on a GB10 or against a GLM boot.**
 
 ## What does NOT carry over from vLLM
 

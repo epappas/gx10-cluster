@@ -3,12 +3,15 @@
 # over ssh, waits STOP_TIMEOUT for the prompt-state flush to spill cleanly,
 # and archives each rank's gzipped log before `docker rm` deletes it. The
 # fallback removes the containers by name and owns up to what it cannot do.
+# Either way the memory guards go last, so a rank is never stopping unguarded.
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
 # shellcheck source=/dev/null
 [[ -f .env ]] && { set -a; . ./.env; set +a; }
 # shellcheck source-path=SCRIPTDIR source=../../lib/kit.sh
 source ../../lib/kit.sh
+# shellcheck source-path=SCRIPTDIR source=memory_guard.sh
+source ./memory_guard.sh
 
 KIT_URL=${KIT_URL:-https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold.git}
 KIT_SHA=3fd60dfc836fab0f1ed0fd4f0afaf2a1d62b2aab
@@ -23,7 +26,10 @@ KD=$(kit_dir) || exit 1
 kit_pair || true
 if [[ -d $KD/.git ]] \
    && [[ $(git -C "$KD" rev-parse HEAD 2>/dev/null) == "$KIT_SHA" ]]; then
-    exec "$KD"/stop.sh
+    status=0
+    "$KD"/stop.sh || status=$?
+    memory_guard_down
+    exit "$status"
 fi
 
 echo "kit tree missing or at another commit - stopping both containers directly," >&2
@@ -36,3 +42,4 @@ if [[ -n ${WORKER:-} ]]; then
 else
     echo "rank 1: no peer in the interconnect inventory - nothing to reach it with" >&2
 fi
+memory_guard_down
