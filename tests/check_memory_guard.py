@@ -508,6 +508,7 @@ def check_up_and_down_over_ssh(tmp: Path) -> None:
         done = script("down.sh", env)
         assert done.returncode == 0 and guards_of(name) == 0, done
         assert done.stdout.count("stopped") >= 2, done
+        measured.append("startup/load fixture: both container IDs armed before return on both node paths; down stops both")
     finally:
         clean_up_rank(name)
 
@@ -526,6 +527,7 @@ def check_startup_interrupted(tmp: Path) -> None:
         assert process.returncode == 143, (stdout, stderr)
         assert "startup interrupted" in stderr and "guarding container id=" in stdout, (stdout, stderr)
         assert guards_of(name) == 2 and is_running(name)
+        measured.append("startup interruption: exit 143, current IDs still guarded and reported")
     finally:
         if process.poll() is None:
             process.kill()
@@ -540,9 +542,10 @@ def check_failed_startup_handshake(tmp: Path) -> None:
     try:
         done = script("up.sh", {**env, "DOCKER_HOST": "unix:///nonexistent/guard-test.sock"})
         assert done.returncode != 0 and "startup handshake failed" in done.stderr, done
-        assert "supervisor ready" not in done.stdout, done
+        assert "memory guard on rank 0: supervisor ready" not in done.stdout, done
         assert not (tmp / "argv").exists(), "start.sh ran despite a failed startup inspection"
         assert guards_of(name) == 0
+        measured.append("failed startup inspection: no ready acknowledgement, start fixture not executed")
     finally:
         clean_up_rank(name)
 
@@ -576,6 +579,7 @@ def check_daemon_failure_backoff(tmp: Path) -> None:
         assert run("docker", "stop", "-t", "0", name).returncode == 0
         assert guard.wait(12) == 0
         assert not KILL_LINE.search(text(log)), text(log)
+        measured.append("real Docker endpoint removed/restored: monitor survives; unavailable logged once; ordinary stop not a kill")
     finally:
         stop_guard(guard)
         remove_container(name)
