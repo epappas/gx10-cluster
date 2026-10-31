@@ -75,6 +75,9 @@ because an empty kill list would claim there were no kills.
   answered with a tool call. Neither is a wrong answer, and neither is in the fraction.
 - **`error`** in a recall row: the probe failed, so it is counted beside the fraction.
   A task with no reply at all is `missing`, not `fail`.
+- **`aborted`**: the server died during the task, and hidden tests did not pass. It is
+  not a model failure. **`budget`** in a task row: a reply or tool call cut by a length
+  stop, counted apart from `invalid`.
 - **`missing`** is never 0. A reply delivered in one burst has no decode rate, and its
   decode time sits inside `ttft_s`. Tool-call replies did this on the DeepSeek server.
 - **A short `--max-turns` scores the budget, not the model.**

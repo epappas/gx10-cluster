@@ -406,6 +406,40 @@ def check_failures_are_reported() -> None:
         assert "clean" not in summary
 
 
+def check_cut_calls(session: task_mode.Session) -> None:
+    """Hand-built replies, real tally code: finish_reason decides before the validator."""
+    cut = tool_call("write_file", '{"path":"a","con')
+    tally = {"repeated": 0, "invalid": 0, "refused": 0, "budget": 0}
+    task_mode._answer_calls(session, Reply(tool_calls=[cut], finish_reason="length"), set(), tally)
+    assert (tally["budget"], tally["invalid"]) == (1, 0), tally
+    assert "token budget" in session.messages[-1]["content"]
+    task_mode._answer_calls(session, Reply(tool_calls=[cut], finish_reason="tool_calls"), set(), tally)
+    assert (tally["budget"], tally["invalid"]) == (1, 1), tally
+    leaked = Reply(content='<tool_call>{"name":"read_file"', finish_reason="length")
+    assert task_mode.plain_reply_goes_on(leaked, tally) and tally["budget"] == 2
+    assert tally["invalid"] == 1, "a length stop is the budget, even with tool syntax in it"
+    leaked.finish_reason = "stop"
+    assert task_mode.plain_reply_goes_on(leaked, tally) and tally["invalid"] == 2
+    assert not task_mode.plain_reply_goes_on(Reply(content="done", finish_reason="stop"), tally)
+    session.messages.clear()
+    assert task_mode.task_status("fail", "server error: reset") == "aborted"
+    assert task_mode.task_status("pass", "server error: reset") == "pass"
+    assert task_mode.task_status("fail", None) == "fail"
+
+
+def check_task_columns() -> None:
+    """compare carries budget and aborted through to the table."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = write_run(Path(tmp), "a", 1, "same")
+        summary = json.loads((path / "summary.json").read_text())
+        summary["repeats"] = [{"seed": 1, "tasks": [
+            {"id": 1, "status": "aborted", "budget": 2, "invalid": 0}]}]
+        (path / "summary.json").write_text(json.dumps(summary))
+        result = compare.load_result(path)
+        table = compare.render(result, result)
+        assert "seed 1 task 1 budget" in table and "aborted" in table, table
+
+
 def check_task_bounds() -> None:
     """Real code on a real scratch. The Reply is hand-built and no request is sent."""
     fixture = task_mode.load_fixture()
@@ -418,13 +452,14 @@ def check_task_bounds() -> None:
         session = task_mode.Session(args, run, "m", 1, None, scratch, "s", [], 0,
                                     time.monotonic() + 60)
         calls = [tool_call("read_file", '{"path":"ledger/money.py"}') for _ in range(400)]
-        tally = {"repeated": 0, "invalid": 0, "refused": 0}
+        tally = {"repeated": 0, "invalid": 0, "refused": 0, "budget": 0}
         task_mode._answer_calls(session, Reply(tool_calls=calls), set(), tally)
         assert len(session.messages) == 400, "every call needs an answer"
         assert tally["refused"] >= 400 - task_mode.MAX_CALLS_PER_REPLY
         size = len(json.dumps(session.messages))
         assert size < task_mode.MAX_RESULT_BYTES_PER_REPLY + 400 * 200, size
         session.messages.clear()
+        check_cut_calls(session)
         session.deadline = time.monotonic() - 1
         session.results.clear()
         task_mode._run_tasks(session, fixture, fixture.tasks)
@@ -980,6 +1015,7 @@ def main() -> int:
     check_deep_tree_keeps_results()
     check_failures_are_reported()
     check_task_bounds()
+    check_task_columns()
     check_compare_covers_the_workload()
     check_probe_score_labels()
     check_soak_salts(corpus)

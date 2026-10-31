@@ -124,8 +124,8 @@ def _task_rows(a: Result, b: Result) -> Iterator[Row]:
     left, right = _task_cells(a.summary), _task_cells(b.summary)
     for key in sorted(set(left) | set(right)):
         one, two = left.get(key, {}), right.get(key, {})
-        for field in ("status", "status_at_end", "turns", "wall_s", "invalid", "repeated",
-                      "prompt_tokens_end"):
+        for field in ("status", "status_at_end", "turns", "wall_s", "invalid", "budget",
+                      "refused", "repeated", "prompt_tokens_end"):
             yield f"seed {key[0]} task {key[1]} {field}", one.get(field), two.get(field)
 
 

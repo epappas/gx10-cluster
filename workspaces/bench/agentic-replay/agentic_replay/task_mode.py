@@ -114,6 +114,7 @@ def _refusal(session: Session, index: int, spent: int) -> str | None:
 def _answer_calls(session: Session, reply: Reply, seen: set[str], tally: dict[str, int]) -> None:
     """Every call gets an answer, because the next request must pair them all."""
     spent = 0
+    cut = reply.finish_reason == "length"  # a call the budget truncated is not a bad call
     for index, call in enumerate(reply.tool_calls):
         verdict = check_call(call, TOOLS)
         key = canonical_bytes([verdict.name, call.get("function", {}).get("arguments")]).decode()
@@ -125,6 +126,9 @@ def _answer_calls(session: Session, reply: Reply, seen: set[str], tally: dict[st
             content = f"tool error: {refusal}"
         elif verdict.valid:
             content = fstools.cap_text(execute(verdict, session.scratch), sandbox.OUTPUT_CAP)
+        elif cut:
+            tally["budget"] += 1
+            content = "tool error: reply was cut at the token budget"
         else:
             tally["invalid"] += 1
             content = f"tool error: invalid call ({verdict.reason})"
@@ -145,10 +149,26 @@ def _turn(session: Session, task_id: int) -> Reply:
     return reply
 
 
+def plain_reply_goes_on(reply: Reply, tally: dict[str, int]) -> bool:
+    """A reply with no tool call. finish_reason comes first: a length stop is the budget."""
+    if reply.finish_reason == "length":
+        tally["budget"] += 1
+        return True
+    if syntax_in_content(reply.content):
+        tally["invalid"] += 1
+        return True
+    return False
+
+
+def task_status(score: str, stopped: str | None) -> str:
+    """A task cut off by a dead server was not failed by the model."""
+    return "aborted" if score == "fail" and stopped else score
+
+
 def _attempt(session: Session, task: dict[str, Any]) -> dict[str, Any]:
     """Limited by turns, not wall time, so speed does not contaminate quality."""
     started = time.monotonic()
-    tally = {"turns": 0, "answered": 0, "invalid": 0, "repeated": 0, "refused": 0}
+    tally = {"turns": 0, "answered": 0, "invalid": 0, "budget": 0, "repeated": 0, "refused": 0}
     seen: set[str] = set()
     prompt_tokens: int | None = None
     session.messages.append({"role": "user", "content": task["prompt"]})
@@ -168,9 +188,7 @@ def _attempt(session: Session, task: dict[str, Any]) -> dict[str, Any]:
         if reply.tool_calls:
             _answer_calls(session, reply, seen, tally)
             continue
-        if syntax_in_content(reply.content):
-            tally["invalid"] += 1
-        elif reply.finish_reason != "length":
+        if not plain_reply_goes_on(reply, tally):
             break
         session.messages.append({"role": "user", "content": NUDGE})
     return {"id": task["id"], "title": task["title"], **tally, "prompt_tokens_end": prompt_tokens,
@@ -203,7 +221,7 @@ def scored_attempt(session: Session, fixture: Fixture, number: int, attempt: dic
         results.append({**attempt, "status": "sandbox_error"})
         session.run.write_json(f"tasks-{session.seed}.json", results)
         raise
-    attempt.update(status=scores[task["id"]], hidden_after=scores)
+    attempt.update(status=task_status(scores[task["id"]], session.stopped), hidden_after=scores)
     results.append(attempt)
     session.run.write_json(f"tasks-{session.seed}.json", results)
 
