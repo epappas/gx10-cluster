@@ -1,0 +1,16 @@
+START_UTC=2026-10-31T22:46:28.842181+00:00
+REAL_HF=/home/epappas/.local/share/uv/tools/talos/bin/hf; version=1.27.0; HELPER_ONLY=False
+preflight: glm53-flash-tf absent, python:3-alpine cached
+wrapper argv=['/home/epappas/workspace/spacejar/gx10-cluster/.claude/worktrees/agent-a3562b4c1a6e7cf93/workspaces/inference/tensorfold-2node-glm53-flash-exl3/up.sh']; priority nice=19
+cleanup: private loopback sshd pid=3789139 exited rc=-9
+Traceback (most recent call last):
+  File "/tmp/glm-wrapper-67742be-approved.py", line 77, in <module>
+    run()
+  File "/tmp/glm-wrapper-67742be-approved.py", line 42, in run
+    module.check_up_and_down_over_ssh(tmp)
+  File "/home/epappas/workspace/spacejar/gx10-cluster/.claude/worktrees/agent-a3562b4c1a6e7cf93/tests/check_memory_guard.py", line 505, in check_up_and_down_over_ssh
+    assert done.returncode == 0, done
+           ^^^^^^^^^^^^^^^^^^^^
+AssertionError: CompletedProcess(args=['/home/epappas/workspace/spacejar/gx10-cluster/.claude/worktrees/agent-a3562b4c1a6e7cf93/workspaces/inference/tensorfold-2node-glm53-flash-exl3/up.sh'], returncode=1, stdout="kit     glm53-flash-tensorfold @ c4c7f14  (/tmp/guard-wrapper-approved-zr4vojnr/kit)\n\nmodel    Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold @ 078455ff (Apache-2.0)\nimage    v0.6.0-e66c657a433d pulled BY DIGEST (sha256:14b5072e...ccf) - 107 patches inside\npair     rank 0 here :8902 ; rank 1 on loopback-node over the link (127.0.0.1)\nweights  copy\ndefaults PARALLEL=4, CONTEXT=1,048,576, KV=fp8, DENSE=q4, DFlash2+copy drafts\n         - the lossy-throughput point the kit's README states outright;\n           KV=bf16 DENSE=bf16 are the exact arms, at a 196,608 window.\n\nno container running\nmemory guard on rank 0: supervisor ready; current container acknowledged\nno container running\nno container running\n", stderr='zsh:6: no matches found: /tmp/guard-wrapper-approved-zr4vojnr/worker-home/.cache/tensorfold-glm53/guard-gx10-guard-test-d4042b0d4e4e-*/ready\nmemory guard on rank 1 (loopback-node): UNGUARDED successor, startup handshake failed; previous guards not retired (1)\n')
+END_UTC=2026-10-31T22:46:38.081771+00:00
+elapsed_s=9.24; driver_exit_code=1

@@ -52,7 +52,7 @@ help:  ## Show this help
 # --- Checks that run anywhere (and in CI) ----------------------------------
 
 .PHONY: check
-check: lint syntax smoke render handlers optional-tags workspaces detectors quant-ab checkpoint-config spec-accept indexer-workspace prefill-ladder agentic-replay ws-status storage docs lockfile shellcheck  ## Every offline check (what CI runs)
+check: lint syntax smoke render handlers optional-tags workspaces detectors quant-ab checkpoint-config spec-accept indexer-workspace prefill-ladder memory-guard agentic-replay ws-status storage docs lockfile shellcheck  ## Every offline check (what CI runs)
 
 .PHONY: deps
 deps:  ## Install the pinned collections
@@ -163,6 +163,13 @@ indexer-workspace:  ## The indexer right-sizing bound and its capping rewrite st
 .PHONY: prefill-ladder
 prefill-ladder:  ## The prefill ladder proves a cold rung cold, and a clean run stays clean
 	@python3 tests/check_prefill_ladder.py
+
+# A guard that kills nothing looks exactly like a healthy node, so this runs the
+# real one on real throwaway containers. Without docker it prints NOT PROVEN,
+# which is not a pass.
+.PHONY: memory-guard
+memory-guard:  ## The GLM memory guard kills at its floors, and only then
+	@python3 tests/check_memory_guard.py
 
 # Workload determinism, the scorers and the file tools run anywhere. The sandbox
 # and sampler sections run for real where docker on devbox and sshd exist, and

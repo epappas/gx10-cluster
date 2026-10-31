@@ -82,9 +82,9 @@ this file can make; the default is upstream's (dflash2) and the switch is one
 
 ```bash
 ws up   tensorfold-2node-glm53-flash-exl3
-ws up   tensorfold-2node-glm53-flash-exl3 restart   # after a .env change
+ws up   tensorfold-2node-glm53-flash-exl3 restart   # after a .env change; restarts the memory guards too
 ws logs tensorfold-2node-glm53-flash-exl3 -f        # rank 0; rank 1: ssh <peer> docker logs -f glm53-flash-tf
-ws down tensorfold-2node-glm53-flash-exl3           # both ranks, logs archived by the kit
+ws down tensorfold-2node-glm53-flash-exl3           # both ranks and their guards, logs archived by the kit
 ```
 
 First run: the kit's `prepare.sh` pulls the image by digest on both Sparks,
@@ -96,6 +96,71 @@ Then, pointed at 8902: `vllm-quality-gate` (the kit ships `tools/` checks
 too, incl. `toolcheck.py` and `end_of_turn.py`), `vllm-prefill-ladder
 --chunk-tokens 2048`, and `pi-harness`/`deepseek-harness` as clients —
 with one caveat below.
+
+## Memory guard
+
+The kit has a stall watchdog and a start-time reserve but no runtime guard;
+its README says exhaustion tends to freeze the machine. This repo-owned
+`memory_guard.py` samples real `/proc/meminfo` every 0.2 s on each node:
+
+| | floor | action |
+|---|---|---|
+| soft | under 2.5 GiB for 4 s | request a kill of that rank's exact container ID |
+| hard | under 1 GiB | request a kill immediately |
+
+`ws up` arms both startup supervisors **before** calling `start.sh`, without
+changing its arguments or exported environment. It refuses to call `start.sh`
+if either handshake fails. The handshake requires a successful, bounded Docker
+inspection, an explicit `supervisor started` log record and acknowledgement of
+any current container ID, not merely a live Python PID. A successor is acknowledged
+before recorded predecessor PIDs are retired; a failed successor leaves them alone. While preparation/loading/retries run, each supervisor discovers
+the named container and re-arms for each replacement ID. The startup wait is
+bounded to six hours; an already active guard continues beyond that limit.
+When `start.sh` returns, `ws up` acknowledges both ranks' current IDs before
+ending discovery; an idle supervisor makes a final Docker inspection before
+exiting. An unconfirmed handoff leaves discovery armed and reports failure.
+A failing `start.sh` keeps its exit code; a guard failure makes an otherwise
+successful start fail explicitly.
+
+On interruption, `ws up` signals the dedicated local launch process group
+(TERM, then KILL after up to two seconds), reports guard state and exits 130/143.
+Local termination cannot prove cancellation of accepted remote or daemon-side
+launches, so discovery stays armed within its existing six-hour startup bound.
+A late container can therefore still be discovered; there is no claim that
+killing an SSH/Docker client cancels its remote work. `ws down` stops the guards
+after the ranks. Per-launch ready, status and startup files live under the cache,
+but never lock out a restart.
+
+**Use `ws up <name> restart`, not the kit's `./start.sh restart`.** A manual
+kit restart bypasses startup supervision: old guards exit with the old IDs and
+new containers are unguarded until `ws up` runs again. `FOREGROUND=1` is now
+monitored while `start.sh` remains attached, not only after it returns.
+
+Each node appends UTC timestamps to
+`~/.cache/tensorfold-glm53/logs/memguard.log`:
+
+- `dip:` and the recovery record include the lowest MemAvailable.
+- `recovered: no kill` means no kill was confirmed; an earlier unconfirmed
+  attempt is stated explicitly and its state is cleared for the next dip.
+- `killing container` records a decision before asking Docker.
+- `killed container` is emitted **only** after Docker reports success.
+- `kill unconfirmed` and `docker unavailable` are not successful protection.
+  Calls time out after two seconds and retry with backoff, at most five seconds;
+  repeated failures are logged once per episode. Disappearance after a failed
+  kill is never retroactively called a confirmed kill.
+
+**Protection limits:** container discovery needs a Docker inspection, so there
+is an unguarded interval after creation/replacement (polling every 0.2 s when
+healthy, plus inspection time). The memory sample itself does not need Docker,
+but killing does. A hung/unavailable daemon can prevent a kill completely;
+short timeouts bound the guard's wait, not Docker's response or GPU reclamation.
+Only the local rank is killed, not its peer. No host-memory locking, root process
+or cgroup changes are made. A full disk can lose log evidence but does not stop
+the kill decision. No unconditional protection against machine freezes is claimed.
+
+`make memory-guard` exercises real Docker and live memory on devbox. Its kit
+start/load/replacement fixture is **not real GLM**. Nothing has run on a real
+GB10 or a real GLM boot; `provenance: unverified` remains appropriate.
 
 ## What does NOT carry over from vLLM
 

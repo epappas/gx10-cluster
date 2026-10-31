@@ -1,0 +1,6 @@
+UTC=2026-10-31T22:56:29.545466+00:00
+snippet=for ready in "$1"/guard-*/ready; do [ -s "$ready" ] || continue; done
+/usr/bin/zsh: exit=1
+zsh:1: no matches found: /tmp/guard-shell-root-cause-zuxnc_0x/guard-*/ready
+/bin/sh: exit=0
+
