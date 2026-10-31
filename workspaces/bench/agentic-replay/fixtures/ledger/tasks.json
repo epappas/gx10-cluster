@@ -1,0 +1,79 @@
+{
+  "name": "ledger",
+  "brief": "You are working on `ledger`, a small double-entry bookkeeping library in pure Python 3 (standard library only). The project is in the current directory: the package is in ledger/ and its tests are in tests/. Run the tests with `python3 -m unittest discover -s tests`. In this conversation you will receive a series of coding tasks. Each task builds on the code as the earlier tasks left it, so finish each one fully and keep all existing tests passing.\n\nHouse rules. They apply to all code you write in this project for the whole conversation, whether or not a task mentions them:\n\n1. Money. Every amount is a whole number of cents held in an int, and no float is ever used in a money calculation. An amount that reaches the package as an argument or from a file and is a float, a bool or any other non-int is rejected with InvalidAmountError. A calculation that produces a fraction of a cent rounds to the nearest cent, and an exact half rounds away from zero (2.5 becomes 3, -2.5 becomes -3). Results stay exact however large the amounts are.\n\n2. Errors. Every error the package raises, including for foreseeable bad input such as bad arguments, missing files or malformed files, is an instance of a subclass of ledger.errors.LedgerError defined in ledger/errors.py. It is never LedgerError itself and never a built-in exception such as ValueError or KeyError. Every subclass sets its own class attribute `code`, a lower_snake_case string unique to that class. Reuse an existing class when it fits.\n\n3. Ordering. Every list returned by a public function has a fixed order. Transactions are ordered by (date, id) ascending. Invoices are ordered by (due date, id) ascending. Per-account or per-customer rows are ordered by name ascending, except that a ranking by amount puts the largest amount first and breaks ties by name ascending.\n\n4. Time. The only source of the current time is the `clock` callable held by a Ledger: `ledger.clock()` returns a timezone-aware datetime, and today means `ledger.clock().date()`. Apart from ledger/clock.py, package code never calls datetime.now, date.today, time.time or anything similar.\n\n5. File output. Every file the package writes goes through ledger.storage.atomic_write. Nothing else in the package opens a file for writing.\n\n6. Audit trail. Each successful call to a public Ledger method that changes state appends exactly one AuditEvent to Ledger.audit, however many transactions or other records that call creates internally. Its `action` is the name of the public method that was called (for example \"post\") and its `at` comes from the clock. A call that raises leaves the ledger exactly as it was, audit trail included, and a call that changes nothing appends nothing.\n\nAcknowledge these rules briefly. The first task follows in the next message.",
+  "source_allowlist": ["ledger/**/*.py"],
+  "tasks": [
+    {
+      "id": 1,
+      "title": "Percentages and proportional allocation",
+      "prompt": "Add two functions to ledger/money.py.\n\n`percent_of(amount: int, basis_points: int) -> int` returns basis_points/10000 of amount, so 250 basis points is 2.5 percent and percent_of(10000, 250) == 250. basis_points must be a non-negative int; reject anything else, including True and False.\n\n`allocate(amount: int, weights: list[int]) -> list[int]` splits amount across the weights in proportion, returning one share per weight, in the same positions, that add up to exactly amount. Method: work on the absolute value of amount. Give each position the whole-number part of its proportional share, then hand out the leftover units one at a time, starting with the position with the largest fractional remainder; when remainders are equal the earlier position goes first. For a negative amount, negate every share of the result. Examples: allocate(100, [1, 1, 1]) == [34, 33, 33], allocate(101, [1, 2]) == [34, 67], allocate(-100, [1, 1, 1]) == [-34, -33, -33]. weights must be a non-empty list of non-negative ints (True and False are not valid weights) with a total above zero; reject anything else.\n\nAdd visible tests for both functions in tests/.",
+      "hidden": "test_task1.py",
+      "expected_tests": 17,
+      "early_constraints": [1, 2]
+    },
+    {
+      "id": 2,
+      "title": "Reversing a transaction",
+      "prompt": "Add reversals to the ledger.\n\nIn ledger/transactions.py add a field `reverses: int | None = None` as the last field of Transaction. It holds the id of the transaction that this one reverses.\n\nIn ledger/book.py add to Ledger:\n\n`reverse(self, txn_id: int, on: date, memo: str | None = None) -> Transaction` creates a new transaction with the next id, dated `on`, whose postings are those of the original with each amount negated, in the same posting order, and with `reverses` set to txn_id. When memo is None the memo is f\"reversal of {txn_id}\".\n\n`is_reversed(self, txn_id: int) -> bool` says whether a reversal of that transaction exists.\n\nReject: an unknown id (in both methods), a transaction that has already been reversed, a transaction that is itself a reversal, and an `on` date earlier than the date of the original transaction.\n\nAdd visible tests in tests/.",
+      "hidden": "test_task2.py",
+      "expected_tests": 13,
+      "early_constraints": [2, 6]
+    },
+    {
+      "id": 3,
+      "title": "Closing an accounting period",
+      "prompt": "Add period closing to the ledger.\n\nLedger gets an attribute `closed_through: date | None`, which is None on a new ledger.\n\nAdd `close_period(self, through: date) -> None` to Ledger. It sets closed_through to `through`. Reject a `through` that is not strictly before today, since a period that has not ended cannot be closed. Reject a `through` that does not move closed_through forward: it must be strictly later than the current closed_through.\n\nOnce a period is closed, no transaction may be created with a date on or before closed_through. That applies to `post` and to `reverse`, and those calls must be rejected. A transaction that lies inside a closed period may still be reversed, as long as the reversal itself is dated after closed_through.\n\nAdd visible tests in tests/.",
+      "hidden": "test_task3.py",
+      "expected_tests": 13,
+      "early_constraints": [2, 4, 6]
+    },
+    {
+      "id": 4,
+      "title": "Invoices",
+      "prompt": "Add invoicing, building on reversals.\n\nCreate ledger/invoices.py with a frozen dataclass `Invoice` with these fields in this order: id: int, customer: str, income: str, amount: int, issued: date, due: date, txn_id: int, paid_on: date | None = None, voided: bool = False.\n\nAdd `invoices: dict[int, Invoice]` to Ledger, keyed by invoice id, empty on a new ledger. Invoice ids start at 1 and go up by one. When an invoice changes, replace its entry in the dict with an updated copy.\n\nAdd these methods to Ledger:\n\n`issue_invoice(self, customer: str, income: str, amount: int, due: date) -> Invoice`. `customer` must be an ASSET account and `income` an INCOME account. amount must be above zero. due must not be before today. The invoice is issued today. It creates one transaction dated today with memo f\"invoice {id}\" that debits customer and credits income by amount (Posting(customer, amount), Posting(income, -amount)); txn_id is the id of that transaction.\n\n`pay_invoice(self, invoice_id: int, cash: str) -> Invoice`. `cash` must be an ASSET account. It creates one transaction dated today with memo f\"payment of invoice {id}\" that debits cash and credits customer, and sets paid_on to today.\n\n`void_invoice(self, invoice_id: int) -> Invoice`. It reverses the invoice's transaction with a reversal dated today, and sets voided to True.\n\nReject an unknown invoice id, unknown accounts, accounts of the wrong kind, and paying or voiding an invoice that is already paid or voided.\n\nAdd visible tests in tests/.",
+      "hidden": "test_task4.py",
+      "expected_tests": 17,
+      "early_constraints": [1, 2, 4, 6]
+    },
+    {
+      "id": 5,
+      "title": "Late fees",
+      "prompt": "Add late fees to invoices, using percent_of from the first task.\n\nAdd two fields to the end of Invoice: late_fee: int = 0 and fee_txn_id: int | None = None.\n\nAdd `assess_late_fees(self, rate_bp: int, income: str) -> list[Invoice]` to Ledger. `income` must be an INCOME account, and rate_bp must be valid for percent_of; check both first, even when no invoice is overdue. An invoice is charged when it is unpaid, not voided, overdue (its due date is strictly before today) and has no late fee yet. The fee is percent_of(invoice.amount, rate_bp). An invoice whose fee comes to 0 is skipped and stays eligible for later calls. For each charged invoice create one transaction dated today with memo f\"late fee invoice {id}\" that debits the invoice's customer and credits `income` by the fee, then set late_fee and fee_txn_id on the invoice. Return the updated invoices that were charged in this call.\n\nChange pay_invoice so that the payment covers amount plus late_fee.\n\nChange void_invoice so that it also reverses the fee transaction, if there is one, with a reversal dated today.\n\nAdd visible tests in tests/.",
+      "hidden": "test_task5.py",
+      "expected_tests": 16,
+      "early_constraints": [1, 2, 3, 4, 6]
+    },
+    {
+      "id": 6,
+      "title": "Aging report and top debtors",
+      "prompt": "Add two reports to ledger/reports.py. An open invoice is one that is neither paid nor voided. The amount outstanding on an open invoice is its amount plus its late_fee.\n\nAdd a frozen dataclass `AgingRow` with these fields in this order: customer: str, current: int, days_1_30: int, days_31_60: int, days_over_60: int, total: int.\n\n`aging(ledger: Ledger) -> list[AgingRow]` returns one row for each customer that has at least one open invoice. Each open invoice adds its outstanding amount to one bucket according to days overdue, which is today minus the due date: 0 or fewer goes in current, 1 to 30 in days_1_30, 31 to 60 in days_31_60, and more than 60 in days_over_60. total is the sum of the four buckets.\n\n`top_debtors(ledger: Ledger, limit: int) -> list[tuple[str, int]]` returns (customer, total outstanding) for the `limit` customers who owe the most. limit must be an int of at least 1 (True and False are not valid); reject anything else.\n\nAdd visible tests in tests/.",
+      "hidden": "test_task6.py",
+      "expected_tests": 14,
+      "early_constraints": [2, 3, 4]
+    },
+    {
+      "id": 7,
+      "title": "Persisting everything, version 2 file format",
+      "prompt": "ledger/storage.py does not yet save what the recent tasks added. Move the file format to version 2 and make a save and load round trip complete.\n\nChange FORMAT_VERSION to 2. A saved file must now hold everything: each transaction's `reverses`, a top-level key `closed_through` holding an ISO date string or null, and a top-level key `invoices` holding a list of objects, one per invoice, whose keys are exactly the Invoice field names, with issued, due and paid_on as ISO date strings (paid_on may be null).\n\nAfter load_ledger the ledger must behave exactly like the one that was saved: the same invoices (equal Invoice objects, keyed by id), the same transactions, the same audit trail, closed periods still enforced, reversals still detected, and new invoice ids and transaction ids carrying on from where they left off. load_ledger keeps its `clock` parameter and the loaded ledger uses that clock.\n\nFiles in the old version 1 format must still load, with no invoices, closed_through None and `reverses` None on every transaction. Saving such a ledger writes version 2. Any other version is refused with StorageError, as the current code refuses unsupported files. A version 2 file with a malformed or incomplete invoice, or a malformed closed_through, must be rejected.\n\nAdd visible tests in tests/.",
+      "hidden": "test_task7.py",
+      "expected_tests": 17,
+      "early_constraints": [1, 2]
+    },
+    {
+      "id": 8,
+      "title": "CSV exports",
+      "prompt": "Create ledger/export.py with two functions that write reports as CSV files. Both use `,` as the separator, a single `\\n` as the line ending, the csv quoting rules of Python's csv module (a memo containing a comma gets quoted), and format_cents for every amount. Both return the number of data rows, not counting the header.\n\n`export_statement_csv(ledger: Ledger, name: str, path: str) -> int` writes the account_statement of account `name`, with the header `date,txn_id,memo,amount,balance` and dates in ISO format. For an unknown account no file is created. An account with no transactions gives a header-only file.\n\n`export_aging_csv(ledger: Ledger, path: str) -> int` writes the rows of aging(ledger), with the header `customer,current,days_1_30,days_31_60,days_over_60,total`.\n\nA path whose directory does not exist must be rejected. If the target file already exists it is replaced.\n\nAdd visible tests in tests/.",
+      "hidden": "test_task8.py",
+      "expected_tests": 11,
+      "early_constraints": [2, 5]
+    },
+    {
+      "id": 9,
+      "title": "Bank statement import",
+      "prompt": "Add `import_bank_csv(self, path: str, cash: str, suspense: str) -> list[Transaction]` to Ledger. You may put the file parsing in a new module under ledger/.\n\nThe file is UTF-8 CSV. Its first line must be exactly `date,description,amount`. Each following row has an ISO date, a description, and an amount written as decimal text that parse_amount accepts, such as 12.50 or -800.\n\nEach row becomes one transaction dated with the row's date, whose memo is the description. A positive amount debits cash and credits suspense: Posting(cash, amount), Posting(suspense, -amount), with the postings in that order. A negative amount uses the same two lines in the same order, so cash goes down. Transaction ids are assigned in the order of the rows in the file. Return the new transactions.\n\nThe import is all or nothing: if any row is bad, no row is imported. Reject: an unknown cash or suspense account; a file that is missing, empty, not valid UTF-8 or has the wrong header; a row with the wrong number of fields, a bad date, a bad amount or a zero amount; and a row dated inside a closed period. A file with a header and no rows imports nothing and returns an empty list.\n\nAdd visible tests in tests/.",
+      "hidden": "test_task9.py",
+      "expected_tests": 16,
+      "early_constraints": [2, 3, 6]
+    }
+  ]
+}

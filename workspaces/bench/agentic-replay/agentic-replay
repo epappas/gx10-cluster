@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""Same workload, two models: how the server holds up, and whether the model codes.
+
+    agentic-replay replay  --corpus-rev REV --label dsv41          growing conversation
+    agentic-replay soak    --corpus-rev REV --duration 3600        fills the prompt cache
+    agentic-replay task    --corpus-rev REV --prefix-tokens 100000 coding tasks, devbox only
+    agentic-replay compare DIR_A DIR_B                             one plain-text table
+
+See README.md for why each exists and what a run must not be used to claim.
+"""
+
+from __future__ import annotations
+
+import sys
+
+sys.dont_write_bytecode = True
+
+import argparse
+import os
+import re
+
+from agentic_replay.compare import run_compare
+from agentic_replay.corpus import CorpusError
+from agentic_replay.modes import run_replay, run_soak
+from agentic_replay.results import DEFAULT_ROOT
+from agentic_replay.sandbox import install_sigterm
+from agentic_replay.task_mode import run_task
+
+DEFAULT_SEEDS = "1009,2003,3001,4001,5003"
+DEFAULT_PROBES = "50000,100000,200000,300000"
+
+
+def ints(text: str) -> list[int]:
+    return [int(x) for x in text.split(",") if x.strip()]
+
+
+def label(text: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", text):
+        raise argparse.ArgumentTypeError("letters, digits, dot, dash and underscore only")
+    return text
+
+
+def common(parser: argparse.ArgumentParser, max_tokens: int, temperature: float = 0.0) -> None:
+    parser.add_argument("--corpus-rev", required=True, help="git revision the corpus is read at")
+    parser.add_argument("--base-url", default=os.environ.get("BASE_URL", "http://127.0.0.1:8888/v1"))
+    parser.add_argument("--model", help="otherwise asked of /models")
+    parser.add_argument("--label", type=label, default="run")
+    parser.add_argument("--results-root", default=str(DEFAULT_ROOT))
+    parser.add_argument("--seeds", type=ints, default=ints(DEFAULT_SEEDS))
+    parser.add_argument("--repeats", type=int, default=1, help="how many seeds of the list to run")
+    parser.add_argument("--temperature", type=float, default=temperature)
+    parser.add_argument("--no-seed", action="store_true",
+                        help="never send seed; use on both arms if one refuses it")
+    parser.add_argument("--top-p", type=float, default=1.0)
+    parser.add_argument("--top-k", type=int, default=40)
+    parser.add_argument("--max-tokens", type=int, default=max_tokens)
+    parser.add_argument("--request-timeout", type=float, default=3600.0)
+    parser.add_argument("--nodes", type=lambda s: s.split(","), default=[])
+    parser.add_argument("--memguard-log", help="path on each node; differs per model")
+    parser.add_argument("--ssh-config")
+    parser.add_argument("--no-sampling-check", dest="sampling_check", action="store_false",
+                        help="skip the check that request sampling values reach the sampler")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="mode", required=True)
+
+    replay = sub.add_parser("replay")
+    common(replay, 8192)
+    replay.add_argument("--target-tokens", type=int, default=300000)
+    replay.add_argument("--step-tokens", type=int, default=25000)
+    replay.add_argument("--probe-tokens", type=ints, default=ints(DEFAULT_PROBES))
+    replay.add_argument("--fact-count", type=int, default=6)
+    replay.add_argument("--conversations", type=int, choices=(1, 2, 4), default=1)
+    replay.add_argument("--interleave", action="store_true")
+    replay.add_argument("--response-format", action="store_true")
+
+    soak = sub.add_parser("soak")
+    common(soak, 256)
+    soak.add_argument("--duration", type=float, required=True, help="seconds")
+    soak.add_argument("--short-tokens", type=int, default=2000)
+    # Mean 3,450 tokens a state, against 9,400 at 150000 every 20, and longs are 43% of
+    # prefilled tokens, not 80%. The 68-78 kept states at the kills fall in the first
+    # cycle of 40, so reaching them takes requests. Whether a server keeps them, the
+    # requests cannot show: read the saved /metrics text.
+    soak.add_argument("--long-tokens", type=int, default=60000)
+    soak.add_argument("--long-every", type=int, default=40)
+    soak.add_argument("--metrics-every", type=float, default=60.0, help="seconds, 0 turns it off")
+    soak.add_argument("--streams", type=int, default=4)
+
+    task = sub.add_parser("task")
+    # Repeats at temperature 0 would measure nothing.
+    common(task, 32768, temperature=0.7)
+    task.add_argument("--prefix-tokens", type=int, default=100000)
+    task.add_argument("--max-turns", type=int, default=30, help="per task")
+    task.add_argument("--task-limit", type=int, default=0, help="0 runs every task")
+    task.add_argument("--hard-timeout", type=float, default=86400.0, help="safety stop only")
+
+    compare = sub.add_parser("compare")
+    compare.add_argument("left")
+    compare.add_argument("right")
+    return parser
+
+
+def main() -> int:
+    install_sigterm()
+    args = build_parser().parse_args()
+    if args.mode == "compare":
+        return run_compare(args.left, args.right)
+    args.api_key = os.environ.get("API_KEY") or os.environ.get("VLLM_API_KEY") or ""
+    runners = {"replay": run_replay, "soak": run_soak, "task": run_task}
+    try:
+        return runners[args.mode](args)
+    except CorpusError as exc:
+        print(f"corpus: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
