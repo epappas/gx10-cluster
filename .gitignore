@@ -66,3 +66,16 @@ workspaces/inference/vllm-2node-qwen38-flash-next/patches/src/
 # Rewritten checkpoint configs (the MTP layer-index alias), generated per
 # snapshot at launch and bind-mounted over the HF cache's own copies.
 workspaces/inference/vllm-2node-qwen38-flash-next/.generated/
+
+# Local assistant runtime, private deployment evidence and publication scratch.
+.env
+.claude/
+.private-publication/
+.scratch/
+scratch-*/
+docs/handoffs/
+docs/status/
+# Public validation is an explicit allowlist, never a raw result directory.
+docs/validation/*
+!docs/validation/glm-deepseek-selection-2026-11-01.json
+!docs/validation/glm-deepseek-selection-2026-11-01.md

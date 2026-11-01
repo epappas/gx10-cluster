@@ -1,8 +1,8 @@
 name: tensorfold-2node-glm53-flash-exl3
 kind: inference
 engine: tensorfold
-provenance: unverified
-summary: GLM-5.3-Flash EXL3 on the pair with the TensorFold engine - upstream's own recommended path, 1M window, 60-115 tok/s single-stream decode
+provenance: verified
+summary: GLM-5.3-Flash EXL3 on TensorFold TP=2 - booted and measured; four-stream replay and three-hour low-fill soak completed
 
 # WHAT THIS IS: MiaAI-Lab's TensorFold GLM kit (Apache-2.0) at a pinned
 # commit, run as they ship it - their image pulled BY DIGEST, their 107
@@ -32,10 +32,11 @@ summary: GLM-5.3-Flash EXL3 on the pair with the TensorFold engine - upstream's 
 # drafter is DFlash2, CC BY-NC-ND 4.0 (see README "licence"); DRAFTER=mtp
 # avoids it but forces PARALLEL=1.
 
-# UNVERIFIED: not booted here. Requires one thing this cluster does not have
-# switched on yet - the head exporting its HF cache over the link (the kit's
-# WORKER_WEIGHTS=nfs, the only weight layout that fits poseidon's 125 GB).
-# The README gives the one Ansible command that turns it on.
+# VERIFIED 2026-11-01: real boot, four-stream replay, 24/27 coding tasks and
+# a three-hour low-fill soak. Exact results and private-source hashes:
+# docs/validation/glm-deepseek-selection-2026-11-01.json.
+# Configured 1M context is not 1M-quality or full-cache stability proof.
+# The worker reads the head's HF cache over NFS; see README requirements.
 
 # MEMORY GUARD: the kit has a stall watchdog and a start-time reserve but no
 # runtime guard, and its README says exhaustion tends to freeze the machine.
@@ -43,7 +44,8 @@ summary: GLM-5.3-Flash EXL3 on the pair with the TensorFold engine - upstream's 
 # for 4 s, or under 1 GiB at once, it kills that rank's container. `ws up`
 # arms startup supervisors before start.sh and re-arms replacement container IDs.
 # Discovery and kills depend on Docker; a hung daemon can prevent protection.
-# Tested on devbox docker only: never run on a GB10 or against a GLM boot.
+# Live GLM post-soak proof found both guards alive and bound to current ranks;
+# no kill was observed. This does not prove recovery from memory exhaustion.
 
 requires:
   gpu_arch: "12.1"

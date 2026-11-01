@@ -1,6 +1,6 @@
 # `tensorfold-2node-glm53-flash-exl3` — GLM-5.3-Flash on the pair, on TensorFold
 
-**Nodes: 2** · **Memory: rank 0 ~88 GiB at the 1M window** · **Port: 8902** · **Engine: TensorFold v0.6.0** · **Status: `unverified` — not booted here**
+**Nodes: 2** · **Memory: see measured minima below** · **Port: 8902** · **Engine: TensorFold v0.6.0** · **Status: `verified` - booted and measured 2026-11-01**
 
 Serves GLM-5.3-Flash (EXL3 4 bpw, `Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold`
 @ `078455ff`) across odysseus + poseidon with
@@ -158,9 +158,11 @@ Only the local rank is killed, not its peer. No host-memory locking, root proces
 or cgroup changes are made. A full disk can lose log evidence but does not stop
 the kill decision. No unconditional protection against machine freezes is claimed.
 
-`make memory-guard` exercises real Docker and live memory on devbox. Its kit
-start/load/replacement fixture is **not real GLM**. Nothing has run on a real
-GB10 or a real GLM boot; `provenance: unverified` remains appropriate.
+`make memory-guard` exercises real Docker and live memory on the test machine;
+its kit start/load/replacement fixture is **not real GLM**. Separately, the
+2026-11-01 real GLM boot and saved post-soak checks found both guards alive and
+bound to their current ranks. No guard kill was observed during the soak;
+this does not prove automatic recovery or protection against every freeze.
 
 ## What does NOT carry over from vLLM
 
@@ -203,8 +205,21 @@ Apache-2.0 from v0.6.0; DFlash2 CC BY-NC-ND 4.0; nvcr base image under
 NVIDIA's licence; `:latest`-style tags adopted only on a matching recipe
 stamp). The AGPL vLLM kit is NOT in this path — this workspace and its
 Apache image are the permissive route to this model, which is a better
-licence posture than `#glm53-flash` has ever had. `provenance: unverified`
-flips only after a boot here whose numbers came out of a log.
+licence posture than `#glm53-flash` has ever had. The operator confirmed
+non-commercial use; this is not clearance for commercial DFlash2 use.
+
+`provenance: verified` now records a real boot and bounded validation on this
+pair, not every upstream claim in the comparison table. The
+[sanitized selection report](../../../docs/validation/glm-deepseek-selection-2026-11-01.md)
+and [exact receipt](../../../docs/validation/glm-deepseek-selection-2026-11-01.json)
+record all four replay streams completing, 24/27 coding tasks, eight invalid
+tool emissions, and a three-hour soak with 3,204 workload requests plus one
+seed probe and zero recorded errors. Soak sampled MemAvailable minima were
+6,376,964 / 9,298,712 KiB on head / worker. After five minutes sampled
+shared-pool occupancy was 8.48-16.96%, not full-cache proof. Prefer this profile
+for concurrent long runs on the measured pair; DeepSeek scored better on the
+coding fixture and was faster on the first repeat. No indefinite uptime,
+1M-token quality, public-hardening or automatic-recovery claim is made.
 
 ## Sources
 

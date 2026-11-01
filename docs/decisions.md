@@ -3252,3 +3252,22 @@ weeks - reads it. So the pin is the README's own escape hatch, applied
 deliberately. Moving forward means converting `settings/*.yaml` to the patch
 array shape and writing one home patch; that is a workspace-wide change, not a
 one-line fix, and it should wait for a version that is not a release candidate.
+
+## <a name="glm-deepseek-selection-2026-11-01"></a>Prefer GLM for concurrent long runs on the measured pair (2026-11-01)
+
+The matched saved workloads favor GLM's operational stability here, not universal
+coding quality: all four replay streams completed, followed by a three-hour soak
+with 3,204 workload requests plus one seed probe and zero recorded errors.
+DeepSeek's four-stream replay hit four one-hour timeouts. DeepSeek still scored
+26/27 coding tasks versus GLM's 24/27, emitted zero invalid calls versus eight,
+and was faster on the first coding repeat. Keep GLM's official strict recall
+scores of 20/23 and 80/92 unchanged.
+
+Select the validated TensorFold GLM profile for concurrent long runs on this
+pair under operator-confirmed non-commercial use (DFlash2 is CC BY-NC-ND 4.0).
+The soak's steady sampled shared-pool occupancy was only 8.48-16.96% after five
+minutes: no full-cache, indefinite-uptime, 1M-quality, public-hardening or
+automatic-recovery claim follows. This entry changes no runtime configuration.
+See the [sanitized report](validation/glm-deepseek-selection-2026-11-01.md) and
+[exact result receipt](validation/glm-deepseek-selection-2026-11-01.json), which
+include provenance hashes without publishing private raw evidence.

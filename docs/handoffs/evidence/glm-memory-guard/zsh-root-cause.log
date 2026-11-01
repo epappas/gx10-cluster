@@ -1,6 +1,9 @@
-UTC=2026-10-31T22:56:29.545466+00:00
-snippet=for ready in "$1"/guard-*/ready; do [ -s "$ready" ] || continue; done
-/usr/bin/zsh: exit=1
-zsh:1: no matches found: /tmp/guard-shell-root-cause-zuxnc_0x/guard-*/ready
-/bin/sh: exit=0
+REDACTED public evidence summary; not a verbatim transcript.
+The unique temporary test-directory identifier is omitted. The unchanged
+original is retained locally, ignored.
+Source SHA256: 820b528b4111535bbfc093b5a3492355519a3c5149d37e09e2d0e272d2dee060
 
+2026-10-31: the same unmatched ready-file glob failed under zsh (exit 1,
+"no matches found") and completed under POSIX sh (exit 0).
+Snippet: for ready in "$1"/guard-*/ready; do [ -s "$ready" ] || continue; done
+This is a shell-behavior reproduction, not a real-model boot or memory test.
