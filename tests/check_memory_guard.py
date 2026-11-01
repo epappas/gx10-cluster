@@ -17,6 +17,7 @@ Whatever could not run prints NOT PROVEN. That is never a pass.
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import re
@@ -29,14 +30,18 @@ import tempfile
 import time
 import uuid
 from collections.abc import Callable
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
+
+import yaml
 
 sys.dont_write_bytecode = True
 
 REPO = Path(__file__).resolve().parent.parent
 WORKSPACE = REPO / "workspaces" / "inference" / "tensorfold-2node-glm53-flash-exl3"
 GUARD = WORKSPACE / "memory_guard.py"
+PROVENANCE_RECEIPT = REPO / "docs/validation/glm-deepseek-selection-2026-11-01.json"
 IMAGE = os.environ.get("MEMORY_GUARD_IMAGE", "python:3-alpine")
 REAL_CONTAINER = "glm53-flash-tf"
 KIB_PER_GIB = 1024**2
@@ -191,6 +196,108 @@ def check_refuses_bad_arguments() -> None:
         assert done.returncode != 0, f"accepted {extra}"
 
 
+def evidence_field(document: object, path: str) -> object:
+    for key in path.split("."):
+        assert isinstance(document, dict) and key in document, f"missing evidence field: {path}"
+        document = document[key]
+    return document
+
+
+def require_evidence_value(document: object, path: str, expected: str | int | bool) -> None:
+    actual = evidence_field(document, path)
+    assert type(actual) is type(expected) and actual == expected, f"invalid evidence field: {path}"
+
+
+def check_verified_glm_provenance(manifest_path: Path, receipt_path: Path) -> None:
+    manifest: object = yaml.safe_load(manifest_path.read_text())
+    receipt: object = json.loads(receipt_path.read_text())
+    require_evidence_value(manifest, "provenance", "verified")
+    require_evidence_value(receipt, "schema_version", 1)
+    require_evidence_value(receipt, "models.glm.served_id", "GLM-5.3-Flash-EXL3")
+    weights = evidence_field(receipt, "models.glm.weights")
+    models = evidence_field(manifest, "models")
+    assert type(weights) is str and isinstance(models, list) and models and weights == models[0], \
+        "GLM evidence does not match the manifest model"
+    digest = evidence_field(receipt, "models.glm.image_digest")
+    images = evidence_field(manifest, "images")
+    assert type(digest) is str and re.fullmatch(r"sha256:[0-9a-f]{64}", digest), \
+        "invalid GLM evidence image digest"
+    assert isinstance(images, list) and images and type(images[0]) is str \
+        and images[0].endswith("@" + digest), "GLM evidence does not match the manifest image"
+    require_evidence_value(receipt, "models.glm.boot_returncode", 0)
+    for field, expected in (("text_ok", True), ("tool_name", "add"), ("tool_arguments.a", 19),
+                            ("tool_arguments.b", 23), ("computed_tool_result", 42), ("final_answer", 42)):
+        require_evidence_value(receipt, "post_soak." + field, expected)
+    for rank in ("head", "worker"):
+        for field, expected in (("alive", True), ("bound_to_current_rank", True), ("kill_records", 0)):
+            require_evidence_value(receipt, f"post_soak.guards.{rank}.{field}", expected)
+
+
+def invalid_glm_evidence() -> list[tuple[str, object]]:
+    cases: list[tuple[str, object]] = [
+        ("schema_version", 2), ("schema_version", True), ("models", {}),
+        ("models.glm.served_id", "another-model"), ("models.glm.weights", "another/model"),
+        ("models.glm.image_digest", "sha256:" + "0" * 64),
+        ("models.glm.image_digest", "not-a-digest"),
+        ("models.glm.boot_returncode", 1), ("models.glm.boot_returncode", False),
+        ("post_soak.text_ok", False), ("post_soak.text_ok", "true"),
+        ("post_soak.tool_name", "subtract"), ("post_soak.tool_arguments", None),
+        ("post_soak.tool_arguments.a", 20), ("post_soak.tool_arguments.a", 19.0),
+        ("post_soak.tool_arguments.b", 24), ("post_soak.computed_tool_result", 43),
+        ("post_soak.computed_tool_result", 42.0), ("post_soak.final_answer", 43),
+        ("post_soak.final_answer", 42.0),
+    ]
+    for rank in ("head", "worker"):
+        for field, value in (("alive", False), ("alive", "true"),
+                             ("bound_to_current_rank", False), ("bound_to_current_rank", "true"),
+                             ("kill_records", 1), ("kill_records", False)):
+            cases.append((f"post_soak.guards.{rank}.{field}", value))
+    return cases
+
+
+def require_provenance_rejection(manifest: Path, receipt: Path, error: type[Exception]) -> None:
+    try:
+        check_verified_glm_provenance(manifest, receipt)
+    except error:
+        return
+    raise AssertionError("accepted invalid provenance evidence")
+
+
+def check_rejects_invalid_glm_evidence() -> None:
+    manifest = WORKSPACE / "workspace.yml"
+    receipt: object = json.loads(PROVENANCE_RECEIPT.read_text())
+    with tempfile.TemporaryDirectory(prefix="glm-provenance-") as folder:
+        invalid = Path(folder) / "receipt.json"
+        require_provenance_rejection(manifest, invalid, FileNotFoundError)
+        invalid.write_text("{")
+        require_provenance_rejection(manifest, invalid, json.JSONDecodeError)
+        invalid.write_text("[]")
+        require_provenance_rejection(manifest, invalid, AssertionError)
+        for path, value in invalid_glm_evidence():
+            changed = deepcopy(receipt)
+            parent_path, _, key = path.rpartition(".")
+            parent = evidence_field(changed, parent_path) if parent_path else changed
+            assert isinstance(parent, dict)
+            parent[key] = value
+            invalid.write_text(json.dumps(changed))
+            require_provenance_rejection(manifest, invalid, AssertionError)
+
+
+def check_rejects_invalid_glm_manifest() -> None:
+    original = (WORKSPACE / "workspace.yml").read_text()
+    receipt: object = json.loads(PROVENANCE_RECEIPT.read_text())
+    changes = (("provenance: verified", "provenance: unverified"),
+               (evidence_field(receipt, "models.glm.weights"), "another/model"),
+               (evidence_field(receipt, "models.glm.image_digest"), "sha256:" + "0" * 64))
+    with tempfile.TemporaryDirectory(prefix="glm-provenance-") as folder:
+        invalid = Path(folder) / "workspace.yml"
+        require_provenance_rejection(invalid, PROVENANCE_RECEIPT, FileNotFoundError)
+        for before, after in changes:
+            assert isinstance(before, str) and before in original
+            invalid.write_text(original.replace(before, after, 1))
+            require_provenance_rejection(invalid, PROVENANCE_RECEIPT, AssertionError)
+
+
 def check_defaults_and_wiring() -> None:
     source = GUARD.read_text()
     for line in ("SOFT_GIB = 2.5", "SUSTAIN_S = 4.0", "HARD_GIB = 1.0", "SAMPLE_S = 0.2"):
@@ -200,8 +307,7 @@ def check_defaults_and_wiring() -> None:
     helper = (WORKSPACE / "memory_guard.sh").read_text()
     assert 'memory_guard_launch "$@"' in up and './start.sh "$@"' in helper
     assert "exec " not in (WORKSPACE / "down.sh").read_text(), "exec skips stopping the guards"
-    manifest = (WORKSPACE / "workspace.yml").read_text()
-    assert "provenance: unverified" in manifest, "nothing here booted GLM"
+    check_verified_glm_provenance(WORKSPACE / "workspace.yml", PROVENANCE_RECEIPT)
 
 
 def check_soft_floor_kills(tmp: Path) -> None:
@@ -818,6 +924,9 @@ def docker_problem() -> str | None:
 def main() -> int:
     check_refuses_bad_arguments()
     check_defaults_and_wiring()
+    check_rejects_invalid_glm_evidence()
+    check_rejects_invalid_glm_manifest()
+    print("memory-guard: verified saved provenance receipt and invalid-input rejection checks completed")
     check_dead_docker_is_not_a_gone_container()
     problem = docker_problem()
     if problem:
