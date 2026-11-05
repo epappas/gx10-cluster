@@ -13,6 +13,8 @@ on:
 jobs:
   static:
     runs-on: ubuntu-latest
+    env:
+      MEMORY_GUARD_IMAGE: python@sha256:20a82dbc2783112ddb91d1534603f802d222a3e63e593cd002eb2ac534e70211
     steps:
       - uses: actions/checkout@v7
 
@@ -60,8 +62,24 @@ jobs:
       - name: Install pinned collections
         run: ansible-galaxy collection install -r requirements.yml
 
+      - name: Prepare real guard test prerequisites
+        run: |
+          docker info > /dev/null
+          docker pull "$MEMORY_GUARD_IMAGE"
+          if [ ! -x /usr/sbin/sshd ]; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends openssh-server
+          fi
+          sudo install -d -o root -g root -m 0755 /usr/local/libexec
+          sudo install -o root -g root -m 0755 \
+            workspaces/inference/tensorfold-2node-glm53-flash-exl3/container_signal.py \
+            /usr/local/libexec/gx10-container-signal
+
       - name: yamllint
         run: yamllint .
+
+      - name: Prepare immutable public backport source fixtures
+        run: make glm-backport-fixtures
 
       # Exactly what `make check` runs locally - lint, syntax, smoke, render -
       # so "CI is green" and "make check passes" cannot drift apart.

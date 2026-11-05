@@ -79,3 +79,4 @@ docs/status/
 docs/validation/*
 !docs/validation/glm-deepseek-selection-2026-11-01.json
 !docs/validation/glm-deepseek-selection-2026-11-01.md
+!docs/validation/glm-backports-node-protection-2026-11-05.json

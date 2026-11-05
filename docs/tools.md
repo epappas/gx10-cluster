@@ -19,6 +19,7 @@ and, where they lie to you on this hardware, in
 | [`gx10-status`](#gx10-status) | `roles/monitoring` | What is this box doing right now? |
 | [`gx10-top`](#gx10-top) | `roles/monitoring` | What is the **cluster** doing right now? |
 | [`gx10-sample`](#gx10-sample) | `roles/monitoring` | What was it doing at 03:00? |
+| [`gx10-rca`](#gx10-rca) | `roles/monitoring` | What evidence survived an inference failure or host restart? |
 | [`gx10-storage`](#gx10-storage) | `roles/monitoring` | Where did the disk go, and what can I get back? |
 | [`gx10-interconnect`](#gx10-interconnect) | `roles/cluster` | Are the two boxes connected, and over what? |
 | [`vllm-serve`](#vllm-serve) | `roles/inference` | Serve one model, one node, no ceremony |
@@ -71,6 +72,36 @@ Get that backwards and the tool works perfectly by hand and fails only in the
 ## On the node
 
 Present after `make apply`. All are on `PATH` for a login shell.
+
+### gx10-rca
+
+Read-only incident capture for the local node and an optional SSH peer. Run as
+your normal user; `--sudo` permits non-interactive journal reads only.
+
+```bash
+umask 077
+case_dir="$HOME/rca-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+gx10-rca --sudo --peer poseidon --output "$case_dir"
+gx10-rca --report "$case_dir/evidence.json"
+```
+
+Defaults select GLM (`glm53-flash-tf`, cache/log name `tensorfold-glm53`).
+`--kit` and `--container` select another deployment. Captures contain current
+and previous boot records, selected container state and bounded telemetry;
+no environment variables or engine logs are collected by default.
+
+Directories are created `0700`, evidence files `0600`, and existing output
+paths are refused. Exit `0` means evidence was written, not that all commands
+succeeded. Read the recorded failures, timeouts and truncation flags.
+`--report` reads a saved file without collecting or contacting any host.
+`--include-engine-logs` explicitly opts into potentially sensitive engine logs.
+
+The fixed, root-owned `/usr/local/libexec/gx10-container-signal` helper is the
+memory guard's Docker-independent emergency path. It requires matching kernel
+process/container identity and existing administrator rights when signalling
+root-owned processes. It adds no sudo rule, daemon or restart policy.
+
+→ [human incident and recovery procedure](runbooks/rca-inference.md)
 
 ### gx10-status
 

@@ -13,9 +13,9 @@ source ../../lib/kit.sh
 # shellcheck source-path=SCRIPTDIR source=memory_guard.sh
 source ./memory_guard.sh
 
-KIT_URL=${KIT_URL:-https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold.git}
-KIT_SHA=3fd60dfc836fab0f1ed0fd4f0afaf2a1d62b2aab
-KIT_NAME=glm53-flash-tensorfold
+KIT_URL=${KIT_URL:-https://github.com/epappas/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold.git}
+KIT_SHA=2ba40b5aea52114013f770f73c485483d65089a0
+KIT_NAME=glm53-flash-tensorfold-0118-0121
 
 KD=$(kit_dir) || exit 1
 # The pair from the inventory - the SAME kit_pair up.sh calls (lib/kit.sh):

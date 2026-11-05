@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "scope": "Bounded live inference and node-protection observations; not a full-cache soak or GPU fault-recovery claim.",
+  "runtime_source": {
+    "engine_commit": "c4646171139ee8a3c38103eaa1699dad226ec12b",
+    "kit_base": "3fd60dfc836fab0f1ed0fd4f0afaf2a1d62b2aab",
+    "owner_kit_commit": "2ba40b5aea52114013f770f73c485483d65089a0",
+    "selected_patch_commits": [
+      "1a24d84e15a6aa0082706be66a97e8a59e7bba71",
+      "813dafb92065267ff97c1d8c0a2bbf4f056ee9cb"
+    ],
+    "patch_count": 109,
+    "patch_fingerprint_sha256": "cf77716d4733c1e435e94a948ac91b61adc9a343664c9ede47f499817bdca277",
+    "parent_registry_reference": "ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-tensorfold@sha256:14b5072e8e9918f1080153f57321415a387bc7d78cf9c9b44a7aeae2d4399ccf",
+    "container_registry_publication": false
+  },
+  "module_hashes": {
+    "families/glm5_next/cuda/kept_reasoning.py": {
+      "before": "a7878f3c737859898d83de953a0a4e6eafffa3f5930bbac0b96073994a3be9fa",
+      "after": "71bf5538910351a584db86cab960dd1b37a67e0bc1b17d104e8b16844125797d"
+    },
+    "families/glm5_next/cuda/multi.py": {
+      "before": "3f90da926a0bcb4de124dcd4416b2251c2f96723c05abb17568368314a2b9981",
+      "after": "dcdb026a4d6999baf78968762e94a4f2642ae3d7c5d57e1768e1ce74342c5e3b"
+    },
+    "cuda/health.py": {
+      "before": "f0105a78ca13ad9e3614d1976a148a7e978e13fc49f32ef22313cfba4a98a35f",
+      "after": "2fd9c038278855cd2e536448de4e2edb2773f65239061c756b937a771ca75fbc"
+    },
+    "server/metrics.py": {
+      "before": "9b3cb261c8b21cac847fd16ea772d2c93daf1d1c6d75f6c1af7a1a4162e6d4c1",
+      "after": "f9b123eaaf9ba5a160fca9bc6c248dfb1891639e7bf189d48db2b033ec9cae2d"
+    }
+  },
+  "ranks": [
+    {
+      "role": "rank-0",
+      "observed_at_utc": "2026-11-05T21:30:54.051960+00:00",
+      "image_config_id": "sha256:b1538f2728359db5d68fd4402f5b052a4aa88ccde0aa7160302352616eb4112e",
+      "runtime_module_hashes_match": true,
+      "model_restarted_for_guard_handover": false,
+      "bound_memory_guard_observed": true,
+      "isolated_privileged_fallback": {
+        "docker_socket_unavailable": true,
+        "unprivileged_signal_denied": true,
+        "fixed_root_helper_exit_confirmed": true
+      }
+    },
+    {
+      "role": "rank-1",
+      "observed_at_utc": "2026-11-05T21:30:54.874803+00:00",
+      "image_config_id": "sha256:b1538f2728359db5d68fd4402f5b052a4aa88ccde0aa7160302352616eb4112e",
+      "runtime_module_hashes_match": true,
+      "model_restarted_for_guard_handover": false,
+      "bound_memory_guard_observed": true,
+      "isolated_privileged_fallback": {
+        "docker_socket_unavailable": true,
+        "unprivileged_signal_denied": true,
+        "fixed_root_helper_exit_confirmed": true
+      }
+    }
+  ],
+  "live_api_checks": {
+    "text_and_executed_tool_roundtrips": {
+      "formats": [
+        "chat-completions",
+        "messages"
+      ],
+      "successful_http_calls": 6,
+      "executed_add_result": 42
+    },
+    "stream": {
+      "http": 200,
+      "chunks": 4,
+      "done": true,
+      "finish_stop": true,
+      "content": "STREAM_OK"
+    },
+    "reasoning_history_continuation": {
+      "real_reasoning_chars": 104,
+      "history_reasoning_removed": true,
+      "server_tool_id_replaced": true,
+      "executed_add_result": 42,
+      "final": "42"
+    },
+    "health_metrics": {
+      "ok": true,
+      "context_length": 1048576,
+      "pool_tokens": 1738752,
+      "broken_health_metric": "tensorfold_health:ok 1"
+    }
+  },
+  "verification_boundaries": {
+    "health_tests": "Complete real ARM-image modules with constructor-bypassed state inputs; not injected GPU faults.",
+    "source_and_cpu_tests": "Real pinned source, patch application, Git state and traversal counts; not GPU throughput.",
+    "private_evidence": "Only cryptographic fingerprints are published; raw incident bundles remain private.",
+    "not_established": [
+      "prevention of every hard restart",
+      "long-duration full-cache stability",
+      "fatal GPU or kernel fault recovery"
+    ],
+    "operator_checkout_full_check": "Not passed: local private Ansible configuration intentionally left untouched; legacy Docker-only guard test also failed on the controller."
+  },
+  "private_observation_fingerprints_sha256": {
+    "rank-0/privileged-test": "c1fbbf7d176850fcdd4bc50846bbd8e544689b89fdecdc1e627c7546988e39d0",
+    "rank-0/before-guard-change": "657743d6bd669b7ce9e80db84107a28e524864fd62db9b35883b6a03f4ef5516",
+    "rank-0/final-guard-state": "6d0b84f13c9cc1399907f7fa4dd73434266c06261475c1123c32c1cd43301d31",
+    "rank-0/runtime-module-identity": "d502376d1e9175cb96579ab501af1dcc31ca62c14318af78825b5d48efc07499",
+    "rank-1/privileged-test": "6acb4b550710d789e51c8403776f890f4b4dcaf97eed4f56c896348231b7c0bc",
+    "rank-1/before-guard-change": "c4658292963c400e40932d5dec5026350e9bc60ab7310218e5f141e569de5f5d",
+    "rank-1/final-guard-state": "16802914de74b2c27cfa4e443aa6192932ed73072ab86c912699ab088b28063b",
+    "rank-1/runtime-module-identity": "c64230df5f1943181feb4598230f8e8c1f7ab2dde5a83ec98602ef4ae7d28591"
+  }
+}

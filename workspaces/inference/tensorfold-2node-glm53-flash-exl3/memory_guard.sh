@@ -85,7 +85,7 @@ guard_start_snippet() {
     guard_check_snippet
     cat <<SH
 : > "\$run/startup"
-setsid python3 "\$dir/memory_guard.py" --container '$GUARD_CONTAINER' \
+setsid python3 -I -B "\$dir/memory_guard.py" --container '$GUARD_CONTAINER' \
     --startup-file "\$run/startup" --ready-file "\$run/ready" --status-file "\$run/status" \
     --log "\$dir/logs/memguard.log" </dev/null >/dev/null 2>>"\$dir/logs/memguard.log" &
 pid=\$!

@@ -1,0 +1,513 @@
+#!/usr/bin/env python3
+"""Collect bounded, read-only GX10 inference incident evidence."""
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import re
+import selectors
+import shlex
+import signal
+import socket
+import stat
+import subprocess
+import sys
+import time
+import unicodedata
+from typing import Sequence, TypedDict, cast
+
+DEFAULT_KIT = "tensorfold-glm53"
+DEFAULT_CONTAINER = "glm53-flash-tf"
+DEFAULT_TIMEOUT = 8.0
+DEFAULT_MAX_OUTPUT = 16_384
+REMOTE_MAX_OUTPUT = 2_000_000
+
+
+class Finding(TypedDict):
+    source: str
+    kind: str
+    detail: str
+
+
+class CommandResult(TypedDict):
+    command: list[str]
+    exit_code: int | None
+    timed_out: bool
+    process_reaped: bool
+    output: str
+    output_bytes: int
+    output_truncated: bool
+    duration_seconds: float
+
+
+class FileResult(TypedDict):
+    status: str
+    output: str
+    bytes_read: int
+    truncated: bool
+
+
+class Evidence(TypedDict, total=False):
+    schema_version: int
+    captured_at: str
+    host: dict[str, object]
+    kit: str
+    container: str
+    commands: dict[str, CommandResult]
+    files: dict[str, FileResult]
+    findings: list[Finding]
+    engine_logs_sensitive_opt_in: bool
+    peer: dict[str, object]
+
+
+def add_finding(findings: list[Finding], source: str, kind: str, detail: str) -> None:
+    findings.append({"source": source, "kind": kind, "detail": detail})
+
+
+def stop_process(process: subprocess.Popen[bytes]) -> bool:
+    if process.poll() is not None:
+        return True
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=0.2)
+        return True
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=0.2)
+        return True
+    except subprocess.TimeoutExpired:
+        return False
+
+
+def send_child_input(selector: selectors.BaseSelector, key: selectors.SelectorKey,
+                     pending: memoryview) -> memoryview:
+    try:
+        written = os.write(key.fd, pending[:65_536])
+    except BlockingIOError:
+        return pending
+    except BrokenPipeError:
+        written = len(pending)
+    remaining = pending[written:]
+    if not remaining:
+        selector.unregister(key.fileobj)
+        key.fileobj.close()
+    return remaining
+
+
+def receive_child_output(selector: selectors.BaseSelector, key: selectors.SelectorKey,
+                         captured: bytearray, max_output_bytes: int) -> int:
+    chunk = os.read(key.fd, 8192)
+    if not chunk:
+        selector.unregister(key.fileobj)
+        key.fileobj.close()
+        return 0
+    captured.extend(chunk[:max(0, max_output_bytes - len(captured))])
+    return len(chunk)
+
+
+def capture_process(process: subprocess.Popen[bytes], input_data: bytes | None,
+                    deadline: float, max_output_bytes: int) -> tuple[bytes, int, bool, bool]:
+    assert process.stdout is not None
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ, "output")
+    pending = memoryview(input_data or b"")
+    if process.stdin is not None and pending:
+        os.set_blocking(process.stdin.fileno(), False)
+        selector.register(process.stdin, selectors.EVENT_WRITE, "input")
+    elif process.stdin is not None:
+        process.stdin.close()
+    captured = bytearray()
+    observed = 0
+    timed_out = False
+    reaped = True
+    try:
+        while selector.get_map() or process.poll() is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out, reaped = True, stop_process(process)
+                break
+            for key, _ in selector.select(min(remaining, 0.1)):
+                if key.data == "input":
+                    pending = send_child_input(selector, key, pending)
+                else:
+                    observed += receive_child_output(selector, key, captured, max_output_bytes)
+    finally:
+        selector.close()
+        for stream in (process.stdin, process.stdout):
+            if stream is not None and not stream.closed:
+                stream.close()
+    if process.poll() is None and not timed_out:
+        timed_out, reaped = True, stop_process(process)
+    elif process.poll() is None:
+        reaped = False
+    else:
+        reaped = True
+    return bytes(captured), observed, timed_out, reaped
+
+
+def run_command(argv: Sequence[str], timeout: float, max_output_bytes: int,
+                input_data: bytes | None = None) -> CommandResult:
+    started = time.monotonic()
+    try:
+        process = subprocess.Popen(
+            list(argv), stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
+        )
+    except OSError as error:
+        text = f"{type(error).__name__}: {error}"
+        return {"command": list(argv), "exit_code": None, "timed_out": False, "process_reaped": True,
+                "output": text, "output_bytes": len(text.encode()), "output_truncated": False,
+                "duration_seconds": time.monotonic() - started}
+    captured, observed, timed_out, reaped = capture_process(
+        process, input_data, started + timeout, max_output_bytes,
+    )
+    return {"command": list(argv), "exit_code": process.returncode, "timed_out": timed_out,
+            "process_reaped": reaped, "output": captured.decode("utf-8", errors="replace"),
+            "output_bytes": observed, "output_truncated": observed > len(captured),
+            "duration_seconds": time.monotonic() - started}
+
+
+def record_command(commands: dict[str, CommandResult], findings: list[Finding], name: str,
+                   argv: Sequence[str], timeout: float, max_output_bytes: int,
+                   input_data: bytes | None = None) -> CommandResult:
+    result = run_command(argv, timeout, max_output_bytes, input_data)
+    commands[name] = result
+    if result["timed_out"]:
+        add_finding(findings, name, "timeout", "command exceeded its time limit")
+    elif result["exit_code"] is None:
+        add_finding(findings, name, "unavailable", result["output"])
+    elif result["exit_code"] != 0:
+        add_finding(findings, name, "command_failed", f"exit status {result['exit_code']}")
+    if not result["process_reaped"]:
+        add_finding(findings, name, "unconfirmed_process", "timed-out child was not reaped within bounded termination waits")
+    if result["output_truncated"]:
+        add_finding(findings, name, "output_truncated", "captured output reached the configured byte limit")
+    return result
+
+
+def read_bounded(path: Path, max_bytes: int, max_lines: int | None = None) -> FileResult:
+    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                return {"status": "not_regular_file", "output": "", "bytes_read": 0, "truncated": False}
+            if info.st_size == 0 or path.is_relative_to(Path("/proc")):
+                raw = stream.read(max_bytes + 1)
+                truncated = len(raw) > max_bytes
+                raw = raw[:max_bytes]
+            else:
+                stream.seek(max(0, info.st_size - max_bytes))
+                raw = stream.read(max_bytes)
+                truncated = info.st_size > max_bytes
+    except FileNotFoundError:
+        return {"status": "missing", "output": "", "bytes_read": 0, "truncated": False}
+    except PermissionError as error:
+        return {"status": "denied", "output": str(error), "bytes_read": 0, "truncated": False}
+    except OSError as error:
+        return {"status": "unavailable", "output": f"{type(error).__name__}: {error}",
+                "bytes_read": 0, "truncated": False}
+    text = raw.decode("utf-8", errors="replace")
+    if max_lines is not None:
+        text = "\n".join(text.splitlines()[-max_lines:])
+    return {"status": "ok", "output": text, "bytes_read": len(raw), "truncated": truncated}
+
+
+def record_file(files: dict[str, FileResult], findings: list[Finding], name: str,
+                path: Path, max_bytes: int, max_lines: int | None = None) -> FileResult:
+    result = read_bounded(path, max_bytes, max_lines)
+    files[name] = result
+    if result["status"] != "ok":
+        add_finding(findings, name, result["status"], result["output"] or f"{path} is unavailable")
+    if result["truncated"]:
+        add_finding(findings, name, "file_truncated", "tail is bounded to the configured byte limit")
+    return result
+
+
+def journal_storage(findings: list[Finding]) -> dict[str, object]:
+    base = Path("/etc/systemd/journald.conf")
+    dropins = Path("/etc/systemd/journald.conf.d")
+    available_dropins = sorted(dropins.glob("*.conf"))
+    paths = [base] + available_dropins[:32]
+    if len(available_dropins) > 32:
+        add_finding(findings, "journal_config", "file_list_truncated", "only the first 32 drop-ins were inspected")
+    directives: list[dict[str, str]] = []
+    checked: list[str] = []
+    for path in paths:
+        result = read_bounded(path, 65_536)
+        checked.append(str(path))
+        if result["status"] != "ok":
+            add_finding(findings, "journal_config", result["status"], f"{path}: {result['output']}")
+            continue
+        in_journal_section = False
+        for line in result["output"].splitlines():
+            value = line.strip()
+            if value.startswith("[") and value.endswith("]"):
+                in_journal_section = value == "[Journal]"
+            elif in_journal_section and value.startswith("Storage="):
+                directives.append({"file": str(path), "value": value.partition("=")[2]})
+    return {"files_checked": checked, "storage_directives": directives}
+
+
+def journal_directory(findings: list[Finding]) -> dict[str, object]:
+    path = Path("/var/log/journal")
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        add_finding(findings, "journal_directory", "missing", f"{path} does not exist")
+        return {"path": str(path), "status": "missing"}
+    except OSError as error:
+        add_finding(findings, "journal_directory", "unavailable", f"{type(error).__name__}: {error}")
+        return {"path": str(path), "status": "unavailable"}
+    if stat.S_ISLNK(info.st_mode):
+        add_finding(findings, "journal_directory", "symlink", "directory metadata was not followed")
+        return {"path": str(path), "status": "symlink"}
+    status = "directory" if stat.S_ISDIR(info.st_mode) else "not_directory"
+    if status != "directory":
+        add_finding(findings, "journal_directory", status, f"{path} is not a directory")
+    return {"path": str(path), "status": status, "mode": oct(stat.S_IMODE(info.st_mode))}
+
+
+def collect_local(kit: str, container: str, timeout: float, max_output_bytes: int,
+                  use_sudo: bool, include_engine_logs: bool) -> Evidence:
+    findings: list[Finding] = []
+    commands: dict[str, CommandResult] = {}
+    files: dict[str, FileResult] = {}
+    evidence: Evidence = {
+        "schema_version": 1, "captured_at": datetime.now(timezone.utc).isoformat(),
+        "host": {"hostname": socket.gethostname()}, "kit": kit, "container": container,
+        "commands": commands, "files": files, "findings": findings,
+        "engine_logs_sensitive_opt_in": include_engine_logs,
+    }
+    record_file(files, findings, "host_boot_id", Path("/proc/sys/kernel/random/boot_id"), 256)
+    record_file(files, findings, "memory", Path("/proc/meminfo"), 4096)
+    record_file(files, findings, "memory_pressure", Path("/proc/pressure/memory"), 4096)
+    guard = Path.home() / ".cache" / kit / "logs" / "memguard.log"
+    record_file(files, findings, "guard_tail", guard, 16_384, 30)
+
+    template = "{{.Id}} status={{.State.Status}} started={{.State.StartedAt}} " \
+        "finished={{.State.FinishedAt}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} " \
+        "restarts={{.RestartCount}} image={{.Config.Image}} restart_policy={{.HostConfig.RestartPolicy.Name}}"
+    record_command(commands, findings, "docker_inspect", ["docker", "inspect", "--format", template, container],
+                   timeout, max_output_bytes)
+    record_command(commands, findings, "gpu_telemetry", ["nvidia-smi", "--query-gpu=index,temperature.gpu,power.draw",
+                   "--format=csv,noheader,nounits"], timeout, max_output_bytes)
+
+    sudo_prefix = ["sudo", "-n"] if use_sudo else []
+    journal = sudo_prefix + ["journalctl"]
+    record_command(commands, findings, "journal_boot_list", journal + ["--list-boots", "--no-pager"],
+                   timeout, max_output_bytes)
+    record_command(commands, findings, "journal_disk_usage", journal + ["--disk-usage"],
+                   timeout, max_output_bytes)
+    for label, boot in (("current", "0"), ("previous", "-1")):
+        record_command(commands, findings, f"kernel_{label}", journal + ["-b", boot, "-k", "--no-pager",
+                       "--output=short-iso", "-n", "80"], timeout, max_output_bytes)
+        record_command(commands, findings, f"docker_{label}", journal + ["-b", boot, "-u", "docker.service",
+                       "--no-pager", "--output=short-iso", "-n", "80"], timeout, max_output_bytes)
+    evidence["journal_persistence"] = {
+        "directory": journal_directory(findings), "configuration": journal_storage(findings),
+    }
+    if include_engine_logs:
+        record_command(commands, findings, "engine_logs_sensitive_opt_in",
+                       ["docker", "logs", "--tail", "12", "--timestamps", container],
+                       timeout, max_output_bytes)
+    return evidence
+
+
+def validate_selection(kit: str, container: str, peer: str | None) -> None:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", kit):
+        raise ValueError("kit must be one path-safe name")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", container):
+        raise ValueError("container must be one Docker name or ID")
+    if peer is not None and not re.fullmatch(r"(?:[A-Za-z0-9_.][A-Za-z0-9_.-]*@)?[A-Za-z0-9][A-Za-z0-9.-]*", peer):
+        raise ValueError("peer must be a known-host SSH alias or user@host")
+
+
+def ssh_argv(host: str, remote_args: Sequence[str]) -> list[str]:
+    return ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+            "-o", "ConnectTimeout=5", "-o", "ClearAllForwardings=yes", "--", host,
+            shlex.join(remote_args)]
+
+
+def collect_peer(host: str, kit: str, container: str, timeout: float, max_output_bytes: int,
+                 use_sudo: bool, include_engine_logs: bool) -> dict[str, object]:
+    remote_args = ["python3", "-I", "-", "--local", "--json", "--kit", kit,
+                   "--container", container, "--command-timeout", str(timeout),
+                   "--max-output-bytes", str(max_output_bytes)]
+    if use_sudo:
+        remote_args.append("--sudo")
+    if include_engine_logs:
+        remote_args.append("--include-engine-logs")
+    result = run_command(ssh_argv(host, remote_args), 120.0, REMOTE_MAX_OUTPUT,
+                         Path(__file__).read_bytes())
+    peer: dict[str, object] = {
+        "host": host, "transport": {"exit_code": result["exit_code"], "timed_out": result["timed_out"],
+        "output_bytes": result["output_bytes"], "output_truncated": result["output_truncated"]},
+    }
+    if result["timed_out"] or result["exit_code"] != 0:
+        peer["findings"] = [{"source": "ssh", "kind": "transport_failed",
+                             "detail": f"exit={result['exit_code']} timeout={result['timed_out']}"}]
+    elif result["output_truncated"]:
+        peer["findings"] = [{"source": "ssh", "kind": "response_truncated",
+                             "detail": "remote JSON exceeded the transport byte limit"}]
+    else:
+        try:
+            peer["evidence"] = json.loads(result["output"])
+        except json.JSONDecodeError as error:
+            peer["findings"] = [{"source": "ssh", "kind": "invalid_response", "detail": str(error)}]
+    return peer
+
+
+def create_output_dir(path: Path) -> Path:
+    target = path.absolute()
+    if target.is_symlink() or target.exists():
+        raise FileExistsError(f"refusing existing output path: {target}")
+    if not target.parent.is_dir():
+        raise FileNotFoundError(f"output parent must already exist: {target.parent}")
+    target.mkdir(mode=0o700)
+    os.chmod(target, 0o700, follow_symlinks=False)
+    return target
+
+
+def write_evidence(directory: Path, evidence: Evidence) -> Path:
+    destination = directory / "evidence.json"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(destination, flags, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        os.fchmod(stream.fileno(), 0o600)
+        json.dump(evidence, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+    return destination
+
+
+def display_text(value: object) -> str:
+    text = str(value)
+    return "".join(char if char in "\n\t" or unicodedata.category(char) not in {"Cc", "Cf"}
+                   else f"\\u{ord(char):04x}" for char in text)
+
+
+def report_host(evidence: Evidence) -> None:
+    host = evidence.get("host", {})
+    print("\nHOST:", display_text(host))
+    print("CAPTURED:", display_text(evidence.get("captured_at", "unknown")))
+    for name, result in evidence.get("files", {}).items():
+        print(f"\nFILE {display_text(name)} [{display_text(result.get('status'))}]")
+        print(display_text(result.get("output", "")))
+    for name, result in evidence.get("commands", {}).items():
+        print(display_text(f"\nCOMMAND {name}: exit={result.get('exit_code')} "
+                           f"timeout={result.get('timed_out')} truncated={result.get('output_truncated')} "
+                           f"reaped={result.get('process_reaped')}"))
+        print(display_text(result.get("output", "")))
+    print("\nFINDINGS (observations, not a root-cause verdict):")
+    for finding in evidence.get("findings", []):
+        print("-", display_text(finding))
+    if not evidence.get("findings"):
+        print("No collector failures recorded. This does not prove the host is healthy.")
+
+
+def validate_evidence(value: object) -> Evidence:
+    if not isinstance(value, dict) or value.get("schema_version") != 1:
+        raise ValueError("unsupported evidence schema")
+    for name in ("files", "commands"):
+        section = value.get(name, {})
+        if not isinstance(section, dict) or not all(isinstance(item, dict) for item in section.values()):
+            raise ValueError(f"invalid {name} section")
+    if not isinstance(value.get("findings", []), list):
+        raise ValueError("invalid findings section")
+    return cast(Evidence, value)
+
+
+def render_report(path: Path) -> None:
+    source = read_bounded(path, 8_000_000)
+    if source["status"] != "ok" or source["truncated"]:
+        raise ValueError("report must be a readable regular file no larger than eight megabytes")
+    evidence = validate_evidence(json.loads(source["output"]))
+    report_host(evidence)
+    peer = evidence.get("peer")
+    if not isinstance(peer, dict):
+        return
+    print("\nPEER TRANSPORT:", display_text(peer.get("transport", {})))
+    for finding in peer.get("findings", []):
+        print("PEER FINDING:", display_text(finding))
+    remote = peer.get("evidence")
+    if isinstance(remote, dict):
+        report_host(validate_evidence(remote))
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--report", type=Path, help="read saved evidence as plain text; never collect or contact hosts")
+    parser.add_argument("--output", type=Path, help="new evidence directory (created 0700; evidence file 0600)")
+    parser.add_argument("--kit", default=DEFAULT_KIT, help="cache/log name under ~/.cache (default: tensorfold-glm53)")
+    parser.add_argument("--container", default=DEFAULT_CONTAINER, help="container name (default: glm53-flash-tf)")
+    parser.add_argument("--peer", help="optional existing SSH alias or user@host; known-host verification is required")
+    parser.add_argument("--sudo", action="store_true", help="use sudo -n only for journalctl reads")
+    parser.add_argument("--include-engine-logs", action="store_true",
+                        help="opt in to a sensitive 12-line container engine log tail")
+    parser.add_argument("--command-timeout", type=float, default=DEFAULT_TIMEOUT,
+                        help="seconds per local command (default: 8; maximum: 60)")
+    parser.add_argument("--max-output-bytes", type=int, default=DEFAULT_MAX_OUTPUT,
+                        help="maximum captured bytes per command (default: 16384; range: 1024-65536)")
+    parser.add_argument("--local", action="store_true", help="collect this host only; intended for stdin/SSH execution")
+    parser.add_argument("--json", action="store_true", help="write JSON to stdout; requires --local")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.report is not None:
+        if args.output or args.peer or args.local or args.json or args.sudo or args.include_engine_logs:
+            parser.error("--report cannot be combined with capture options")
+        try:
+            render_report(args.report)
+        except (OSError, ValueError, RecursionError) as error:
+            parser.error(f"cannot read evidence report: {error}")
+        return 0
+    try:
+        validate_selection(args.kit, args.container, args.peer)
+    except ValueError as error:
+        parser.error(str(error))
+    if not 0 < args.command_timeout <= 60:
+        parser.error("--command-timeout must be greater than 0 and no more than 60 seconds")
+    if not 1024 <= args.max_output_bytes <= 65_536:
+        parser.error("--max-output-bytes must be between 1024 and 65536")
+    if args.local != args.json:
+        parser.error("--local and --json must be used together")
+    if args.local and (args.output is not None or args.peer is not None):
+        parser.error("--local --json cannot write files or contact peers")
+    if not args.local and args.output is None:
+        parser.error("--output DIR is required for a local evidence file")
+
+    evidence = collect_local(args.kit, args.container, args.command_timeout, args.max_output_bytes,
+                             args.sudo, args.include_engine_logs)
+    if args.local:
+        json.dump(evidence, sys.stdout, sort_keys=True)
+        sys.stdout.write("\n")
+        return 0
+    if args.peer is not None:
+        evidence["peer"] = collect_peer(args.peer, args.kit, args.container, args.command_timeout,
+                                        args.max_output_bytes, args.sudo, args.include_engine_logs)
+    try:
+        directory = create_output_dir(args.output)
+        destination = write_evidence(directory, evidence)
+    except OSError as error:
+        parser.error(f"cannot create private evidence output: {error}")
+    print(json.dumps({"evidence_file": str(destination), "findings": len(evidence["findings"])}))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
