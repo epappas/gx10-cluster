@@ -13,8 +13,6 @@ on:
 jobs:
   static:
     runs-on: ubuntu-latest
-    env:
-      MEMORY_GUARD_IMAGE: python@sha256:20a82dbc2783112ddb91d1534603f802d222a3e63e593cd002eb2ac534e70211
     steps:
       - uses: actions/checkout@v7
 
@@ -64,8 +62,10 @@ jobs:
 
       - name: Prepare real guard test prerequisites
         run: |
+          TEST_IMAGE=python@sha256:20a82dbc2783112ddb91d1534603f802d222a3e63e593cd002eb2ac534e70211
           docker info > /dev/null
-          docker pull "$MEMORY_GUARD_IMAGE"
+          docker pull "$TEST_IMAGE"
+          docker tag "$TEST_IMAGE" python:3-alpine
           if [ ! -x /usr/sbin/sshd ]; then
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends openssh-server
