@@ -439,7 +439,7 @@ def check_exits_when_container_goes(tmp: Path) -> None:
 
 
 def check_restart_is_not_blocked(tmp: Path) -> None:
-    """The kit's restart: same name, new container. Old guard leaves, a new one starts."""
+    """A renamed original remains protected until stopped; the successor gets its own guard."""
     name, log = container_name(), tmp / "restart.log"
     start_container(name)
     old = start_guard(name, log, "--soft-gib", TINY_GIB, "--hard-gib", TINY_GIB)
@@ -450,7 +450,10 @@ def check_restart_is_not_blocked(tmp: Path) -> None:
         start_container(successor)
         assert run("docker", "rename", name, retired).returncode == 0
         assert run("docker", "rename", successor, name).returncode == 0
-        assert old.wait(15) == 0, "old guard stayed on a replaced container"
+        assert wait_for(lambda: "cached process protection retained" in text(log), 15), text(log)
+        assert old.poll() is None and is_running(retired), "old guard abandoned its live bound process"
+        assert run("docker", "stop", "-t", "0", retired).returncode == 0
+        assert old.wait(15) == 0, "old guard stayed after its original process stopped"
         fresh = start_guard(name, tmp / "restart2.log", "--soft-gib", TINY_GIB,
                             "--hard-gib", TINY_GIB)
         assert fresh.poll() is None and is_running(name)

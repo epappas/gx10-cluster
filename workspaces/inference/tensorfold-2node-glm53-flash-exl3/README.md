@@ -3,13 +3,16 @@
 **Nodes: 2** · **Memory: see measured minima below** · **Port: 8902** · **Engine: TensorFold v0.6.0** · **Status: `verified` - booted and measured 2026-11-01**
 
 Serves GLM-5.3-Flash (EXL3 4 bpw, `Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold`
-@ `078455ff`) across odysseus + poseidon with
-[MiaAI-Lab's TensorFold GLM kit](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold)
-(Apache-2.0) at a pinned commit — **TP=2 on two Sparks is this kit's reference
-topology**: the exact machine this cluster is. The image is pulled
-**by digest** (`ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-tensorfold@sha256:14b5072e…99ccf`,
-verified against the registry on 2026-10-20), with the kit's 107 engine
-patches already inside it: no local build.
+@ `078455ff`) across odysseus + poseidon with the Apache-2.0 TensorFold GLM kit.
+The selected source is the [owner fork](https://github.com/epappas/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold)
+at `2ba40b5aea52114013f770f73c485483d65089a0`, which adds only patches
+0118 and 0121 to upstream baseline `3fd60df` (109 patches total; source
+fingerprint `cf77716d4733`). The deployed candidate tag is
+`gx10/glm53-flash-tf:0118-0121-2ba40b5` on both nodes. It is an offline
+ARM64 overlay on the immutable upstream parent image
+`ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-tensorfold@sha256:14b5072e8e9918f1080153f57321415a387bc7d78cf9c9b44a7aeae2d4399ccf`.
+That digest identifies the parent, not the candidate: the candidate has not
+been published to a registry and has no registry digest.
 
 ## Why this exists next to the vLLM one
 
@@ -18,7 +21,7 @@ The vLLM kit's own repository now opens with "everyone should use that
 defaults (1M window, PARALLEL=4, fp8 KV, DENSE=q4, DFlash2+copy drafts) against
 this workspace's *measured* vLLM numbers:
 
-| | TensorFold kit claims (1 stream) | [`vllm-2node-glm53-flash-exl3`](../vllm-2node-glm53-flash-exl3/README.md) measured here |
+| | TensorFold upstream published baseline (107-patch source; 1 stream) | [`vllm-2node-glm53-flash-exl3`](../vllm-2node-glm53-flash-exl3/README.md) measured here |
 |---|---|---|
 | decode, prose | 60.4 tok/s | ~27 tok/s at 0.33 acceptance |
 | decode, structured | **114.7 tok/s** | ~62 tok/s at 0.92 |
@@ -28,12 +31,13 @@ this workspace's *measured* vLLM numbers:
 | prompt reuse | identical 64k prompt 34 s → <0.07 s | prefix caching measured live |
 | TTFT, 1 stream | 149–195 ms | 0.54 s |
 
-Roughly **2x on every axis** — with the honesty caveats this repo keeps
-insisting on: their decode figures are corpus-dependent (see
-`bench/decode-content-mix`: prose vs structured differ ~2x on the SAME server),
-the defaults are the **lossy** point (below), and none of this is a number from
-this box. These workspaces' content is not directly comparable until the ladder
-is re-run against 8902.
+The TensorFold column is the kit's published 107-patch baseline, not a local
+measurement of the selected 109-patch candidate. The vLLM column is historical
+measurement from this workspace; this comparison remains a baseline, not a new
+soak result. Decode figures are corpus-dependent (see
+`bench/decode-content-mix`: prose vs structured differ ~2x on the same server),
+and the defaults are the **lossy** point (below). The two workspaces' content is
+not directly comparable until the ladder is re-run against 8902.
 
 ## The quality posture, stated by the kit and worth repeating
 
@@ -78,6 +82,61 @@ this file can make; the default is upstream's (dflash2) and the switch is one
   server (any of them) must be down first. The kit's own budget refuses
   otherwise, and `ws check` refuses here.
 
+## Source and image bootstrap
+
+`up.sh` pins the owner fork at `2ba40b5aea52114013f770f73c485483d65089a0`;
+that commit adds only patches 0118 and 0121 to baseline `3fd60df`. Build the
+local candidate on a native Linux ARM64 Docker host. Run from the repository
+root; the parent digest must be present in the local Docker cache before the
+offline build:
+
+```bash
+set -euo pipefail
+WORKSPACE=workspaces/inference/tensorfold-2node-glm53-flash-exl3
+KIT_DIR="$HOME/src/glm53-flash-tensorfold"
+RECEIPTS="$HOME/.cache/tensorfold-glm53/backport-receipts"
+mkdir -p "$RECEIPTS"
+git clone https://github.com/epappas/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold.git "$KIT_DIR"
+git -C "$KIT_DIR" checkout --detach 2ba40b5aea52114013f770f73c485483d65089a0
+docker pull ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-tensorfold@sha256:14b5072e8e9918f1080153f57321415a387bc7d78cf9c9b44a7aeae2d4399ccf
+python3 -I -B "$WORKSPACE/backports/build.py" build \
+  --kit-dir "$KIT_DIR" \
+  --kit-sha 2ba40b5aea52114013f770f73c485483d65089a0 \
+  --image gx10/glm53-flash-tf:0118-0121-2ba40b5 \
+  --receipt "$RECEIPTS/build-$(date -u +%Y%m%dT%H%M%SZ)-$$.json"
+```
+
+`build.py build` verifies the full fork checkout and approved patch set, builds
+with `--pull=false --network=none --platform=linux/arm64`, then verifies the
+candidate against the cached digest-pinned parent. It does not publish the
+candidate; the parent digest is not a digest for the overlay. `ws up` checks
+the selected source and local candidate image, then the kit's `prepare.sh` runs
+with `PULL=0` to validate and distribute that prebuilt image to the pair. It
+still downloads and prepares the model files on first run.
+
+The public source gate reconstructs the complete package from the exact
+TensorFold and kit Git pins, checks the original 107-patch preimages, and
+applies only the two selected additions. No captured node files or installed
+TensorFold package are needed:
+
+```bash
+make glm-backport-fixtures   # explicit network acquisition of immutable public sources
+make glm-backports          # offline before/after and source-integrity tests
+```
+
+Generated fixtures stay in the worktree's ignored `.private-publication`
+directory. The gate verifies the baseline's expected traversal failures, the
+candidate's passing results, exact module/patch hashes, the real owner-fork
+checkout, and all builder rejection cases. `make check` runs the offline gate;
+CI prepares the public fixtures explicitly first.
+
+That test does not build the Docker image, prove its registry dependencies,
+validate a live model, or measure GPU behavior. The sanitized [2026-11-05
+node-protection receipt](../../../docs/validation/glm-backports-node-protection-2026-11-05.json)
+records bounded deployment evidence, not a soak. The 2026-11-01 boot, replay,
+coding fixture, and low-fill soak remain historical validation; this publication
+update does not claim a new soak or new benchmark result.
+
 ## Running it
 
 ```bash
@@ -87,9 +146,12 @@ ws logs tensorfold-2node-glm53-flash-exl3 -f        # rank 0; rank 1: ssh <peer>
 ws down tensorfold-2node-glm53-flash-exl3           # both ranks and their guards, logs archived by the kit
 ```
 
-First run: the kit's `prepare.sh` pulls the image by digest on both Sparks,
-downloads the checkpoint + DFlash2 at their pinned revisions, makes the RoPE
-tables and validates the MANIFEST, then starts both ranks and smoke-tests.
+Before first run, build the local candidate using the bootstrap steps above.
+`ws up` verifies the pinned owner-fork checkout and candidate image, then the
+kit's `prepare.sh` runs with `PULL=0`: it validates and distributes the
+prebuilt image to both Sparks, downloads the checkpoint + DFlash2 at their
+pinned revisions, makes the RoPE tables, validates the MANIFEST, and starts
+both ranks with a smoke test. It does not pull or publish the candidate image.
 `DRY_RUN=1` prints both ranks' `docker run` lines before anything changes.
 
 Then, pointed at 8902: `vllm-quality-gate` (the kit ships `tools/` checks
@@ -143,20 +205,26 @@ Each node appends UTC timestamps to
 - `recovered: no kill` means no kill was confirmed; an earlier unconfirmed
   attempt is stated explicitly and its state is cleared for the next dip.
 - `killing container` records a decision before asking Docker.
-- `killed container` is emitted **only** after Docker reports success.
-- `kill unconfirmed` and `docker unavailable` are not successful protection.
-  Calls time out after two seconds and retry with backoff, at most five seconds;
-  repeated failures are logged once per episode. Disappearance after a failed
-  kill is never retroactively called a confirmed kill.
+- `killed container` follows a successful Docker kill reply or an identity-verified
+  process exit; the latter states `pidfd exit confirmed`.
+- `cached process exited ... cause unconfirmed` does not identify who ended it.
+- `process fallback armed` records the cached container ID, host PID, process
+  start time and boot ID. The fixed root-owned helper must be installed by the
+  monitoring role; absence is explicitly reported as Docker-only protection.
+- `kill unconfirmed` is not a successful kill. Docker calls time out after two
+  seconds; retries use backoff up to five seconds. A later disappearance is not
+  retroactively called a confirmed kill.
 
-**Protection limits:** container discovery needs a Docker inspection, so there
-is an unguarded interval after creation/replacement (polling every 0.2 s when
-healthy, plus inspection time). The memory sample itself does not need Docker,
-but killing does. A hung/unavailable daemon can prevent a kill completely;
-short timeouts bound the guard's wait, not Docker's response or GPU reclamation.
-Only the local rank is killed, not its peer. No host-memory locking, root process
-or cgroup changes are made. A full disk can lose log evidence but does not stop
-the kill decision. No unconditional protection against machine freezes is claimed.
+**Protection limits:** initial discovery and binding still need Docker. Once
+armed, the guard can use a Linux process handle independently of Docker after
+rechecking the cached identity and exact container cgroup. Existing administrator
+rights are used only for the fixed trusted system helper when required; no new
+sudo rule or root daemon is added. A kernel-blocked process may still resist
+termination, and a successful signal does not guarantee GPU recovery.
+Only the local rank is stopped; coordinated recovery remains an operator action.
+No host-memory locking or cgroup policy changes are made. A full disk can lose
+log evidence but does not stop the kill decision. No unconditional protection
+against machine freezes is claimed. See the [human incident runbook](../../../docs/runbooks/rca-inference.md).
 
 `make memory-guard` exercises real Docker and live memory on the test machine;
 its kit start/load/replacement fixture is **not real GLM**. Separately, the
@@ -223,7 +291,8 @@ coding fixture and was faster on the first repeat. No indefinite uptime,
 
 ## Sources
 
-- [`MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold`](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold) @ `3fd60df`
+- [`epappas/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold`](https://github.com/epappas/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold) @ `2ba40b5aea52114013f770f73c485483d65089a0` (selected source; adds only 0118 and 0121)
+- [`MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold`](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold) @ `3fd60df` (baseline)
 - [`Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold`](https://huggingface.co/Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold) @ `078455ff`
 - [`incoai/GLM-5.3-Flash-DFlash2`](https://huggingface.co/incoai/GLM-5.3-Flash-DFlash2) @ `bf582e4e`
 - `docs/decisions.md#tensorfold-era` — the pass that found this, and what it did to this repo's earlier verdicts

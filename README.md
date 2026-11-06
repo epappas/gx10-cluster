@@ -276,6 +276,7 @@ and a failure table. Start here.
 | See what the machine is doing | [monitoring](docs/runbooks/monitoring.md) |
 | Watch every node live in one screen | [monitoring](docs/runbooks/monitoring.md#cluster-wide) |
 | Update packages without breaking CUDA | [upgrade-drivers](docs/runbooks/upgrade-drivers.md) |
+| Diagnose an inference stop, hard freeze or unexpected reboot | [rca-inference](docs/runbooks/rca-inference.md) |
 | Bring the cluster back after a reboot or power loss | [reboot-recover](docs/runbooks/reboot-recover.md) |
 | Get back in after an SSH lockout | [recover-ssh-lockout](docs/runbooks/recover-ssh-lockout.md) |
 | Fix something that's broken | [troubleshoot](docs/runbooks/troubleshoot.md) |

@@ -3,6 +3,13 @@
 **What** — see what the box is doing, without spending memory to find out.
 **When** — a job is slow, the box is hot, or you want a baseline.
 
+## When inference or a node stops
+
+Use [the incident runbook](rca-inference.md) before restarting anything. It
+covers private evidence capture, reading current/previous boot records,
+Docker-unresponsive recovery, both-node checks and guard rollback. No agent is
+needed: commands identify where to run them and what result to expect.
+
 ## Why the default is a script, not a stack
 
 On this hardware host memory **is** GPU memory. A resident monitoring stack is

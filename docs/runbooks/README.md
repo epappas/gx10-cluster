@@ -26,6 +26,7 @@ table. If you worked something out at 2am, it belongs here.
 | Put a token somewhere safe, or rotate one | [manage-secrets](manage-secrets.md) |
 | Edit code on the box, and drive tmux from the editor | [edit-code](edit-code.md) |
 | Update packages without breaking CUDA | [upgrade-drivers](upgrade-drivers.md) |
+| Diagnose an inference stop, hard freeze or unexpected reboot | [rca-inference](rca-inference.md) |
 | Bring the cluster back after a reboot or power loss | [reboot-recover](reboot-recover.md) |
 | Get back in after an SSH lockout | [recover-ssh-lockout](recover-ssh-lockout.md) |
 | Diagnose anything else | [troubleshoot](troubleshoot.md) |
@@ -53,6 +54,7 @@ fixes it. Otherwise:
 | Interconnect works but you want more out of it | [tune-network](tune-network.md) |
 | Interconnect at ~13 Gbps instead of 200 | [connect-cluster](connect-cluster.md#the-13-gbps-trap) |
 | Interconnect at half speed | [connect-cluster](connect-cluster.md#reading-the-result) |
+| Inference disappeared, Docker hangs, or a node restarted | [rca-inference](rca-inference.md) — evidence first, then controlled recovery |
 | Model OOMs or the box crawls | [serve-models](serve-models.md#when-it-fails) |
 | Unsure whether a model fits before downloading it | [capacity-planning](capacity-planning.md) |
 | Throughput collapses as concurrency rises | [capacity-planning](capacity-planning.md) — you are measuring preemption |

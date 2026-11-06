@@ -1,0 +1,9 @@
+**
+!Dockerfile
+!apply.py
+!manifest.json
+!LICENSE
+!NOTICE
+!patches/
+!patches/0118-glm-broken-health-exit.patch
+!patches/0121-glm-kept-reasoning-linear.patch

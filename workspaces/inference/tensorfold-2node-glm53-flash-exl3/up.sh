@@ -19,9 +19,13 @@ source ../../lib/kit.sh
 # shellcheck source-path=SCRIPTDIR source=memory_guard.sh
 source ./memory_guard.sh
 
-KIT_URL=${KIT_URL:-https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold.git}
-KIT_SHA=3fd60dfc836fab0f1ed0fd4f0afaf2a1d62b2aab
-KIT_NAME=glm53-flash-tensorfold
+WORKSPACE_DIR=$PWD
+KIT_URL=${KIT_URL:-https://github.com/epappas/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold.git}
+KIT_SHA=2ba40b5aea52114013f770f73c485483d65089a0
+KIT_NAME=glm53-flash-tensorfold-0118-0121
+export IMAGE=${IMAGE:-gx10/glm53-flash-tf:0118-0121-2ba40b5}
+export PULL=0
+export TF_GLM_EXIT_ON_BROKEN=0
 
 export PORT=${PORT:-8902}          # 8893 is the vLLM GLM server's port; both may exist while you compare
 export CONTAINER_NAME=${CONTAINER_NAME:-glm53-flash-tf}
@@ -76,11 +80,16 @@ command -v hf >/dev/null 2>&1 || {
 }
 
 kit_fetch || exit 1
+git -C "$KIT_DIR" cat-file -e '3fd60dfc836fab0f1ed0fd4f0afaf2a1d62b2aab^{commit}' 2>/dev/null \
+    || git -C "$KIT_DIR" fetch --quiet --depth=2 origin "$KIT_SHA"
+python3 -I -B "$WORKSPACE_DIR/backports/build.py" verify \
+    --kit-dir "$KIT_DIR" --kit-sha "$KIT_SHA" --image "$IMAGE" \
+    --receipt "${KIT_DIR%/*}/glm53-flash-backport-receipts/verify-$(date -u +%Y%m%dT%H%M%SZ)-$$.json"
 cd "$KIT_DIR" || exit 1
 
 echo
 echo "model    Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold @ 078455ff (Apache-2.0)"
-echo "image    v0.6.0-e66c657a433d pulled BY DIGEST (sha256:14b5072e...ccf) - 107 patches inside"
+echo "image    $IMAGE - verified digest-parent overlay, 109 patches (0118 + 0121 only)"
 echo "pair     rank 0 here :$PORT ; rank 1 on $WORKER over the link ($FABRIC_PEER)"
 echo "weights  $WORKER_WEIGHTS$([[ $WORKER_WEIGHTS == nfs ]] && echo " - the worker stores none of the 164 GiB")"
 echo "defaults PARALLEL=4, CONTEXT=1,048,576, KV=fp8, DENSE=q4, DFlash2+copy drafts"

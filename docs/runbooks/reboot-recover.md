@@ -13,6 +13,11 @@ gx10-top               # what is actually running, right now
 docker ps              # what came back by itself
 ```
 
+For an **unexpected** restart or hard freeze, first follow
+[the incident evidence procedure](rca-inference.md). Save the previous-boot
+records before another restart can obscure the timeline. A new boot alone does
+not establish whether power, a kernel fault or an operator caused it.
+
 ## What survives, and what does not
 
 | | Survives a reboot | Why |

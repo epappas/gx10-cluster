@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "kit_url": "https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold.git",
+  "kit_base": "3fd60dfc836fab0f1ed0fd4f0afaf2a1d62b2aab",
+  "engine_url": "https://github.com/ashhart/TensorFold.git",
+  "engine_base": "c4646171139ee8a3c38103eaa1699dad226ec12b",
+  "parent": "ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-tensorfold@sha256:14b5072e8e9918f1080153f57321415a387bc7d78cf9c9b44a7aeae2d4399ccf",
+  "parent_image_id": "sha256:9b00719301e859f7b790b5c4d80ab1e49ef64bef63d3e7af2f3829cfc32cfee1",
+  "image_extras": "av==18.1.0 xgrammar>=0.2.8,<0.3",
+  "baseline_patch_count": 107,
+  "baseline_source_sha256": "e66c657a433d97d4d46a8026e4effb18f70397ede4a5e8ae8f663c1f5aab5459",
+  "patch_count": 109,
+  "source_sha256": "cf77716d4733c1e435e94a948ac91b61adc9a343664c9ede47f499817bdca277",
+  "patches": [
+    {
+      "file": "0118-glm-broken-health-exit.patch",
+      "commit": "1a24d84e15a6aa0082706be66a97e8a59e7bba71",
+      "sha256": "75d08260775f044aa086336db41c8bf92ef2079e205d34f30b6f85700caac095"
+    },
+    {
+      "file": "0121-glm-kept-reasoning-linear.patch",
+      "commit": "813dafb92065267ff97c1d8c0a2bbf4f056ee9cb",
+      "sha256": "5378b01038f0e17a089ead0fdb024194e6a6818e0c1dcb13820ec046b9d03f3f"
+    }
+  ],
+  "modules": {
+    "families/glm5_next/cuda/kept_reasoning.py": {
+      "before": "a7878f3c737859898d83de953a0a4e6eafffa3f5930bbac0b96073994a3be9fa",
+      "after": "71bf5538910351a584db86cab960dd1b37a67e0bc1b17d104e8b16844125797d"
+    },
+    "families/glm5_next/cuda/multi.py": {
+      "before": "3f90da926a0bcb4de124dcd4416b2251c2f96723c05abb17568368314a2b9981",
+      "after": "dcdb026a4d6999baf78968762e94a4f2642ae3d7c5d57e1768e1ce74342c5e3b"
+    },
+    "cuda/health.py": {
+      "before": "f0105a78ca13ad9e3614d1976a148a7e978e13fc49f32ef22313cfba4a98a35f",
+      "after": "2fd9c038278855cd2e536448de4e2edb2773f65239061c756b937a771ca75fbc"
+    },
+    "server/metrics.py": {
+      "before": "9b3cb261c8b21cac847fd16ea772d2c93daf1d1c6d75f6c1af7a1a4162e6d4c1",
+      "after": "f9b123eaaf9ba5a160fca9bc6c248dfb1891639e7bf189d48db2b033ec9cae2d"
+    }
+  }
+}

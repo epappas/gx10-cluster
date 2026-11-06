@@ -37,6 +37,33 @@
     mode: "0755"
   become: true
 
+- name: Install the bounded incident collector
+  ansible.builtin.copy:
+    src: gx10-rca
+    dest: /usr/local/bin/gx10-rca
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+- name: Ensure the protected helper directory exists
+  ansible.builtin.file:
+    path: /usr/local/libexec
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+- name: Install the identity-verified container process helper
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/workspaces/inference/tensorfold-2node-glm53-flash-exl3/container_signal.py"
+    dest: /usr/local/libexec/gx10-container-signal
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
 # ---------------------------------------------------------------------------
 # History, still with no resident cost.
 #

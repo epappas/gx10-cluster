@@ -52,7 +52,7 @@ help:  ## Show this help
 # --- Checks that run anywhere (and in CI) ----------------------------------
 
 .PHONY: check
-check: lint syntax smoke render handlers optional-tags workspaces detectors quant-ab checkpoint-config spec-accept indexer-workspace prefill-ladder memory-guard agentic-replay ws-status storage docs lockfile shellcheck  ## Every offline check (what CI runs)
+check: lint syntax smoke render handlers optional-tags workspaces detectors quant-ab checkpoint-config spec-accept indexer-workspace prefill-ladder glm-backports memory-guard container-signal guard-fallback rca agentic-replay ws-status storage docs lockfile shellcheck  ## Every offline check (what CI runs)
 
 .PHONY: deps
 deps:  ## Install the pinned collections
@@ -170,6 +170,23 @@ prefill-ladder:  ## The prefill ladder proves a cold rung cold, and a clean run 
 .PHONY: memory-guard
 memory-guard:  ## The GLM memory guard kills at its floors, and only then
 	@python3 tests/check_memory_guard.py
+
+.PHONY: glm-backport-fixtures glm-backports
+glm-backport-fixtures:  ## Explicitly fetch and reconstruct the immutable public test sources
+	@python3 -I -B tests/check_glm_backport_sources.py prepare
+
+glm-backports:  ## Offline real-source before/after and provenance rejection gates
+	@python3 -I -B tests/check_glm_backport_sources.py check
+
+.PHONY: container-signal guard-fallback rca
+container-signal:  ## Real process identity and pidfd termination on disposable containers
+	@python3 -I -B tests/check_container_signal.py
+
+guard-fallback:  ## The guard protects its bound process when Docker cannot answer
+	@python3 -I -B tests/check_guard_fallback.py
+
+rca:  ## Bounded real-host incident capture, privacy and human-readable reporting
+	@python3 -I -B tests/check_rca.py
 
 # Workload determinism, the scorers and the file tools run anywhere. The sandbox
 # and sampler sections run for real where docker on devbox and sshd exist, and
